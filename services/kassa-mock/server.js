@@ -29,8 +29,9 @@
 
 const http = require('http');
 const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
+
+const core = require('../../packages/core');
+const { createLog, readBody, send, sendJson } = core;
 
 const {
   MOCK_HOST = '0.0.0.0',
@@ -50,13 +51,17 @@ const PROCESS_MS = Math.max(0, parseInt(MOCK_PROCESS_MS, 10) || 4000);
 const CALLBACK_RETRY_MS = Math.max(1000, parseInt(MOCK_CALLBACK_RETRY_MS, 10) || 10000);
 const CALLBACK_MAX_ATTEMPTS = Math.max(1, parseInt(MOCK_CALLBACK_MAX_ATTEMPTS, 10) || 24);
 
-const state = {
-  counters: { deviceId: 1001, uuid: Date.now(), fd: 50000, notification: 1 },
-  tokens: {},          // token -> {login, createdAt}
-  receipts: {},        // uuid -> document
-  externalIds: {},     // ExternalId -> uuid (dup detection, как у Ferma)
-  callbacks: {},       // notificationId -> {uuid, url, body, attempts, nextAttemptAt, lastStatus}
-  cashbox: {
+const store = core.createStore({ stateFile: MOCK_STATE_FILE, log: console.error });
+const { state } = store;
+const persist = store.persist;
+
+Object.assign(state, {
+  counters: state.counters || { deviceId: 1001, uuid: Date.now(), fd: 50000, notification: 1 },
+  tokens: state.tokens || {},
+  receipts: state.receipts || {},
+  externalIds: state.externalIds || {},
+  callbacks: state.callbacks || {},
+  cashbox: state.cashbox || {
     deviceId: 0,
     name: 'KASSA-MOCK-1',
     kktState: 'Готова к работе',
@@ -65,35 +70,9 @@ const state = {
     fnVolumePercent: 3,
     downUntil: 0,
   },
-};
+});
 
-function persist() {
-  if (!MOCK_STATE_FILE) return;
-  try {
-    fs.mkdirSync(path.dirname(MOCK_STATE_FILE), { recursive: true });
-    fs.writeFileSync(MOCK_STATE_FILE, JSON.stringify(state));
-  } catch (e) {
-    console.error('[kassa-mock] state persist failed:', e.message);
-  }
-}
-
-function restore() {
-  if (!MOCK_STATE_FILE || !fs.existsSync(MOCK_STATE_FILE)) return;
-  try {
-    const loaded = JSON.parse(fs.readFileSync(MOCK_STATE_FILE, 'utf8'));
-    Object.assign(state, loaded);
-    state.callbacks = state.callbacks || {};
-    console.log('[kassa-mock] state restored from', MOCK_STATE_FILE);
-  } catch (e) {
-    console.error('[kassa-mock] state restore failed:', e.message);
-  }
-}
-
-const nowIso = () => new Date().toISOString().replace('T', ' ').slice(0, 19);
-
-function log(...args) {
-  console.log(`[${nowIso()}]`, ...args);
-}
+const log = createLog('kassa-mock');
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -109,21 +88,9 @@ function errBody(code, text, type = 'system') {
   return JSON.stringify(err(code, text, type));
 }
 
-function send(res, status, body, headers = {}) {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...headers });
-  res.end(typeof body === 'string' ? body : JSON.stringify(body));
-}
-
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', (c) => {
-      data += c;
-      if (data.length > 5 * 1024 * 1024) reject(new Error('body too large'));
-    });
-    req.on('end', () => resolve(data));
-    req.on('error', reject);
-  });
+/** Ответ готовой JSON-строкой (errBody уже стрингифицирован). */
+function jsonRaw(res, code, body) {
+  send(res, code, body, { 'Content-Type': 'application/json; charset=utf-8' });
 }
 
 /** Токен из query (?token=) — как в контракте Ferma. */
@@ -198,6 +165,16 @@ function customerReceiptText(doc) {
   return lines.join('\n');
 }
 
+const deliveryQueue = core.createDeliveryQueue({
+  entries: state.callbacks,
+  retryMs: CALLBACK_RETRY_MS,
+  maxAttempts: CALLBACK_MAX_ATTEMPTS,
+  persist,
+  log,
+  request: (entry) => ({ url: entry.url, data: entry.body }),
+  onSuccess: (entry, res, id) => { delete state.callbacks[id]; },
+});
+
 function scheduleCallback(doc) {
   const url = doc.receipt.receipts?.service?.callback_url
     || doc.receipt.service?.callback_url
@@ -221,42 +198,7 @@ function scheduleCallback(doc) {
   log(`[kassa-mock] doc ${doc.uuid}: callback scheduled -> ${url}`);
 }
 
-function deliverCallback(entryId, entry) {
-  const parsed = new URL(entry.url);
-  const payload = entry.body;
-  const mod = parsed.protocol === 'https:' ? require('https') : require('http');
-  const req = mod.request(parsed, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
-    timeout: 10000,
-  }, (res) => {
-    let body = '';
-    res.on('data', (c) => { body += c; });
-    res.on('end', () => {
-      entry.lastStatus = res.statusCode;
-      const ok = res.statusCode >= 200 && res.statusCode < 300;
-      log(`[kassa-mock] callback -> ${entry.url} : ${res.statusCode} ${body.slice(0, 120)}`);
-      if (ok) {
-        delete state.callbacks[entryId];
-      } else {
-        entry.attempts += 1;
-        entry.nextAttemptAt = Date.now() + CALLBACK_RETRY_MS;
-      }
-      persist();
-    });
-  });
-  req.on('error', (e) => {
-    entry.attempts += 1;
-    entry.lastStatus = `ERR ${e.message}`;
-    entry.nextAttemptAt = Date.now() + CALLBACK_RETRY_MS;
-    log(`[kassa-mock] callback error: ${e.message}, retry #${entry.attempts}`);
-    persist();
-  });
-  req.on('timeout', () => req.destroy(new Error('timeout')));
-  req.write(payload);
-  req.end();
-}
-
+// Тик раз в секунду: «печать чеков» + доставка колбэков (ретраи как у Ferma).
 setInterval(() => {
   const now = Date.now();
 
@@ -292,13 +234,7 @@ setInterval(() => {
     scheduleCallback(doc);
   }
 
-  // Доставка колбэков (ретраи как у Ferma)
-  for (const [id, entry] of Object.entries(state.callbacks)) {
-    if (now >= entry.nextAttemptAt && entry.attempts < CALLBACK_MAX_ATTEMPTS) {
-      if (entry.attempts === 0) entry.attempts = 1;
-      deliverCallback(id, entry);
-    }
-  }
+  deliveryQueue.tick();
 
   // Авто-восстановление «недоступной кассы»
   if (state.cashbox.downUntil && now >= state.cashbox.downUntil) {
@@ -350,7 +286,7 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (req.method === 'GET' && url === '/healthz') {
-      return send(res, 200, { ok: !isDown(), checks: state.cashbox.checksCnt });
+      return sendJson(res, { ok: !isDown(), checks: state.cashbox.checksCnt });
     }
 
     // Текстовая админ-консоль (как у tbank-mock)
@@ -373,7 +309,7 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
 
     // «Касса недоступна» — все possystem-роуты 503
     if (url.startsWith('/possystem/') && isDown()) {
-      return send(res, 503, errBody(0, 'Касса недоступна (MOCK_FERMA_DOWN)'));
+      return jsonRaw(res, 503, errBody(0, 'Касса недоступна (MOCK_FERMA_DOWN)'));
     }
 
     if (req.method === 'POST' && url === '/possystem/v1/getToken') {
@@ -382,25 +318,25 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
       try { creds = JSON.parse(raw || '{}'); } catch { /* fallthrough */ }
       if (creds.login !== MOCK_FERMA_LOGIN || creds.pass !== MOCK_FERMA_PASSWORD) {
         log(`[kassa-mock] getToken DENIED for login=${creds.login}`);
-        return send(res, 200, errBody(14, 'Неверный логин или пароль'));
+        return jsonRaw(res, 200, errBody(14, 'Неверный логин или пароль'));
       }
       const token = crypto.randomBytes(16).toString('hex');
       state.tokens[token] = { login: creds.login, createdAt: Date.now() };
       log(`[kassa-mock] getToken OK for ${creds.login}`);
-      return send(res, 200, JSON.stringify({ error: null, timestamp: new Date().toISOString(), token }));
+      return sendJson(res, { error: null, timestamp: new Date().toISOString(), token });
     }
 
     const sellMatch = /^\/possystem\/v1\/([^/]+)\/(sell|sell_refund|sell_correction)$/.exec(url);
     if (req.method === 'POST' && sellMatch) {
-      if (!checkToken(req.url)) return send(res, 200, errBody(11, 'Не выполнена авторизация'));
+      if (!checkToken(req.url)) return jsonRaw(res, 200, errBody(11, 'Не выполнена авторизация'));
       const raw = await readBody(req);
       let body;
-      try { body = JSON.parse(raw || '{}'); } catch { return send(res, 200, errBody(4, 'Неверный формат запроса')); }
+      try { body = JSON.parse(raw || '{}'); } catch { return jsonRaw(res, 200, errBody(4, 'Неверный формат запроса')); }
 
       const externalId = String(body.external_id || '');
-      if (!externalId) return send(res, 200, errBody(5, 'external_id обязателен'));
+      if (!externalId) return jsonRaw(res, 200, errBody(5, 'external_id обязателен'));
       if (state.externalIds[externalId]) {
-        return send(res, 200, errBody(12, `Идентификатор счёта (external_id) «${externalId}» уже существует`));
+        return jsonRaw(res, 200, errBody(12, `Идентификатор счёта (external_id) «${externalId}» уже существует`));
       }
 
       const doc = createDocument(sellMatch[2], sellMatch[1], body);
@@ -411,21 +347,21 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
         state.externalIds[externalId] = doc.uuid;
         persist();
       }
-      return send(res, 200, JSON.stringify({ uuid: doc.uuid, timestamp: new Date().toISOString(), error: null, status: 'wait' }));
+      return sendJson(res, { uuid: doc.uuid, timestamp: new Date().toISOString(), error: null, status: 'wait' });
     }
 
     const reportMatch = /^\/possystem\/v1\/([^/]+)\/report\/([^/]+)$/.exec(url);
     if (req.method === 'GET' && reportMatch) {
-      if (!checkToken(req.url)) return send(res, 200, errBody(11, 'Не выполнена авторизация'));
+      if (!checkToken(req.url)) return jsonRaw(res, 200, errBody(11, 'Не выполнена авторизация'));
       const doc = state.receipts[reportMatch[2]];
-      if (!doc) return send(res, 200, errBody(10, 'Документ не найден'));
+      if (!doc) return jsonRaw(res, 200, errBody(10, 'Документ не найден'));
       const out = { uuid: doc.uuid, external_id: doc.externalId, group_code: doc.group, type: doc.operation, status: doc.status, timestamp: new Date().toISOString(), error: doc.error, payload: doc.payload };
-      return send(res, 200, JSON.stringify(out));
+      return sendJson(res, out);
     }
 
     if (req.method === 'GET' && url === '/possystem/v1/stats/cashboxes/extended') {
-      if (!checkToken(req.url)) return send(res, 200, errBody(11, 'Не выполнена авторизация'));
-      return send(res, 200, JSON.stringify({
+      if (!checkToken(req.url)) return jsonRaw(res, 200, errBody(11, 'Не выполнена авторизация'));
+      return sendJson(res, {
         Status: isDown() ? 'Fail' : 'Success',
         Data: [{
           deviceId: state.counters.deviceId,
@@ -437,26 +373,26 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
           tariffExpires: '2036-01-01T00:00:00',
         }],
         Errors: [],
-      }));
+      });
     }
 
     // «Доставка чека покупателю»: человекочитаемая страница чека
     const receiptMatch = /^\/receipts\/([^/]+)$/.exec(url);
     if (req.method === 'GET' && receiptMatch) {
       const doc = state.receipts[receiptMatch[1]];
-      if (!doc || doc.status !== 'done') return send(res, 404, errBody(10, 'Чек не найден'));
+      if (!doc || doc.status !== 'done') return jsonRaw(res, 404, errBody(10, 'Чек не найден'));
       return send(res, 200, `<html><head><meta charset="utf-8"><title>Чек ${doc.payload.fiscal_document_number}</title></head>
 <body style="font-family:monospace;background:#eee"><pre>${customerReceiptText(doc)}</pre></body></html>`, { 'Content-Type': 'text/html; charset=utf-8' });
     }
 
-    return send(res, 404, errBody(404, 'Неизвестный маршрут'));
+    return jsonRaw(res, 404, errBody(404, 'Неизвестный маршрут'));
   } catch (e) {
     log('[kassa-mock] handler error:', e.message);
-    return send(res, 500, errBody(500, e.message));
+    return jsonRaw(res, 500, errBody(500, e.message));
   }
 });
 
-restore();
+store.restore();
 
 // MOCK_FERMA_DOWN_MS: авто-восстановление задаётся и при старте
 if (process.env.MOCK_FERMA_DOWN === 'true' || process.env.MOCK_FERMA_DOWN === '1') {

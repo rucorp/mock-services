@@ -15,8 +15,10 @@
 
 const http = require('http');
 const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
+
+const core = require('../../packages/core');
+const { readBody, parseBody, send, sendJson, html, postJson } = core;
+const log = core.createLog('tbank-mock');
 
 const {
   MOCK_HOST = '0.0.0.0',
@@ -45,42 +47,25 @@ const AUTO_CONFIRM_MS = Math.max(0, parseInt(MOCK_AUTO_CONFIRM_MS, 10) || 0);
 
 /* ------------------------------------------------------------------ store */
 
-const state = {
+const store = core.createStore({ stateFile: MOCK_STATE_FILE, log: console.error });
+const persist = store.persist;
+const restore = store.restore;
+const { state } = store;
+
+Object.assign(state, {
   // База счётчика платежей из времени старта: состояние в памяти, и после
   // рестарта контейнера счётчик с фиксированной базой начинал выдавать уже
   // использованные id (unique violation в payments.provider_payment_id).
   // Date.now()-база делает id уникальными для любого времени жизни процесса.
-  counters: { paymentId: Date.now(), dealId: 50000, cardId: 80000, notificationId: 1, verificationId: 7000000, incomingId: 1, payoutId: 900000 },
-  payments: {},   // paymentId -> payment
-  deals: {},      // spAccumulationId -> deal
-  verifications: {}, // verificationId -> account verification round-trip
-  incoming: {},      // incomingId -> поступление на спец-счёт (VER-платёж МСП)
-  notifications: {}, // notificationId -> {payload, paymentId, attempts, nextAttemptAt, lastStatus, lastBody, dumped}
-  externalRequests: {}, // ExternalRequestId -> {paymentId, status}
-  payouts: {},       // payoutPaymentId -> выплата e2c (Б-5 репетиция)
-};
-
-function persist() {
-  if (!MOCK_STATE_FILE) return;
-  try {
-    fs.mkdirSync(path.dirname(MOCK_STATE_FILE), { recursive: true });
-    fs.writeFileSync(MOCK_STATE_FILE, JSON.stringify(state));
-  } catch (e) {
-    console.error('[mock] state persist failed:', e.message);
-  }
-}
-
-function restore() {
-  if (!MOCK_STATE_FILE || !fs.existsSync(MOCK_STATE_FILE)) return;
-  try {
-    const loaded = JSON.parse(fs.readFileSync(MOCK_STATE_FILE, 'utf8'));
-    Object.assign(state, loaded);
-    state.payouts = state.payouts || {}; // старые state.json без e2c-выплат
-    console.log('[mock] state restored from', MOCK_STATE_FILE);
-  } catch (e) {
-    console.error('[mock] state restore failed:', e.message);
-  }
-}
+  counters: state.counters || { paymentId: Date.now(), dealId: 50000, cardId: 80000, notificationId: 1, verificationId: 7000000, incomingId: 1, payoutId: 900000 },
+  payments: state.payments || {},   // paymentId -> payment
+  deals: state.deals || {},         // spAccumulationId -> deal
+  verifications: state.verifications || {}, // verificationId -> account verification round-trip
+  incoming: state.incoming || {},   // incomingId -> поступление на спец-счёт (VER-платёж МСП)
+  notifications: state.notifications || {}, // notificationId -> {payload, paymentId, attempts, nextAttemptAt, lastStatus, lastBody, dumped}
+  externalRequests: state.externalRequests || {}, // ExternalRequestId -> {paymentId, status}
+  payouts: state.payouts || {},     // payoutPaymentId -> выплата e2c (Б-5 репетиция; старые state.json без e2c)
+});
 
 /* --------------------------------------------------------------- signature */
 
@@ -180,38 +165,29 @@ function currentAmount(payment) {
   return payment.amount;
 }
 
-async function deliverDueNotifications() {
-  const now = Date.now();
-  for (const n of Object.values(state.notifications)) {
-    if (n.dumped || n.nextAttemptAt > now) continue;
-    n.attempts += 1;
-    let ok = false;
-    let status = null;
-    let body = null;
-    try {
-      const res = await postJson(n.url, n.payload, 10000);
-      status = res.statusCode;
-      body = res.body;
-      ok = res.statusCode === 200 && String(res.body || '').trim() === 'OK';
-    } catch (e) {
-      status = null;
-      body = e.message;
-    }
+// Банк подтверждён, когда мерчант ответил 200 с телом «OK» (контракт).
+// После MAX_ATTEMPTS попыток нотификация уходит в dumped (видна в /admin).
+const deliveryQueue = core.createDeliveryQueue({
+  entries: state.notifications,
+  retryMs: RETRY_MS,
+  maxAttempts: MAX_ATTEMPTS,
+  persist,
+  log,
+  request: (n) => ({ url: n.url, data: n.payload }),
+  isOk: (res) => res.statusCode === 200 && String(res.body || '').trim() === 'OK',
+  due: (n) => !n.dumped && n.nextAttemptAt <= Date.now(),
+  prepare: (n) => { n.attempts += 1; },
+  onFailure: (n, status, body) => {
     n.lastStatus = status;
     n.lastBody = body;
-    if (ok) {
-      n.nextAttemptAt = Infinity; // delivered
-      console.log(`[mock] notification ${n.id} delivered (${n.attempts} attempt(s))`);
-    } else if (n.attempts >= MAX_ATTEMPTS) {
+    if (n.attempts >= MAX_ATTEMPTS) {
       n.dumped = true;
-      console.log(`[mock] notification ${n.id} dumped after ${n.attempts} attempts`);
+      log(`notification ${n.id} dumped after ${n.attempts} attempts`);
     } else {
       n.nextAttemptAt = Date.now() + RETRY_MS;
-      console.log(`[mock] notification ${n.id} attempt ${n.attempts} failed (status=${status}), retry in ${RETRY_MS}ms`);
     }
-    persist();
-  }
-}
+  },
+});
 
 /* -------------------------------------------------------------- helpers */
 
@@ -654,70 +630,6 @@ function adminAction(body) {
 
 /* ------------------------------------------------------------------ http */
 
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', (c) => {
-      data += c;
-      if (data.length > 1e6) reject(new Error('body too large'));
-    });
-    req.on('end', () => resolve(data));
-    req.on('error', reject);
-  });
-}
-
-function parseBody(raw, contentType) {
-  if (!raw) return {};
-  if (String(contentType || '').includes('application/json')) {
-    try { return JSON.parse(raw); } catch { return {}; }
-  }
-  const out = {};
-  for (const pair of raw.split('&')) {
-    const idx = pair.indexOf('=');
-    if (idx < 0) continue;
-    out[decodeURIComponent(pair.slice(0, idx).replace(/\+/g, ' '))] = decodeURIComponent(pair.slice(idx + 1).replace(/\+/g, ' '));
-  }
-  return out;
-}
-
-function postJson(url, payload, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const target = new URL(url);
-    const data = JSON.stringify(payload);
-    // Нотификационный URL ядра — https:// (публичный домен за прокси);
-    // http-модулем в 443 банк бы слал plaintext и получал 400.
-    const transport = target.protocol === 'https:' ? require('https') : http;
-    const req = transport.request({
-      hostname: target.hostname,
-      port: target.port || (target.protocol === 'https:' ? 443 : 80),
-      path: target.pathname + target.search,
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
-      timeout: timeoutMs,
-    }, (res) => {
-      let body = '';
-      res.on('data', (c) => { body += c; });
-      res.on('end', () => resolve({ statusCode: res.statusCode, body }));
-    });
-    req.on('timeout', () => req.destroy(new Error('timeout')));
-    req.on('error', reject);
-    req.write(data);
-    req.end();
-  });
-}
-
-function send(res, code, body, headers = {}) {
-  res.writeHead(code, headers);
-  res.end(body);
-}
-
-function sendJson(res, payload) {
-  send(res, 200, JSON.stringify(payload), { 'Content-Type': 'application/json' });
-}
-
-function html(res, body) {
-  send(res, 200, body, { 'Content-Type': 'text/html; charset=utf-8' });
-}
 
 async function route(req, res) {
   const url = new URL(req.url, 'http://x');
@@ -957,7 +869,7 @@ const server = http.createServer((req, res) => {
 });
 
 setInterval(() => {
-  deliverDueNotifications().catch((e) => console.error('[mock] delivery loop:', e));
+  deliveryQueue.tick().catch((e) => console.error('[mock] delivery loop:', e.message));
   if (AUTO_CONFIRM_MS > 0) {
     const deadline = Date.now() - AUTO_CONFIRM_MS;
     for (const payment of Object.values(state.payments)) {
