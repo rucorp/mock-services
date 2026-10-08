@@ -1,0 +1,15 @@
+{
+  "name": "mock-services",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mock bank & fiscal (OFD) services for testing payment integrations against official provider protocols",
+  "scripts": {
+    "test": "npm run test:tbank && npm run test:kassa",
+    "test:tbank": "node services/tbank-mock/selftest.js",
+    "test:kassa": "node services/kassa-mock/selftest.js",
+    "start:tbank": "node services/tbank-mock/server.js",
+    "start:kassa": "node services/kassa-mock/server.js"
+  },
+  "engines": { "node": ">=18" },
+  "license": "Apache-2.0"
+}
