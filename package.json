@@ -1,15 +1,47 @@
 {
   "name": "mock-services",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Mock bank & fiscal (OFD) services for testing payment integrations against official provider protocols",
   "scripts": {
-    "test": "npm run test:tbank && npm run test:kassa",
+    "test": "npm run test:core && npm run test:tbank && npm run test:kassa",
+    "test:core": "node packages/core/selftest.js",
     "test:tbank": "node services/tbank-mock/selftest.js",
     "test:kassa": "node services/kassa-mock/selftest.js",
     "start:tbank": "node services/tbank-mock/server.js",
-    "start:kassa": "node services/kassa-mock/server.js"
+    "start:kassa": "node services/kassa-mock/server.js",
+    "smoke": "node -e \"const h=require('http');for(const [name,url] of [['tbank','http://127.0.0.1:3100/health'],['kassa','http://127.0.0.1:3101/healthz']]){h.get(url,(r)=>console.log(name,r.statusCode)).on('error',(e)=>console.log(name,'нет ответа:',e.message))}\""
   },
-  "engines": { "node": ">=18" },
-  "license": "Apache-2.0"
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "mock",
+    "acquiring",
+    "ofd",
+    "fiscal",
+    "54-fz",
+    "tbank",
+    "ferma",
+    "payments",
+    "testing",
+    "sandbox"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rucorp/mock-services.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rucorp/mock-services/issues"
+  },
+  "homepage": "https://github.com/rucorp/mock-services#readme",
+  "files": [
+    "packages",
+    "services",
+    "docs/integration",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ]
 }

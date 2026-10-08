@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Безопасность
+    url: https://github.com/rucorp/mock-services/blob/main/SECURITY.md
+    about: Уязвимости не в публичный issue — см. SECURITY.md

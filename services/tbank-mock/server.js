@@ -17,8 +17,11 @@ const http = require('http');
 const crypto = require('crypto');
 
 const core = require('../../packages/core');
-const { readBody, parseBody, send, sendJson, html, postJson } = core;
+const { readBody, parseBody, send, sendJson, html, escapeHtml } = core;
 const log = core.createLog('tbank-mock');
+// Журнал входящих запросов: интегратору видно в /admin/journal, как мок понял
+// запрос и что ответил (спека §2 — «журнал запросов»).
+const journal = core.createJournal({ size: 200 });
 
 const {
   MOCK_HOST = '0.0.0.0',
@@ -34,6 +37,8 @@ const {
   MOCK_AUTO_CONFIRM_MS = '0',
   MOCK_STRICT_TOKEN = 'true',
   MOCK_STATE_FILE = '',
+  MOCK_ALLOW_DUPLICATE_ORDER_ID = 'false',
+  MOCK_BLOCK_PRIVATE_WEBHOOKS = 'false',
 } = process.env;
 
 const TERMINAL_KEY = MOCK_TERMINAL_KEY || TBANK_TERMINAL_KEY || 'TBANKMOCKTEST';
@@ -44,6 +49,10 @@ const STRICT_TOKEN = String(MOCK_STRICT_TOKEN).toLowerCase() !== 'false';
 // Bank auto-confirms holds after 4-7 days; here it is accelerated to N ms
 // (0 = disabled, confirm via admin console button instead).
 const AUTO_CONFIRM_MS = Math.max(0, parseInt(MOCK_AUTO_CONFIRM_MS, 10) || 0);
+const ALLOW_DUPLICATE_ORDER_ID = String(MOCK_ALLOW_DUPLICATE_ORDER_ID).toLowerCase() === 'true';
+// Для публичного стенда включайте принудительно: иначе мок становится
+// SSRF-прокси (NotificationURL задаёт интегратор).
+const BLOCK_PRIVATE_WEBHOOKS = String(MOCK_BLOCK_PRIVATE_WEBHOOKS).toLowerCase() === 'true';
 
 /* ------------------------------------------------------------------ store */
 
@@ -92,7 +101,12 @@ function verifyToken(payload) {
   if (!STRICT_TOKEN) return true;
   const given = payload && payload.Token;
   if (!given || typeof given !== 'string') return false;
-  return crypto.timingSafeEqual(Buffer.from(given), Buffer.from(tokenOf(payload)));
+  const expected = tokenOf(payload);
+  // timingSafeEqual бросает RangeError на разной длине — голая проверка
+  // превращала «Token: abc» в 5000 «внутренняя ошибка» вместо кода 13
+  // (дефект A-5 аудита).
+  if (given.length !== expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(given), Buffer.from(expected));
 }
 
 /* ------------------------------------------------------------ test cards */
@@ -175,7 +189,8 @@ const deliveryQueue = core.createDeliveryQueue({
   log,
   request: (n) => ({ url: n.url, data: n.payload }),
   isOk: (res) => res.statusCode === 200 && String(res.body || '').trim() === 'OK',
-  due: (n) => !n.dumped && n.nextAttemptAt <= Date.now(),
+  blockPrivateHosts: BLOCK_PRIVATE_WEBHOOKS,
+  due: (n) => !n.done && !n.dumped && (n.nextAttemptAt || 0) <= Date.now(),
   prepare: (n) => { n.attempts += 1; },
   onFailure: (n, status, body) => {
     n.lastStatus = status;
@@ -197,10 +212,10 @@ const derr = core.createErrorCatalog({
   provider: 'tbank-eacq',
   docsBase: 'https://developer.tbank.ru/eacq',
   codes: {
-    7: { message: 'Обязательные параметры не заполнены или невалидны', field: 'Amount, OrderId', hint: 'Проверьте, что Amount — целое число в копейках больше нуля, а OrderId — непустая строка. Формат суммы — копейки: 100000 = 1000,00 ₽.', doc: '/api/init' },
-    8: { message: 'Объект не найден', field: 'PaymentId | OrderId', hint: 'PaymentId/OrderId не существует в этом стенде. Платёжные сессии живут в памяти/состоянии стенда; после рестарта с пустым MOCK_STATE_FILE старые id недоступны.', doc: '/api/getstate' },
+    7: { message: 'Обязательные параметры не заполнены или невалидны', field: 'Amount, OrderId', hint: 'Проверьте: Amount — целое число в копейках больше нуля (100000 = 1000,00 ₽), OrderId — непустая строка и уникален для каждой операции (повторный Init с тем же OrderId отклоняется — как в банке), сумма Cancel/Confirm не больше доступной суммы платежа.', doc: '/api/init' },
+    8: { message: 'Объект не найден', field: 'PaymentId | OrderId', hint: 'Платёж не найден ни по PaymentId, ни по OrderId (GetState принимает оба). Платёжные сессии живут в состоянии стенда; после рестарта с пустым MOCK_STATE_FILE старые id недоступны.', doc: '/api/getstate' },
     13: { message: 'Неверный Token (подпись) запроса', field: 'Token', hint: 'Подпись = sha256(значения всех top-level скаляров кроме Token/null/\'\' + Password, отсортированные по ключу, в нижнем регистре для boolean). Сверьте с conspectus docs/reference/tbank/02-notifications-signature.md.', doc: '/intro/to-api' },
-    32: { message: 'Операция недоступна в текущем статусе', field: 'PaymentId', hint: 'Перевод платежа запрещён машиной состояний (например, Confirm не из AUTHORIZED). Посмотрите историю статусов в /admin и спеку статусов.', doc: '/api/confirm' },
+    32: { message: 'Операция недоступна в текущем статусе', field: 'PaymentId', hint: 'Переход запрещён машиной состояний: Confirm — только из AUTHORIZED; Cancel — из NEW (CANCELED), AUTHORIZED (REVERSED/PARTIAL_REVERSED), CONFIRMED (REFUNDED/PARTIAL_REFUNDED). История статусов платежа — в /admin.', doc: '/api/confirm' },
     501: { message: 'Метод не поддерживается мок-стендом', hint: 'Стенд реализует волну 1: Init/Confirm/Cancel/GetState/CheckOrder + e2c/AV. Остальные методы — по мере надобности.', doc: '' },
     5000: { message: 'Внутренняя ошибка мок-стенда', hint: 'Смотрите лог сервиса; если воспроизводится — это дефект мока, заводите issue.', doc: '' },
   },
@@ -257,10 +272,29 @@ function dealBalance(deal) {
 
 /* ------------------------------------------------------------- API logic */
 
+function checkTerminalKey(body) {
+  // Правильный TerminalKey — половина успешной интеграции; банк отвечает
+  // ошибкой на чужой терминал, мок раньше принимал любой (дефект A-15).
+  return body && body.TerminalKey === TERMINAL_KEY ? null : err(7, `TerminalKey «${body && body.TerminalKey}» не соответствует стенду (ожидается «${TERMINAL_KEY}»)`);
+}
+
 function handleInit(body) {
+  const badTerminal = checkTerminalKey(body);
+  if (badTerminal) return badTerminal;
   const amount = parseInt(body.Amount, 10);
   if (!body.OrderId || !Number.isFinite(amount) || amount <= 0) {
     return err(7, 'Обязательные параметры не заполнены или невалидны (Amount, OrderId)');
+  }
+  // Официальная дока Init: «OrderId… Должен быть уникальным для каждой
+  // операции». Банк отклоняет повторный Init с тем же OrderId, а мок раньше
+  // молча создавал вторую сессию (дефект A-6 аудита): CheckOrder возвращал
+  // «две попытки» там, где в бою была бы одна, и ломались идемпотентные
+  // повторы Init на ретраях сети.
+  if (!ALLOW_DUPLICATE_ORDER_ID) {
+    const existing = Object.values(state.payments).find((p) => p.orderId === String(body.OrderId));
+    if (existing) {
+      return err(7, `OrderId «${body.OrderId}» уже использован (PaymentId=${existing.paymentId}, статус ${existing.status})`);
+    }
   }
   let dealId = null;
   const createDeal = String(body.CreateDealWithType || '').toUpperCase() === 'NN';
@@ -321,12 +355,32 @@ function handleInit(body) {
 }
 
 function handleGetState(body) {
-  const payment = state.payments[String(body.PaymentId)];
-  if (!payment) return err(8, 'PaymentId не найден');
+  const badTerminal = checkTerminalKey(body);
+  if (badTerminal) return badTerminal;
+  // Дока GetState допускает идентификацию платежа как PaymentId, так и
+  // OrderId; мок понимал только PaymentId, а подсказка ошибки обещала оба
+  // (дефект A-9 аудита).
+  let payment = body.PaymentId ? state.payments[String(body.PaymentId)] : null;
+  if (!payment && body.OrderId) {
+    const found = Object.values(state.payments)
+      .filter((p) => p.orderId === String(body.OrderId))
+      .sort((a, b) => String(b.paymentId).localeCompare(String(a.paymentId)));
+    if (found.length > 1) {
+      return err(
+        7,
+        `По OrderId «${body.OrderId}» найдено платежей: ${found.length}; передайте PaymentId`,
+        `PaymentIds: ${found.map((p) => p.paymentId).join(', ')}`,
+      );
+    }
+    payment = found[0];
+  }
+  if (!payment) return err(8, 'Платёж не найден (ни по PaymentId, ни по OrderId)');
   return baseResponse(payment);
 }
 
 function handleCheckOrder(body) {
+  const badTerminal = checkTerminalKey(body);
+  if (badTerminal) return badTerminal;
   const payments = Object.values(state.payments).filter((p) => p.orderId === String(body.OrderId));
   if (!payments.length) return err(8, 'Заказ не найден');
   return {
@@ -346,10 +400,14 @@ function handleCheckOrder(body) {
 }
 
 function handleConfirm(body) {
+  const badTerminal = checkTerminalKey(body);
+  if (badTerminal) return badTerminal;
   const payment = state.payments[String(body.PaymentId)];
   if (!payment) return err(8, 'PaymentId не найден');
   if (payment.status !== 'AUTHORIZED') {
-    return { ...err(8, `Подтверждение недоступно из статуса ${payment.status}`), PaymentId: payment.paymentId, OrderId: payment.orderId };
+    // A-8: раньше здесь возвращался код 8 («объект не найден») — интегратор
+    // искал несуществующий платёж вместо нарушения порядка статусов.
+    return { ...err(32, `Подтверждение доступно только из статуса AUTHORIZED, сейчас ${payment.status}`), PaymentId: payment.paymentId, OrderId: payment.orderId };
   }
   let amount = payment.amount;
   if (body.Amount !== undefined && body.Amount !== null && body.Amount !== '') {
@@ -371,6 +429,8 @@ function handleConfirm(body) {
 }
 
 function handleCancel(body) {
+  const badTerminal = checkTerminalKey(body);
+  if (badTerminal) return badTerminal;
   const payment = state.payments[String(body.PaymentId)];
   if (!payment) return err(8, 'PaymentId не найден');
 
@@ -382,10 +442,28 @@ function handleCancel(body) {
 
   const before = payment.status;
   const originalAmount = currentAmount(payment);
+  if (before === 'NEW' && body.Amount !== undefined && body.Amount !== null && body.Amount !== '') {
+    // Дока /Cancel: «При отмене операции в статусе NEW поле Amount
+    // игнорируется… Отмена проводится на полную сумму» — так и делаем.
+  }
   let cancelAmount = originalAmount;
   if (body.Amount !== undefined && body.Amount !== null && body.Amount !== '') {
     const a = parseInt(body.Amount, 10);
-    if (Number.isFinite(a) && a > 0 && a < originalAmount) cancelAmount = a;
+    if (!Number.isFinite(a) || a <= 0) {
+      return { ...err(7, 'Некорректная сумма отмены: Amount должен быть целым числом > 0'), PaymentId: payment.paymentId, OrderId: payment.orderId };
+    }
+    // Раньше Amount больше суммы платежа молча игнорировался и выполнялся
+    // ПОЛНЫЙ возврат с Success=true (дефект A-7 аудита) — баг интегратора
+    // («вернули больше, чем приняли») выглядел как успешная операция.
+    if (a > originalAmount) {
+      return {
+        ...err(7, `Сумма отмены ${a} больше доступной суммы ${originalAmount}`),
+        PaymentId: payment.paymentId,
+        OrderId: payment.orderId,
+        OriginalAmount: originalAmount,
+      };
+    }
+    cancelAmount = a;
   }
   const partial = cancelAmount < originalAmount;
 
@@ -398,7 +476,7 @@ function handleCancel(body) {
   };
   const t = transitions[before];
   if (!t) {
-    return { ...err(8, `Отмена недоступна из статуса ${before}`), PaymentId: payment.paymentId, OrderId: payment.orderId };
+    return { ...err(32, `Отмена недоступна из статуса ${before}`), PaymentId: payment.paymentId, OrderId: payment.orderId };
   }
   if (before === 'NEW') {
     setStatus(payment, 'CANCELED'); // no notification per the contract
@@ -447,7 +525,7 @@ function formPage(payment, errorMsg) {
     <h1>Оплата заказа</h1>
     <div class="muted">Тестовый стенд Т-Банк Мультирасчеты · сессия ${payment.paymentId}</div>
     <div class="sum">${(payment.amount / 100).toFixed(2).replace('.', ',')} ₽</div>
-    <div class="muted">Заказ: ${payment.orderId}${payment.dealId ? ` · сделка ${payment.dealId}` : ''} · PayType ${payment.payType}</div>
+    <div class="muted">Заказ: ${esc(payment.orderId)}${payment.dealId ? ` · сделка ${esc(payment.dealId)}` : ''} · PayType ${esc(payment.payType)}</div>
     ${errorMsg ? `<div class="err">${errorMsg}</div>` : ''}
     <form method="POST" action="/payment/${payment.paymentId}/pay">
       <div class="cards">${cardOptions}</div>
@@ -543,7 +621,7 @@ function adminPage() {
   const payments = Object.values(state.payments)
     .sort((a, b) => b.paymentId.localeCompare(a.paymentId))
     .map((p) => {
-      const deal = p.dealId ? ` · сделка ${p.dealId}` : '';
+      const deal = p.dealId ? ` · сделка ${esc(p.dealId)}` : '';
       const actions = [];
       if (p.status === 'AUTHORIZED') {
         actions.push(btn('auto-confirm-hold', p.paymentId, 'банк подтвердил холд'));
@@ -553,32 +631,36 @@ function adminPage() {
       if (p.status === 'CONFIRMED') actions.push(btn('chargeback-payment', p.paymentId, 'эмитент зафиксировал чарджбэк (CHARGEBACK)'));
       if (p.status === 'NEW') actions.push(btn('cancel-new', p.paymentId, 'отменить (NEW→CANCELED)'));
       const hist = p.statusHistory.map((h) => `${h.status}<span style="color:#bbb">@${h.at.slice(11, 19)}</span>`).join('<span style="color:#ccc"> → </span>');
-      return `<tr><td><code>${p.paymentId}</code></td><td>${p.orderId}<div style="font-size:10px;color:#888;margin-top:3px">${hist}</div></td><td>${(p.amount / 100).toFixed(2)}</td><td><b>${p.status}</b></td><td>${deal}</td><td>${actions.join(' ')}</td></tr>`;
+      return `<tr><td><code>${esc(p.paymentId)}</code></td><td>${esc(p.orderId)}<div style="font-size:10px;color:#888;margin-top:3px">${hist}</div></td><td>${(p.amount / 100).toFixed(2)}</td><td><b>${esc(p.status)}</b></td><td>${deal}</td><td>${actions.join(' ')}</td></tr>`;
     })
     .join('') || '<tr><td colspan="6">платежей нет</td></tr>';
 
   const deals = Object.values(state.deals)
-    .map((d) => `<tr><td><code>${d.id}</code></td><td>${d.status}</td><td>${(dealBalance(d) / 100).toFixed(2)} ₽</td></tr>`)
+    .map((d) => `<tr><td><code>${esc(d.id)}</code></td><td>${esc(d.status)}</td><td>${(dealBalance(d) / 100).toFixed(2)} ₽</td></tr>`)
     .join('') || '<tr><td colspan="3">сделок нет</td></tr>';
 
   const incoming = Object.values(state.incoming)
     .sort((a, b) => b.incomingId.localeCompare(a.incomingId))
-    .map((v) => `<tr><td><code>${v.incomingId}</code></td><td>${v.code}</td><td>${(v.amount / 100).toFixed(2)} ₽</td><td>${v.payer.inn}</td><td>${v.payer.name}</td><td>${v.payer.bank} · ${v.payer.account}</td><td><b>${v.status}</b></td></tr>`)
+    .map((v) => `<tr><td><code>${esc(v.incomingId)}</code></td><td>${esc(v.code)}</td><td>${(v.amount / 100).toFixed(2)} ₽</td><td>${esc(v.payer.inn)}</td><td>${esc(v.payer.name)}</td><td>${esc(v.payer.bank)} · ${esc(v.payer.account)}</td><td><b>${esc(v.status)}</b></td></tr>`)
     .join('') || '<tr><td colspan="7">поступлений нет</td></tr>';
 
   const verifs = Object.values(state.verifications)
     .sort((a, b) => b.verificationId.localeCompare(a.verificationId))
-    .map((v) => `<tr><td><code>${v.verificationId}</code></td><td>${v.code}</td><td>${(v.amount / 100).toFixed(2)} ₽</td><td><b>${v.status}</b></td><td>${v.account || '—'}</td></tr>`)
+    .map((v) => `<tr><td><code>${esc(v.verificationId)}</code></td><td>${esc(v.code)}</td><td>${(v.amount / 100).toFixed(2)} ₽</td><td><b>${esc(v.status)}</b></td><td>${esc(v.account || '—')}</td></tr>`)
     .join('') || '<tr><td colspan="5">прогонов нет</td></tr>';
 
   const notifs = Object.values(state.notifications)
     .sort((a, b) => Number(a.id) - Number(b.id))
     .slice(-25)
     .map((n) => {
-      const st = n.dumped ? 'dumped' : n.nextAttemptAt === Infinity ? 'delivered' : `retry@${new Date(n.nextAttemptAt).toISOString().slice(11, 19)}`;
-      return `<tr><td><code>${n.id}</code></td><td><code>${n.paymentId}</code></td><td>${n.payload.Status}</td><td>${n.attempts}</td><td>${st}</td><td>${n.lastStatus ?? '—'} ${String(n.lastBody ?? '').slice(0, 40)}</td><td>${btn('duplicate-notification', n.id, 'повторить')}</td></tr>`;
+      const st = n.dumped ? 'dumped' : n.done ? 'delivered' : `retry@${new Date(n.nextAttemptAt || Date.now()).toISOString().slice(11, 19)}`;
+      return `<tr><td><code>${esc(n.id)}</code></td><td><code>${esc(n.paymentId)}</code></td><td>${esc(n.payload.Status)}</td><td>${n.attempts}</td><td>${esc(st)}</td><td>${esc(n.lastStatus ?? '—')} ${esc(String(n.lastBody ?? '').slice(0, 40))}</td><td>${btn('duplicate-notification', n.id, 'повторить')}</td></tr>`;
     })
     .join('') || '<tr><td colspan="7">нотификаций нет</td></tr>';
+
+  const journalRows = journal.list().slice(-15).reverse()
+    .map((e) => `<tr><td>${esc(e.at.slice(11, 19))}</td><td>${esc(e.method)}</td><td><code>${esc(e.path)}</code></td><td>${esc(Object.entries(e.body || {}).map(([k, v]) => `${k}=${v}`).join(' '))}</td><td>${e.status}</td><td>${e.ms} мс</td></tr>`)
+    .join('') || '<tr><td colspan="6">запросов ещё не было</td></tr>';
 
   return page(`
     <span class="logo">T · мок банка</span>
@@ -595,8 +677,12 @@ function adminPage() {
     <h1 style="font-size:16px">Верификация счетов (прогон рубля)</h1>
     <table border="0" cellpadding="4" style="font-size:13px;width:100%">${verifs}</table>
     <h1 style="font-size:16px">Нотификации (последние 25)</h1>
-    <table border="0" cellpadding="4" style="font-size:12px;width:100%">${notifs}</table>`, true);
+    <table border="0" cellpadding="4" style="font-size:12px;width:100%">${notifs}</table>
+    <h1 style="font-size:16px">Журнал запросов к API (последние 15) — <a href="/admin/journal">json</a></h1>
+    <table border="0" cellpadding="4" style="font-size:12px;width:100%">${journalRows}</table>`, true);
 }
+
+const esc = (v) => escapeHtml(v);
 
 function btn(action, id, label) {
   return `<form method="POST" action="/admin/action" style="display:inline"><input type="hidden" name="action" value="${action}"><input type="hidden" name="id" value="${id}"><button style="width:auto;margin:2px;padding:6px 10px;font-size:12px" type="submit">${label}</button></form>`;
@@ -657,13 +743,38 @@ function adminAction(body) {
 /* ------------------------------------------------------------------ http */
 
 
+/** Короткая выжимка запроса для журнала: скаляры, без подписи и вложений. */
+function bodySummary(body) {
+  const out = {};
+  let n = 0;
+  for (const [k, v] of Object.entries(body || {})) {
+    if (n >= 8) break;
+    if (k === 'Token' || k === 'Password') continue;
+    if (v === null || v === undefined || typeof v === 'object') continue;
+    out[k] = String(v).slice(0, 60);
+    n += 1;
+  }
+  return out;
+}
+
 async function route(req, res) {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
   const raw = await readBody(req);
   const body = parseBody(raw, req.headers['content-type']);
 
+  // Журналируем только API-вызовы (не страницы формы и не поллинг /admin).
+  if (/^\/(v2|e2c\/v2|av\/v1)\//.test(p)) {
+    const started = Date.now();
+    const originalWriteHead = res.writeHead.bind(res);
+    res.writeHead = (code, ...rest) => {
+      journal.record({ method: req.method, path: p, status: code, ms: Date.now() - started, body: bodySummary(body) });
+      return originalWriteHead(code, ...rest);
+    };
+  }
+
   if (req.method === 'GET' && p === '/health') return sendJson(res, { ok: true, payments: Object.keys(state.payments).length, deals: Object.keys(state.deals).length, payouts: Object.keys(state.payouts || {}).length });
+  if (req.method === 'GET' && p === '/admin/journal') return sendJson(res, { entries: journal.list() });
 
   // Платёжное поручение МСП на сумму верификации: банк создаёт поступление
   // на спец-счёт платформы (VER-код в назначении) и уведомляет платформу.

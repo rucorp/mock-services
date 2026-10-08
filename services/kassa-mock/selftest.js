@@ -98,6 +98,48 @@ async function main() {
   r = await request('GET', `/receipts/${uuid}`);
   check('страница чека 200 + ИНН поставщика', r.status === 200 && r.text.includes('7801111111'));
 
+  // 10a. Инварианты чека: total ≠ Σ позиций -> ошибка 4 с полем и подсказкой
+  r = await request('POST', `/possystem/v1/Main/sell?token=${token}`, {
+    external_id: 'bad-total',
+    receipt: { client: { email: 'a@b.c' }, items: [{ name: 'X', price: 100, quantity: 1, sum: 100, vat: { type: 'none' } }], payments: [{ type: 1, sum: 100 }], total: 50000 },
+  });
+  check('валидация: total ≠ Σ позиций -> код 4 + field + hint', r.json().error && r.json().error.code === 4 && r.json().error.field === 'receipt.total' && Boolean(r.json().error.hint));
+
+  // 10b. Инварианты чека: Σ оплат ≠ total -> ошибка 4
+  r = await request('POST', `/possystem/v1/Main/sell?token=${token}`, {
+    external_id: 'bad-payments',
+    receipt: { client: { email: 'a@b.c' }, items: [{ name: 'X', price: 100, quantity: 1, sum: 100, vat: { type: 'none' } }], payments: [{ type: 1, sum: 50 }], total: 100 },
+  });
+  check('валидация: Σ оплат ≠ total -> код 4', r.json().error && r.json().error.code === 4 && r.json().error.field === 'receipt.payments');
+
+  // 10c. Опечатка в ставке НДС ловится до «печати»
+  r = await request('POST', `/possystem/v1/Main/sell?token=${token}`, {
+    external_id: 'bad-vat',
+    receipt: { client: { email: 'a@b.c' }, items: [{ name: 'X', price: 100, quantity: 1, sum: 100, vat: { type: 'vat120' } }], payments: [{ type: 1, sum: 100 }], total: 100 },
+  });
+  check('валидация: неизвестный vat.type -> код 4 с подсказкой', r.json().error && r.json().error.code === 4 && r.json().error.field === 'receipt.items[0].vat.type');
+
+  // 10d. Дата чека — реальная (не 1970) и совпадает с processedAt; номер чека в смене уникален
+  const p1 = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, { ...sellBody, external_id: 'num-1' })).json();
+  const p2 = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, { ...sellBody, external_id: 'num-2' })).json();
+  await sleep(1500);
+  const rp1 = (await request('GET', `/possystem/v1/Main/report/${p1.uuid}?token=${token}`)).json();
+  const rp2 = (await request('GET', `/possystem/v1/Main/report/${p2.uuid}?token=${token}`)).json();
+  check('receipt_datetime не 1970 (снимок после печати)', Boolean(rp1.payload) && !String(rp1.payload.receipt_datetime).startsWith('1970'));
+  check('номера чеков в смене уникальны', rp1.payload.fiscal_receipt_number !== rp2.payload.fiscal_receipt_number);
+
+  // 10e. XSS: название позиции экранируется в чеке покупателя
+  const xss = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, { ...sellBody, external_id: 'xss-1', receipt: { ...sellBody.receipt, items: [{ ...sellBody.receipt.items[0], name: '<img src=x onc=alert(1)>' }] } })).json();
+  await sleep(1200);
+  r = await request('GET', `/receipts/${xss.uuid}`);
+  check('чек покупателя экранирует HTML из данных интегратора', r.status === 200 && !r.text.includes('<img src=x onc=alert(1)>') && r.text.includes('&lt;img'));
+
+  // 10f. Лента чека: НДС считается по позициям (ставка из vat.type)
+  const vatDoc = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, { ...sellBody, external_id: 'vat-1', receipt: { ...sellBody.receipt, items: [{ ...sellBody.receipt.items[0], vat: { type: 'vat20' } }] } })).json();
+  await sleep(1200);
+  r = await request('GET', `/receipts/${vatDoc.uuid}`);
+  check('лента чека: НДС по ставке позиции (vat20 → «НДС 20%»)', r.text.includes('НДС 20%'));
+
   // 11. негатив fail-
   r = await request('POST', `/possystem/v1/Main/sell?token=${token}`, { ...sellBody, external_id: 'fail-2' });
   const failUuid = r.json().uuid;
@@ -115,8 +157,104 @@ async function main() {
   r = await request('GET', `/possystem/v1/stats/cashboxes/extended?token=${token}`);
   check('stats: Готова к работе', r.json().Status === 'Success' && r.json().Data[0].kktState === 'Готова к работе');
 
+  await phaseRestart();
+
   console.log(`\nИТОГ: ${passed} passed, ${failed} failed\n`);
   process.exit(failed ? 1 : 0);
+}
+
+/**
+ * Фаза 2 — рестарт стенда (дефекты A-2/A-10/A-11 аудита):
+ *   • MOCK_PROCESS_MS=0 печатает чек сразу, а не через 4 с (parseInt(x)||def);
+ *   • незавершённый callback переживает рестарт и продолжает ретраиться
+ *     (очередь сохраняет ссылку на восстановленный state);
+ *   • токен с истёкшим TTL (12 ч) даёт ошибку 11, а не «работает вечно».
+ */
+async function phaseRestart() {
+  const fs = require('fs');
+  const stateFile = path.join(__dirname, `.selftest-state-${process.pid}.json`);
+  const port = await freePort();
+  const catchPort = await freePort();
+  const hits = { fail: 0, ok: 0 };
+  const catcher = http.createServer((req, res) => {
+    if (req.url.startsWith('/fail')) { hits.fail += 1; res.writeHead(500); res.end('no'); return; }
+    hits.ok += 1; res.writeHead(200); res.end('{"data":{"status":"confirmed"}}');
+  });
+  await new Promise((r) => catcher.listen(catchPort, '127.0.0.1', r));
+  const env = {
+    ...process.env, MOCK_PORT: String(port), MOCK_PROCESS_MS: '0', MOCK_CALLBACK_RETRY_MS: '500',
+    MOCK_STATE_FILE: stateFile,
+  };
+  const start = () => spawn('node', [path.join(__dirname, 'server.js')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const api = (method, url, body, headers = {}) => requestOn(port, method, url, body, headers);
+
+  let child = start();
+  await sleep(900);
+  let tok = (await api('POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' })).json().token;
+  const doc = (await api('POST', `/possystem/v1/Main/sell?token=${tok}`, {
+    external_id: 'restart-pending',
+    receipt: {
+      client: { email: 'a@b.c' },
+      company: { sno: 'usn_income', payment_address: 'lovi.test' },
+      items: [{ name: 'X', price: 100, quantity: 1, sum: 100, vat: { type: 'none' }, payment_method: 'full_payment', payment_object: 'commodity' }],
+      payments: [{ type: 1, sum: 100 }],
+      total: 100,
+      receipts: { service: { callback_url: `http://127.0.0.1:${catchPort}/fail` } },
+    },
+  })).json();
+  await sleep(1200);
+  check('MOCK_PROCESS_MS=0: чек печатается сразу', (await api('GET', `/possystem/v1/Main/report/${doc.uuid}?token=${tok}`)).json().status === 'done');
+  const hitsBefore = hits.fail;
+  check('незавершённый callback ретраится до рестарта', hitsBefore >= 1);
+  child.kill('SIGKILL');
+  await sleep(400);
+
+  child = start();
+  await sleep(2500);
+  check('после рестарта незавершённый callback продолжает ретраиться (A-2)', hits.fail > hitsBefore);
+  child.kill('SIGKILL');
+  await sleep(300);
+
+  // Токен с истёкшим TTL: подкладываем в state-файл просроченную сессию
+  const st = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  st.tokens = { ...(st.tokens || {}), expiredtoken: { login: 'loviitest', createdAt: Date.now() - 13 * 60 * 60 * 1000 } };
+  fs.writeFileSync(stateFile, JSON.stringify(st));
+  child = start();
+  await sleep(900);
+  const expired = (await api('GET', '/possystem/v1/Main/report/00000000-0000-0000-0000-000000000000?token=expiredtoken')).json();
+  check('токен с истёкшим TTL -> ошибка 11 (A-11)', expired.error && expired.error.code === 11);
+
+  child.kill('SIGKILL');
+  fs.rmSync(stateFile, { force: true });
+  catcher.close();
+}
+
+/** Свободный порт для параллельных прогонов selftest. */
+function freePort() {
+  return new Promise((resolve) => {
+    const srv = require('net').createServer();
+    srv.listen(0, '127.0.0.1', () => { const port = srv.address().port; srv.close(() => resolve(port)); });
+  });
+}
+
+/** Запрос на произвольный порт (для фазы рестарта). */
+function requestOn(port, method, url, body = null, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const data = body ? JSON.stringify(body) : null;
+    const req = http.request(`http://127.0.0.1:${port}${url}`, {
+      method,
+      headers: { 'Content-Type': 'application/json', ...(data ? { 'Content-Length': Buffer.byteLength(data) } : {}), ...headers },
+      timeout: 5000,
+    }, (res) => {
+      let buf = '';
+      res.on('data', (c) => { buf += c; });
+      res.on('end', () => resolve({ status: res.statusCode, text: buf, json: () => { try { return JSON.parse(buf); } catch { return null; } } }));
+    });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    if (data) req.write(data);
+    req.end();
+  });
 }
 
 // Ловушка callback'ов мока (эмулирует ядро)
