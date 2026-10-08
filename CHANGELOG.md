@@ -3,7 +3,17 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версии — [SemVer](https://semver.org/lang/ru/).
 
-## [0.2.0] — в работе (ветка `arena/37d0f281-mock-services`)
+## [0.3.0] — 2026-10-08
+
+### Added
+- `MOCK_PROFILE=plain|multisplit` (tbank): провайдеро-нейтральный дефолт — классический эквайринг без сделок; профиль Lovii (Мультирасчеты) включается явно.
+- `X-Mock-Scenario: fail|hang` (kassa): универсальный драйвер негативов заголовком запроса — для CI и внешних интеграторов.
+- selftest: plain-флоу Init→pay→Confirm без SpAccumulationId (tbank №25); сценарии через заголовок (kassa 12b).
+
+### Fixed
+- selftest кассы: обязательный `sum` позиции для валидатора; тайминги печати 1200→2200 мс (гонка с секундным тиком).
+
+## [0.2.0] — 2026-10-08
 
 Аудит 2026-10-08 (`docs/audit/AUDIT-2026-10-08.md`) нашёл 24 дефекта; в этой
 версии закрыты критичные и высокие (A-1…A-19), добавлены CI/Docker и
