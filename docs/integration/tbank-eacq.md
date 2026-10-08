@@ -15,6 +15,14 @@ docker compose up tbank-mock     # http://localhost:3100
 проверки укажите в Init `NotificationURL=http://host.docker.internal:PORT/webhook`
 или задайте `MOCK_DEFAULT_NOTIFICATION_URL` на стенде.
 
+## Профили
+
+`MOCK_PROFILE=plain` (по умолчанию) — классический эквайринг без сделок:
+мультирасчётные поля (DealId/CreateDealWithType/PaymentRecipientId)
+игнорируются как незнакомые банку. `MOCK_PROFILE=multisplit` — профиль со
+сделками (Мультирасчеты): платёж с `PaymentRecipientId` требует `DealId`
+или `CreateDealWithType=NN`.
+
 ## 2. Базовый флоу
 
 ```bash
