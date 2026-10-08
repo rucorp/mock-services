@@ -199,6 +199,39 @@ function createDeliveryQueue({
   return { tick, start, deliverOne };
 }
 
+
+/* ---------------------------------------------------------- error catalog */
+
+/**
+ * Каталог ошибок провайдера — сердце DX-слоя (спека §6.2): ошибка — это не
+ * голый код, а {код, объяснение, поле, рекомендация, ссылка на доку}.
+ *
+ *   const derr = createErrorCatalog({
+ *     provider: 'tbank-eacq',
+ *     docsBase: 'https://developer.tbank.ru/eacq',
+ *     codes: { 7: { message: '...', field: 'Amount|OrderId', hint: '...', doc: '/api/init' } },
+ *   });
+ *   derr(7, { details: 'Amount=abc' })  // → готовая запись для ответа
+ *
+ * Адаптер решает, куда положить поля в СВОЁМ формате контракта (Т-Банк —
+ * Details, Ferma — hint/doc внутри error), сам каталог — provider-agnostic.
+ */
+function createErrorCatalog({ provider, docsBase, codes = {} }) {
+  return function describeError(code, overrides = {}) {
+    const known = codes[code] || {};
+    const docPath = overrides.doc || known.doc;
+    return {
+      provider,
+      code,
+      message: overrides.message || known.message || `Ошибка провайдера (код ${code})`,
+      field: overrides.field || known.field || null,
+      hint: overrides.hint || known.hint || null,
+      doc: docPath ? `${String(docsBase).replace(/\/$/, '')}${docPath}` : (docsBase || null),
+      ...overrides.details ? { details: overrides.details } : {},
+    };
+  };
+}
+
 module.exports = {
   createStore,
   createLog,
@@ -210,4 +243,5 @@ module.exports = {
   html,
   postJson,
   createDeliveryQueue,
+  createErrorCatalog,
 };

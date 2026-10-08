@@ -59,6 +59,7 @@ async function main() {
   // 4. sell без токена
   r = await request('POST', `/possystem/v1/Main/sell`, { external_id: 'x1', receipt: {} });
   check('sell без токена -> error 11', r.json() && r.json().error && r.json().error.code === 11);
+  check('DX: error 11 несёт field/hint/doc (спека §6.2)', (() => { const e = r.json().error; return e.field === 'token' && !!e.hint && String(e.doc || '').startsWith('https://'); })());
 
   // 5. sell ok -> uuid + wait
   const sellBody = {

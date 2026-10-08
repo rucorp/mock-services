@@ -191,8 +191,34 @@ const deliveryQueue = core.createDeliveryQueue({
 
 /* -------------------------------------------------------------- helpers */
 
+// DX-слой (спека §6.2): известные коды ошибок разложены на объяснение,
+// поле, рекомендацию и ссылку на раздел официальной документации.
+const derr = core.createErrorCatalog({
+  provider: 'tbank-eacq',
+  docsBase: 'https://developer.tbank.ru/eacq',
+  codes: {
+    7: { message: 'Обязательные параметры не заполнены или невалидны', field: 'Amount, OrderId', hint: 'Проверьте, что Amount — целое число в копейках больше нуля, а OrderId — непустая строка. Формат суммы — копейки: 100000 = 1000,00 ₽.', doc: '/api/init' },
+    8: { message: 'Объект не найден', field: 'PaymentId | OrderId', hint: 'PaymentId/OrderId не существует в этом стенде. Платёжные сессии живут в памяти/состоянии стенда; после рестарта с пустым MOCK_STATE_FILE старые id недоступны.', doc: '/api/getstate' },
+    13: { message: 'Неверный Token (подпись) запроса', field: 'Token', hint: 'Подпись = sha256(значения всех top-level скаляров кроме Token/null/\'\' + Password, отсортированные по ключу, в нижнем регистре для boolean). Сверьте с conspectus docs/reference/tbank/02-notifications-signature.md.', doc: '/intro/to-api' },
+    32: { message: 'Операция недоступна в текущем статусе', field: 'PaymentId', hint: 'Перевод платежа запрещён машиной состояний (например, Confirm не из AUTHORIZED). Посмотрите историю статусов в /admin и спеку статусов.', doc: '/api/confirm' },
+    501: { message: 'Метод не поддерживается мок-стендом', hint: 'Стенд реализует волну 1: Init/Confirm/Cancel/GetState/CheckOrder + e2c/AV. Остальные методы — по мере надобности.', doc: '' },
+    5000: { message: 'Внутренняя ошибка мок-стенда', hint: 'Смотрите лог сервиса; если воспроизводится — это дефект мока, заводите issue.', doc: '' },
+  },
+});
+
 function err(code, message, details) {
-  return { Success: false, ErrorCode: String(code), Message: message, Details: details || undefined };
+  const desc = derr(code, { message: message || undefined, details });
+  return {
+    Success: false,
+    ErrorCode: String(code),
+    Message: desc.message,
+    Details: {
+      ...(details ? { Details: details } : {}),
+      Field: desc.field || undefined,
+      Hint: desc.hint || undefined,
+      Doc: desc.doc || undefined,
+    },
+  };
 }
 
 function baseResponse(payment) {

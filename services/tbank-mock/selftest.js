@@ -95,6 +95,10 @@ async function main() {
   // 3. Multisplit Init without DealId/CreateDealWithType -> rejected
   const noDeal = await api(mockPort, 'Init', { Amount: '1000', OrderId: 'o-1', PaymentRecipientId: '+79001234567' });
   assert.strictEqual(JSON.parse(noDeal.body).ErrorCode, '7', 'recipient without deal must be rejected');
+  {
+    const d = JSON.parse(noDeal.body).Details || {};
+    assert.ok(d.Hint && d.Doc && String(d.Doc).startsWith('https://developer.tbank.ru'), 'DX: Details must carry hint + doc link (spec §6.2)');
+  }
 
   // 4. Happy path: two-stage Init with CreateDealWithType=NN
   const init = await api(mockPort, 'Init', {

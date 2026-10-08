@@ -80,8 +80,40 @@ function isDown() {
   return state.cashbox.downUntil > Date.now();
 }
 
+// DX-слой (спека §6.2): коды Ferma разложены на объяснение, поле,
+// рекомендацию и ссылку на документацию (контур доков Ferma закрыт личным
+// кабинетом — ссылка ведёт на раздел документации в ЛК + на наш конспект).
+const derr = core.createErrorCatalog({
+  provider: 'ferma-ofd',
+  docsBase: 'https://ferma.ofd.ru/documents/documentation',
+  codes: {
+    0: { message: 'Касса недоступна', hint: 'Включён сценарий MOCK_FERMA_DOWN или кнопкой в /admin. Касса сама вернётся в строй (downUntil) или снимите сценарий кнопкой.', doc: '' },
+    4: { message: 'Неверный формат запроса', field: 'body', hint: 'Тело запроса — не валидный JSON. Проверьте Content-Type: application/json и структуру по конспекту docs/reference/tbank/* (для кассы — README-kassa-mock.md).', doc: '' },
+    5: { message: 'external_id обязателен', field: 'external_id', hint: 'Передайте свой уникальный идентификатор документа (до 36 символов). По нему работает дедупликация и повторные запросы.', doc: '' },
+    10: { message: 'Документ не найден', field: 'uuid', hint: 'uuid не существует в этом стенде (или чек ещё не напечатан — страница /receipts отдаёт только done-чеки). Список документов: /admin.', doc: '' },
+    11: { message: 'Не выполнена авторизация', field: 'token', hint: 'Передайте ?token=, полученный в getToken; токен живёт 12 часов. Один токен на все вызовы API.', doc: '' },
+    12: { message: 'Документ с таким external_id уже существует', field: 'external_id', hint: 'Дедупликация Ferma: повторите с новым external_id или запросите статус по report/{uuid} старого. В боевом контуре это защита от двойного чека.', doc: '' },
+    14: { message: 'Неверный логин или пароль', field: 'login, pass', hint: 'Креды стенда задаются env MOCK_FERMA_LOGIN / MOCK_FERMA_PASSWORD (по умолчанию loviitest / mockpass123).', doc: '' },
+    57: { message: 'Отказ печати по сценарию', field: 'external_id', hint: 'ExternalId с префиксом «fail-» — управляемый отказ ККТ. Переименуйте документ без префикса для нормального флоу.', doc: '' },
+    404: { message: 'Неизвестный маршрут', hint: 'Список маршрутов — /admin и README сервиса.', doc: '' },
+    500: { message: 'Внутренняя ошибка мок-стенда', hint: 'Смотрите лог сервиса; воспроизводится — это дефект мока, заводите issue.', doc: '' },
+  },
+});
+
 function err(code, text, type = 'system') {
-  return { error: { error_id: null, code, text, type }, timestamp: new Date().toISOString() };
+  const desc = derr(code, { message: text || undefined });
+  return {
+    error: {
+      error_id: null,
+      code,
+      text: desc.message,
+      type,
+      field: desc.field || undefined,
+      hint: desc.hint || undefined,
+      doc: desc.doc || undefined,
+    },
+    timestamp: new Date().toISOString(),
+  };
 }
 
 function errBody(code, text, type = 'system') {
@@ -302,7 +334,21 @@ td,th{border:1px solid #444;padding:4px 8px;font-size:13px}th{background:#222}
 h1{font-size:18px} a{color:#8cf}</style></head><body>
 <h1>kassa-mock — Ferma cloud-cashbox mock (${state.cashbox.kktState}, чеков: ${state.cashbox.checksCnt})</h1>
 <p>POST /possystem/v1/getToken · POST /possystem/v1/{group}/sell|sell_refund · GET /possystem/v1/{group}/report/&#123;uuid&#125; · GET /possystem/v1/stats/cashboxes/extended</p>
-<p>Негатив: ExternalId с префиксом <b>fail-</b> (отказ печати) / <b>hang-</b> (вечный wait); env MOCK_FERMA_DOWN=1 — касса недоступна.</p>
+<p>Негатив: ExternalId с префиксом <b>fail-</b> (отказ печати) / <b>hang-</b> (вечный wait); env MOCK_FERMA_DOWN=1 — касса недоступна при старте.</p>
+<form method="POST" action="/admin/action" style="display:inline">
+  <input type="hidden" name="action" value="kassa-down">
+  <input type="hidden" name="ms" value="300000">
+  <button type="submit">Касса недоступна (5 мин)</button>
+</form>
+<form method="POST" action="/admin/action" style="display:inline">
+  <input type="hidden" name="action" value="kassa-up">
+  <button type="submit">Вернуть в строй</button>
+</form>
+<form method="POST" action="/admin/action" style="display:inline">
+  <input type="hidden" name="action" value="clear-external-ids">
+  <button type="submit">Сбросить реестр external_id</button>
+</form>
+<p>Статус: ${isDown() ? `НЕДОСТУПНА до ${new Date(state.cashbox.downUntil).toISOString()}` : 'готова'} · external_id в реестре: ${Object.keys(state.externalIds).length}</p>
 <table><tr><th>uuid</th><th>op</th><th>external_id</th><th>status</th><th>фискальные данные</th><th>сумма</th></tr>${rows}</table>
 </body></html>`, { 'Content-Type': 'text/html; charset=utf-8' });
     }
@@ -383,6 +429,30 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
       if (!doc || doc.status !== 'done') return jsonRaw(res, 404, errBody(10, 'Чек не найден'));
       return send(res, 200, `<html><head><meta charset="utf-8"><title>Чек ${doc.payload.fiscal_document_number}</title></head>
 <body style="font-family:monospace;background:#eee"><pre>${customerReceiptText(doc)}</pre></body></html>`, { 'Content-Type': 'text/html; charset=utf-8' });
+    }
+
+    if (req.method === 'POST' && url === '/admin/action') {
+      const raw = await readBody(req);
+      const body = {};
+      for (const pair of raw.split('&')) {
+        const i = pair.indexOf('=');
+        if (i > 0) body[decodeURIComponent(pair.slice(0, i))] = decodeURIComponent(pair.slice(i + 1));
+      }
+      if (body.action === 'kassa-down') {
+        state.cashbox.downUntil = Date.now() + Math.max(0, parseInt(body.ms, 10) || 300000);
+        log(`сценарий: касса недоступна до ${new Date(state.cashbox.downUntil).toISOString()}`);
+        persist();
+      } else if (body.action === 'kassa-up') {
+        state.cashbox.downUntil = 0;
+        log('сценарий: касса снова готова к работе');
+        persist();
+      } else if (body.action === 'clear-external-ids') {
+        const n = Object.keys(state.externalIds).length;
+        state.externalIds = {};
+        log(`сценарий: реестр external_id очищен (${n} записей)`);
+        persist();
+      }
+      return send(res, 302, '', { Location: '/admin' });
     }
 
     return jsonRaw(res, 404, errBody(404, 'Неизвестный маршрут'));
