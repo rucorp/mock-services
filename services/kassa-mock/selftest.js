@@ -129,14 +129,17 @@ async function main() {
   check('номера чеков в смене уникальны', rp1.payload.fiscal_receipt_number !== rp2.payload.fiscal_receipt_number);
 
   // 10e. XSS: название позиции экранируется в чеке покупателя
-  const xss = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, { ...sellBody, external_id: 'xss-1', receipt: { ...sellBody.receipt, items: [{ ...sellBody.receipt.items[0], name: '<img src=x onc=alert(1)>' }] } })).json();
-  await sleep(1200);
+  // sum обязателен (валидатор чека инвариантом sum = price × quantity) —
+  // без него запрос отбраковывается до создания документа, и проверка
+  // экранирования получала 404 вместо чека.
+  const xss = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, { ...sellBody, external_id: 'xss-1', receipt: { ...sellBody.receipt, items: [{ ...sellBody.receipt.items[0], name: '<img src=x onc=alert(1)>', sum: sellBody.receipt.items[0].price * sellBody.receipt.items[0].quantity }] } })).json();
+  await sleep(2200); // печать — на секундном тике после processAt=500мс; 1200 мс — гонка
   r = await request('GET', `/receipts/${xss.uuid}`);
   check('чек покупателя экранирует HTML из данных интегратора', r.status === 200 && !r.text.includes('<img src=x onc=alert(1)>') && r.text.includes('&lt;img'));
 
   // 10f. Лента чека: НДС считается по позициям (ставка из vat.type)
-  const vatDoc = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, { ...sellBody, external_id: 'vat-1', receipt: { ...sellBody.receipt, items: [{ ...sellBody.receipt.items[0], vat: { type: 'vat20' } }] } })).json();
-  await sleep(1200);
+  const vatDoc = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, { ...sellBody, external_id: 'vat-1', receipt: { ...sellBody.receipt, items: [{ ...sellBody.receipt.items[0], vat: { type: 'vat20' }, sum: sellBody.receipt.items[0].sum }] } })).json();
+  await sleep(2200); // аналогично 10e
   r = await request('GET', `/receipts/${vatDoc.uuid}`);
   check('лента чека: НДС по ставке позиции (vat20 → «НДС 20%»)', r.text.includes('НДС 20%'));
 
