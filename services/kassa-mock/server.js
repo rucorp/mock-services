@@ -31,7 +31,9 @@ const http = require('http');
 const crypto = require('crypto');
 
 const core = require('../../packages/core');
-const { createLog, readBody, send, sendJson } = core;
+const { createLog, readBody, send, sendJson, escapeHtml } = core;
+// Журнал входящих запросов: интегратору видно в /admin/journal (спека §2).
+const journal = core.createJournal({ size: 200 });
 
 const {
   MOCK_HOST = '0.0.0.0',
@@ -42,12 +44,27 @@ const {
   MOCK_CALLBACK_RETRY_MS = '10000',
   MOCK_CALLBACK_MAX_ATTEMPTS = '24',
   MOCK_STATE_FILE = '',
+  MOCK_TOKEN_TTL_MS = String(12 * 60 * 60 * 1000),
+  MOCK_VALIDATE_RECEIPTS = 'true',
+  MOCK_GROUPS = '',
+  MOCK_BLOCK_PRIVATE_WEBHOOKS = 'false',
   MOCK_FERMA_DOWN = 'false',
   MOCK_FERMA_DOWN_MS = '0',
   MOCK_PUBLIC_BASE_URL = `http://localhost:${MOCK_PORT}`,
 } = process.env;
 
-const PROCESS_MS = Math.max(0, parseInt(MOCK_PROCESS_MS, 10) || 4000);
+// ВАЖНО: не `parseInt(...) || 4000` — ноль (печатать мгновенно) тоже валидное
+// значение; старый код превращал MOCK_PROCESS_MS=0 в 4 секунды (дефект A-10).
+const parseMs = (raw, def) => {
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : def;
+};
+const PROCESS_MS = parseMs(MOCK_PROCESS_MS, 15000);
+const TOKEN_TTL_MS = parseMs(MOCK_TOKEN_TTL_MS, 12 * 60 * 60 * 1000);
+const VALIDATE_RECEIPTS = String(MOCK_VALIDATE_RECEIPTS).toLowerCase() !== 'false';
+// MOCK_GROUPS=Main,Shop-1 — если задан, группа с опечаткой отклоняется (как в бою).
+const GROUPS = String(MOCK_GROUPS).split(',').map((g) => g.trim()).filter(Boolean);
+const BLOCK_PRIVATE_WEBHOOKS = String(MOCK_BLOCK_PRIVATE_WEBHOOKS).toLowerCase() === 'true';
 const CALLBACK_RETRY_MS = Math.max(1000, parseInt(MOCK_CALLBACK_RETRY_MS, 10) || 10000);
 const CALLBACK_MAX_ATTEMPTS = Math.max(1, parseInt(MOCK_CALLBACK_MAX_ATTEMPTS, 10) || 24);
 
@@ -100,14 +117,14 @@ const derr = core.createErrorCatalog({
   },
 });
 
-function err(code, text, type = 'system') {
-  const desc = derr(code, { message: text || undefined });
+function err(code, text, overrides = {}) {
+  const desc = derr(code, { message: typeof text === 'string' ? text : undefined, ...overrides });
   return {
     error: {
       error_id: null,
       code,
       text: desc.message,
-      type,
+      type: overrides.type || 'system',
       field: desc.field || undefined,
       hint: desc.hint || undefined,
       doc: desc.doc || undefined,
@@ -116,13 +133,81 @@ function err(code, text, type = 'system') {
   };
 }
 
-function errBody(code, text, type = 'system') {
-  return JSON.stringify(err(code, text, type));
+function errBody(code, text, overrides = {}) {
+  return JSON.stringify(err(code, text, overrides));
 }
 
 /** Ответ готовой JSON-строкой (errBody уже стрингифицирован). */
 function jsonRaw(res, code, body) {
   send(res, code, body, { 'Content-Type': 'application/json; charset=utf-8' });
+}
+
+/* ------------------------------------------------------- валидация чека */
+
+// Значения реквизитов по 54-ФЗ (приказы ФНС): неизвестное значение — почти
+// всегда опечатка интегратора, и её дешевле поймать на моке, чем на боевой
+// кассе (в бою документ уйдёт в ОФД с неверным признаком).
+const PAYMENT_METHODS = ['full_prepayment', 'partial_prepayment', 'advance', 'full_payment', 'partial_payment', 'credit', 'credit_payment', 'consideration'];
+const VAT_TYPES = ['none', 'vat0', 'vat5', 'vat7', 'vat10', 'vat20', 'vat22'];
+const PAYMENT_TYPES = [1, 2, 3, 4, 5]; // 1 безнал, 2 предоплата, 3 постоплата, 4 иная, 5 наличные
+
+const isInt = (v) => Number.isInteger(v);
+const isPosInt = (v) => Number.isInteger(v) && v > 0;
+
+/**
+ * Проверка инвариантов фискального чека ДО «печати». Возвращает описание
+ * ошибки в формате DX (код 4 + поле + подсказка) или null.
+ *
+ * Дефект A-1 аудита: мок принимал чек с total=50000 при позициях на 100 копеек
+ * и без контакта покупателя — невозможный чек «печатался» успешно.
+ *
+ * Правила (все — воспроизведение требований кассы, а не придирки мока):
+ *   receipt.items[]      — непустой массив, у позиции есть name, price,
+ *                          quantity и sum = price × quantity;
+ *   receipt.total        — равен сумме позиций;
+ *   receipt.payments[]   — известный тип, суммы положительные, Σ payments = total;
+ *   payment_method/vat   — из списка допустимых значений (опечатка видна сразу).
+ */
+function validateReceipt(receipt) {
+  const bad = (field, hint) => ({ field, hint });
+  if (!receipt || typeof receipt !== 'object') return bad('receipt', 'Передайте объект receipt с items, payments и total (см. docs/integration/ferma-ofd.md).');
+
+  const items = receipt.items;
+  if (!Array.isArray(items) || !items.length) return bad('receipt.items', 'Нужен непустой массив позиций: [{name, price, quantity, sum, vat, payment_method, payment_object}].');
+
+  let itemsSum = 0;
+  for (let i = 0; i < items.length; i += 1) {
+    const it = items[i] || {};
+    const at = `receipt.items[${i}]`;
+    if (!it.name || typeof it.name !== 'string') return bad(`${at}.name`, 'Название позиции — непустая строка (покупатель увидит её в чеке).');
+    if (!isPosInt(it.price)) return bad(`${at}.price`, `Цена — целое число копеек > 0 (получено ${JSON.stringify(it.price)}). Бесплатная позиция оформляется нулевой ценой только через скидку/коррекцию.`);
+    if (!isPosInt(it.quantity)) return bad(`${at}.quantity`, `Количество — целое > 0 (получено ${JSON.stringify(it.quantity)}). Для дробного количества используйте меру измерения и целые минорные единицы.`);
+    if (!isInt(it.sum)) return bad(`${at}.sum`, 'Сумма позиции — целое число копеек (price × quantity).');
+    if (it.sum !== it.price * it.quantity) return bad(`${at}.sum`, `Сумма позиции ${it.sum} ≠ price × quantity = ${it.price * it.quantity}. Касса ФНС отклонит такой чек.`);
+    if (!it.vat || !VAT_TYPES.includes(it.vat.type)) {
+      return bad(`${at}.vat.type`, `Неизвестная ставка НДС ${JSON.stringify(it.vat && it.vat.type)}. Допустимо: ${VAT_TYPES.join(', ')}.`);
+    }
+    if (it.payment_method !== undefined && !PAYMENT_METHODS.includes(it.payment_method)) {
+      return bad(`${at}.payment_method`, `Неизвестный признак способа расчёта ${JSON.stringify(it.payment_method)}. Допустимо: ${PAYMENT_METHODS.join(', ')}. Для аванса — 'full_prepayment', для зачёта аванса — 'full_payment', для зачёта предоплаты — 'consideration'.`);
+    }
+    itemsSum += it.sum;
+  }
+
+  if (!isPosInt(receipt.total)) return bad('receipt.total', 'Итог чека — целое число копеек > 0.');
+  if (receipt.total !== itemsSum) return bad('receipt.total', `Итог ${receipt.total} ≠ сумме позиций ${itemsSum}. Проверьте арифметику до отправки — касса сверяет суммы сама.`);
+
+  const payments = receipt.payments;
+  if (!Array.isArray(payments) || !payments.length) return bad('receipt.payments', 'Нужен непустой массив оплат: [{type: 1..5, sum}] (в т.ч. при оплате одним способом).');
+  let paymentsSum = 0;
+  for (let i = 0; i < payments.length; i += 1) {
+    const pay = payments[i] || {};
+    if (!PAYMENT_TYPES.includes(pay.type)) return bad(`receipt.payments[${i}].type`, `Неизвестный признак формы оплаты ${JSON.stringify(pay.type)}. Допустимо: ${PAYMENT_TYPES.join(', ')} (1 — электронными, 2 — предоплата, 3 — постоплата, 4 — иная/баллы, 5 — наличными).`);
+    if (!isPosInt(pay.sum)) return bad(`receipt.payments[${i}].sum`, 'Сумма оплаты — целое число копеек > 0.');
+    paymentsSum += pay.sum;
+  }
+  if (paymentsSum !== receipt.total) return bad('receipt.payments', `Σ оплат ${paymentsSum} ≠ итогу ${receipt.total}. Смешанная оплата (например, баллы + карта) должна сходиться в копейку.`);
+
+  return null;
 }
 
 /** Токен из query (?token=) — как в контракте Ferma. */
@@ -131,10 +216,24 @@ function tokenFromUrl(url) {
   return m ? decodeURIComponent(m[1]) : '';
 }
 
+/**
+ * Проверка токена с TTL (контракт: токен живёт 12 часов, затем нужен новый
+ * getToken). Раньше срок не проверялся вообще — «вечный» токен маскировал
+ * целый класс ошибок интеграции (дефект A-11).
+ */
 function checkToken(url) {
   const token = tokenFromUrl(url);
-  if (token && state.tokens[token]) return true;
-  return false;
+  if (!token) return false;
+  const session = state.tokens[token];
+  if (!session) return false;
+  const age = Date.now() - (session.createdAt || 0);
+  if (TOKEN_TTL_MS > 0 && age > TOKEN_TTL_MS) {
+    delete state.tokens[token];
+    persist();
+    log(`[kassa-mock] токен истёк (возраст ${Math.round(age / 1000)} c > TTL ${Math.round(TOKEN_TTL_MS / 1000)} c) — нужен новый getToken`);
+    return false;
+  }
+  return true;
 }
 
 /* ------------------------------------------------------- document pipeline */
@@ -169,13 +268,38 @@ function fiscalSnapshot(doc) {
   };
 }
 
+// Лента чека: шапка настраивается, чтобы публичный стенд не печатал бренд
+// владельца стенда (дефект A-17: в исходном моке было жёстко «ЛОВИ» и строка
+// «НДС: без НДС» независимо от ставок в позициях).
+const AGENT_LINE = process.env.MOCK_AGENT_LINE || 'ТЕСТОВАЯ КАССА (МОК)';
+const AGENT_INN = process.env.MOCK_AGENT_INN || '7800000000';
+
+// Ставки и подписи для ленты чека (НДС включён в цену — так считает касса).
+const VAT_RATES = { none: 0, vat0: 0, vat5: 5, vat7: 7, vat10: 10, vat20: 20, vat22: 22 };
+
+/** Строки НДС по позициям: «НДС 20%: 16.67» либо «НДС: без НДС». */
+function vatLines(items) {
+  const acc = {};
+  for (const item of items || []) {
+    const type = (item.vat && item.vat.type) || 'none';
+    acc[type] = (acc[type] || 0) + (item.sum || 0);
+  }
+  const types = Object.keys(acc);
+  if (!types.length || types.every((t) => !VAT_RATES[t])) return ['НДС: без НДС'];
+  return types.map((t) => {
+    const rate = VAT_RATES[t] || 0;
+    const gross = acc[t];
+    const tax = rate ? Math.round(gross - gross / (1 + rate / 100)) : 0;
+    return rate ? `НДС ${rate}%: ${(tax / 100).toFixed(2)} р` : `НДС ${t}: без НДС (${(gross / 100).toFixed(2)} р)`;
+  });
+}
+
 function customerReceiptText(doc) {
   const p = doc.payload;
   const lines = [];
   lines.push('================================');
-  lines.push('        ЛОВИ (КАССА-МОК)');
-  lines.push('ООО «Аксиома» — торговый агент');
-  lines.push(`ИНН: ${p.ofd_inn}`);
+  lines.push(AGENT_LINE);
+  lines.push(`ИНН: ${AGENT_INN}`);
   lines.push(`Поставщик: ${doc.supplierLabel}`);
   lines.push(`ИНН поставщика: ${doc.supplierInnLabel}`);
   lines.push('--------------------------------');
@@ -187,7 +311,7 @@ function customerReceiptText(doc) {
     lines.push(`${pay.type === 1 ? 'БЕЗНАЛИЧНЫМИ' : pay.type === 2 ? 'ПРЕДОПЛАТА (аванс)' : pay.type === 4 ? 'ИНАЯ (баллы)' : 'НАЛИЧНЫМИ'}: ${(pay.sum / 100).toFixed(2)} р`);
   }
   lines.push(`ИТОГ: ${(p.total / 100).toFixed(2)} р`);
-  lines.push(`НДС: без НДС`);
+  for (const vat of vatLines(doc.receipt.items)) lines.push(vat);
   lines.push(`Дата: ${p.receipt_datetime.replace('T', ' ')}`);
   lines.push(`ФД №${p.fiscal_document_number} ФН №${p.fn_number}`);
   lines.push(`ФП: ${p.fiscal_document_attribute}`);
@@ -205,6 +329,7 @@ const deliveryQueue = core.createDeliveryQueue({
   log,
   request: (entry) => ({ url: entry.url, data: entry.body }),
   onSuccess: (entry, res, id) => { delete state.callbacks[id]; },
+  blockPrivateHosts: BLOCK_PRIVATE_WEBHOOKS,
 });
 
 function scheduleCallback(doc) {
@@ -245,10 +370,15 @@ setInterval(() => {
       doc.processedAt = now;
       log(`[kassa-mock] doc ${doc.uuid}: FAILED (сценарий fail-)`);
     } else {
-      doc.status = 'done';
-      doc.payload = fiscalSnapshot(doc);
+      // Порядок важен: processedAt выставляется ДО снимка (иначе в чеке
+      // оставался receipt_datetime = 1970-01-01, дефект A-12 аудита), а номер
+      // чека за смену присваивается в момент печати — иначе у двух чеков,
+      // созданных до печати, совпадал fiscal_receipt_number (дефект A-13).
       doc.processedAt = now;
       state.cashbox.checksCnt += 1;
+      doc.fiscalReceiptNumber = state.cashbox.checksCnt;
+      doc.status = 'done';
+      doc.payload = fiscalSnapshot(doc);
       log(`\n[kassa-mock] ===== ЧЕК НАПЕЧАТАН (${doc.operation}) =====\n${customerReceiptText(doc)}\n============================================`);
     }
     // Тело callback в формате Ferma (контракт): статус + payload/error.
@@ -294,7 +424,7 @@ function createDocument(operation, group, body) {
     receipt: body.receipt,
     supplierLabel: shortSupplierName(body.receipt?.items?.[0]?.supplier_info?.name) || '—',
     supplierInnLabel: body.receipt?.items?.[0]?.supplier_info?.inn || '—',
-    fiscalReceiptNumber: (state.cashbox.checksCnt % 9999) + 1,
+    fiscalReceiptNumber: null,       // присваивается при печати (см. тик)
     fiscalDocumentNumber: ++state.counters.fd,
     callbackBody: null,
     payload: null,
@@ -313,21 +443,54 @@ function createDocument(operation, group, body) {
   return doc;
 }
 
+/** Выжимка запроса для журнала: скаляры без token/pass, значения до 60 символов. */
+function bodySummary(body) {
+  const out = {};
+  let n = 0;
+  for (const [k, v] of Object.entries(body || {})) {
+    if (n >= 6) break;
+    if (k === 'token' || k === 'pass' || k === 'password' || v === null || v === undefined || typeof v === 'object') continue;
+    out[k] = String(v).slice(0, 60);
+    n += 1;
+  }
+  return out;
+}
+
 const server = http.createServer(async (req, res) => {
   const url = req.url.split('?')[0];
 
+  if (url.startsWith('/possystem/')) {
+    const started = Date.now();
+    const originalWriteHead = res.writeHead.bind(res);
+    res.writeHead = (code, ...rest) => {
+      const parsed = (() => { try { return JSON.parse(res.__mockBody || '{}'); } catch { return {}; } })();
+      journal.record({ method: req.method, path: url, status: code, ms: Date.now() - started, body: bodySummary(parsed) });
+      return originalWriteHead(code, ...rest);
+    };
+  }
+
   try {
+    if (req.method === 'GET' && url === '/admin/journal') {
+      return sendJson(res, { entries: journal.list() });
+    }
+
     if (req.method === 'GET' && url === '/healthz') {
       return sendJson(res, { ok: !isDown(), checks: state.cashbox.checksCnt });
     }
 
-    // Текстовая админ-консоль (как у tbank-mock)
+    // Текстовая админ-консоль (как у tbank-mock).
+    // Все значения экранируются: данные приходят от интегратора, а страница
+    // публичная — без экранирования это XSS (дефект A-14 аудита).
     if (req.method === 'GET' && url === '/admin') {
       const docs = Object.values(state.receipts).sort((a, b) => b.createdAt - a.createdAt);
       const rows = docs.slice(0, 50).map((d) => `<tr>
-        <td>${d.uuid.slice(0, 8)}</td><td>${d.operation}</td><td>${d.externalId}</td>
-        <td>${d.status}</td><td>${d.payload ? `ФД №${d.payload.fiscal_document_number} ФП ${d.payload.fiscal_document_attribute}` : (d.error ? d.error.text : '—')}</td>
-        <td>${((d.receipt?.total || 0) / 100).toFixed(2)} р</td></tr>`).join('');
+        <td>${escapeHtml(d.uuid.slice(0, 8))}</td><td>${escapeHtml(d.operation)}</td><td>${escapeHtml(d.externalId)}</td>
+        <td>${escapeHtml(d.status)}</td><td>${d.payload ? `ФД №${escapeHtml(d.payload.fiscal_document_number)} ФП ${escapeHtml(d.payload.fiscal_document_attribute)}` : (d.error ? escapeHtml(d.error.text) : '—')}</td>
+        <td>${((d.receipt?.total || 0) / 100).toFixed(2)} р</td>
+        <td>${d.callbackBody ? `<form method="POST" action="/admin/action" style="display:inline"><input type="hidden" name="action" value="resend-callback"><input type="hidden" name="uuid" value="${escapeHtml(d.uuid)}"><button style="width:auto;padding:2px 6px;font-size:11px">callback</button></form>` : '—'}</td></tr>`).join('');
+      const journalRows = journal.list().slice(-15).reverse()
+        .map((e) => `<tr><td>${escapeHtml(e.at.slice(11, 19))}</td><td>${escapeHtml(e.method)}</td><td><code>${escapeHtml(e.path)}</code></td><td>${escapeHtml(Object.entries(e.body || {}).map(([k, v]) => `${k}=${v}`).join(' '))}</td><td>${e.status}</td><td>${e.ms} мс</td></tr>`)
+        .join('') || '<tr><td colspan="6">запросов ещё не было</td></tr>';
       return send(res, 200, `<html><head><meta charset="utf-8"><title>kassa-mock</title><style>
 body{font-family:monospace;background:#111;color:#ddd;margin:20px}table{border-collapse:collapse;width:100%}
 td,th{border:1px solid #444;padding:4px 8px;font-size:13px}th{background:#222}
@@ -349,7 +512,9 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
   <button type="submit">Сбросить реестр external_id</button>
 </form>
 <p>Статус: ${isDown() ? `НЕДОСТУПНА до ${new Date(state.cashbox.downUntil).toISOString()}` : 'готова'} · external_id в реестре: ${Object.keys(state.externalIds).length}</p>
-<table><tr><th>uuid</th><th>op</th><th>external_id</th><th>status</th><th>фискальные данные</th><th>сумма</th></tr>${rows}</table>
+<table><tr><th>uuid</th><th>op</th><th>external_id</th><th>status</th><th>фискальные данные</th><th>сумма</th><th>действия</th></tr>${rows}</table>
+<h2 style="font-size:15px">Журнал запросов к API (последние 15) — <a href="/admin/journal">json</a></h2>
+<table><tr><th>время</th><th>метод</th><th>путь</th><th>поля</th><th>код</th><th>время</th></tr>${journalRows}</table>
 </body></html>`, { 'Content-Type': 'text/html; charset=utf-8' });
     }
 
@@ -360,6 +525,7 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
 
     if (req.method === 'POST' && url === '/possystem/v1/getToken') {
       const raw = await readBody(req);
+      res.__mockBody = raw;
       let creds = {};
       try { creds = JSON.parse(raw || '{}'); } catch { /* fallthrough */ }
       if (creds.login !== MOCK_FERMA_LOGIN || creds.pass !== MOCK_FERMA_PASSWORD) {
@@ -376,13 +542,28 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
     if (req.method === 'POST' && sellMatch) {
       if (!checkToken(req.url)) return jsonRaw(res, 200, errBody(11, 'Не выполнена авторизация'));
       const raw = await readBody(req);
+      res.__mockBody = raw;
       let body;
       try { body = JSON.parse(raw || '{}'); } catch { return jsonRaw(res, 200, errBody(4, 'Неверный формат запроса')); }
 
       const externalId = String(body.external_id || '');
       if (!externalId) return jsonRaw(res, 200, errBody(5, 'external_id обязателен'));
+      // A-16: опечатка в группе раньше проходила молча, в бою это отказ кассы.
+      if (GROUPS.length && !GROUPS.includes(sellMatch[1])) {
+        return jsonRaw(res, 200, errBody(4, `Группа «${sellMatch[1]}» не зарегистрирована на стенде`, {
+          field: 'group_code',
+          hint: `Разрешённые группы задаются env MOCK_GROUPS: ${GROUPS.join(', ')}. Опечатка в группе на боевой кассе = отказ регистрации документа.`,
+        }));
+      }
       if (state.externalIds[externalId]) {
         return jsonRaw(res, 200, errBody(12, `Идентификатор счёта (external_id) «${externalId}» уже существует`));
+      }
+      if (VALIDATE_RECEIPTS) {
+        const problem = validateReceipt(body.receipt);
+        if (problem) {
+          log(`[kassa-mock] sell REJECTED (validation): ${problem.field} — ${externalId}`);
+          return jsonRaw(res, 200, errBody(4, `Чек не прошёл проверку кассы: ${problem.field}`, problem));
+        }
       }
 
       const doc = createDocument(sellMatch[2], sellMatch[1], body);
@@ -427,8 +608,8 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
     if (req.method === 'GET' && receiptMatch) {
       const doc = state.receipts[receiptMatch[1]];
       if (!doc || doc.status !== 'done') return jsonRaw(res, 404, errBody(10, 'Чек не найден'));
-      return send(res, 200, `<html><head><meta charset="utf-8"><title>Чек ${doc.payload.fiscal_document_number}</title></head>
-<body style="font-family:monospace;background:#eee"><pre>${customerReceiptText(doc)}</pre></body></html>`, { 'Content-Type': 'text/html; charset=utf-8' });
+      return send(res, 200, `<html><head><meta charset="utf-8"><title>Чек ${escapeHtml(doc.payload.fiscal_document_number)}</title></head>
+<body style="font-family:monospace;background:#eee"><pre>${escapeHtml(customerReceiptText(doc))}</pre></body></html>`, { 'Content-Type': 'text/html; charset=utf-8' });
     }
 
     if (req.method === 'POST' && url === '/admin/action') {
@@ -446,6 +627,12 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
         state.cashbox.downUntil = 0;
         log('сценарий: касса снова готова к работе');
         persist();
+      } else if (body.action === 'resend-callback') {
+        const doc = state.receipts[body.uuid];
+        if (doc && doc.callbackBody) {
+          scheduleCallback(doc);
+          log(`сценарий: повторный callback для ${body.uuid}`);
+        }
       } else if (body.action === 'clear-external-ids') {
         const n = Object.keys(state.externalIds).length;
         state.externalIds = {};

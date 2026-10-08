@@ -1,0 +1,56 @@
+name: Дефект мока
+description: Мок ведёт себя не так, как ожидалось (ошибка, падение, неверные данные)
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо за репорт! Чем точнее воспроизведение, тем быстрее починим.
+  - type: dropdown
+    id: service
+    attributes:
+      label: Сервис
+      options:
+        - tbank-mock
+        - kassa-mock
+        - ядро (packages/core)
+        - документация
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги воспроизведения
+      description: Последовательность запросов (curl), сценарий, конфиг
+      placeholder: |
+        1. docker compose up
+        2. curl -s http://localhost:3100/v2/Init ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидаемое поведение
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Фактическое поведение
+      description: Ответ мока, текст ошибки, фрагмент лога
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Версия / коммит
+      placeholder: "0.2.0 / d832809"
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Проверено
+      options:
+        - label: Использовал только тестовые креды и тестовые карты
+          required: true

@@ -1,0 +1,9 @@
+.git
+.github
+node_modules
+data
+*.log
+.env
+docs/audit
+docs/canon
+docs/reference

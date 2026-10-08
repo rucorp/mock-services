@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['18', '20', '22']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      # Зависимостей нет (zero-dependency) — install нужен только для корректного npm-контекста
+      - run: npm install --no-audit --no-fund --ignore-scripts
+      - name: selftest ядра
+        run: npm run test:core
+      - name: selftest мока Т-Банка
+        run: npm run test:tbank
+      - name: selftest мока кассы
+        run: npm run test:kassa
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Сборка образа
+        run: docker build -t mock-services:ci .
+      - name: Запуск compose-стенда и smoke-проверка
+        run: |
+          docker compose up -d
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:3100/health >/dev/null && curl -fsS http://localhost:3101/healthz >/dev/null; then
+              echo "стенд поднялся"; exit 0
+            fi
+            sleep 1
+          done
+          echo "стенд не поднялся за 30 с"; docker compose logs; exit 1
+      - name: Логи и остановка
+        if: always()
+        run: docker compose down -v

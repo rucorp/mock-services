@@ -1,18 +1,51 @@
-# Стенд «банк + касса». Конфиг — переменными окружения (см. services/*/README.md).
+# Стенд «банк + касса»: docker compose up
+# Конфиг — переменными окружения (см. services/*/README.md).
 services:
   tbank-mock:
-    image: node:22-alpine
+    build: .
+    image: mock-services:local
     working_dir: /app
     command: node services/tbank-mock/server.js
-    volumes: [".:/app"]
     ports: ["3100:3100"]
     environment:
       MOCK_PORT: "3100"
+      MOCK_HEALTH_PATH: /health
+      # Персистентность между рестартами: состояние на volume ниже.
+      MOCK_STATE_FILE: /data/tbank-state.json
+      # Публичный адрес стенда глазами покупателя (меняйте на свой домен).
+      MOCK_PUBLIC_BASE_URL: "http://localhost:3100"
+      # Для публичного размещения включите защиту исходящих вебхуков от SSRF:
+      # MOCK_BLOCK_PRIVATE_WEBHOOKS: "1"
+    volumes: ["mock-data:/data"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3100,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    restart: unless-stopped
+
   kassa-mock:
-    image: node:22-alpine
+    build: .
+    image: mock-services:local
     working_dir: /app
     command: node services/kassa-mock/server.js
-    volumes: [".:/app"]
     ports: ["3101:3101"]
     environment:
       MOCK_PORT: "3101"
+      MOCK_STATE_FILE: /data/kassa-state.json
+      # Публичный адрес кассы глазами покупателя — от него зависит ofd_receipt_url.
+      MOCK_PUBLIC_BASE_URL: "http://localhost:3101"
+      MOCK_GROUPS: "Main"
+      # MOCK_BLOCK_PRIVATE_WEBHOOKS: "1"
+    volumes: ["mock-data:/data"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3101,path:'/healthz'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    restart: unless-stopped
+
+volumes:
+  mock-data:

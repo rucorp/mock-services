@@ -49,8 +49,12 @@ function request(port, method, p, body, headers = {}) {
   });
 }
 
-const api = (port, method, body, sign = true) =>
-  request(port, 'POST', `/v2/${method}`, sign ? { ...body, Token: tokenOf(body) } : body);
+// Как настоящий клиент: TerminalKey стенда подставляется всегда (его можно
+// переопределить в body для негативных проверок).
+const api = (port, method, body, sign = true) => {
+  const payload = { TerminalKey: TERMINAL, ...body };
+  return request(port, 'POST', `/v2/${method}`, sign ? { ...payload, Token: tokenOf(payload) } : payload);
+};
 
 function waitNotification(pred, timeoutMs = 4000) {
   const deadline = Date.now() + timeoutMs;
@@ -67,10 +71,20 @@ function waitNotification(pred, timeoutMs = 4000) {
 
 async function main() {
   process.env.MOCK_RETRY_MS = '1000';
+  // /webhook — подтверждает доставку; /slow — «медленный и падающий» мерчант
+  // (проверка, что очередь не шлёт одну нотификацию параллельно сама себе).
+  const slowHook = { hits: 0, concurrent: 0, maxConcurrent: 0 };
   const webhook = http.createServer((req, res) => {
     let body = '';
     req.on('data', (c) => { body += c; });
     req.on('end', () => {
+      if (req.url === '/slow') {
+        slowHook.hits += 1;
+        slowHook.concurrent += 1;
+        slowHook.maxConcurrent = Math.max(slowHook.maxConcurrent, slowHook.concurrent);
+        setTimeout(() => { slowHook.concurrent -= 1; res.writeHead(500); res.end('no'); }, 600);
+        return;
+      }
       WEBHOOK_HITS.push({ body, json: JSON.parse(body) });
       res.end('OK');
     });
@@ -214,6 +228,57 @@ async function main() {
   assert.ok(admin.body.includes('Консоль стенда'));
   const health = JSON.parse((await request(mockPort, 'GET', '/health')).body);
   assert.strictEqual(health.ok, true);
+
+  /* --- Регрессы аудита 2026-10-08 (дефекты A-5…A-9, A-3) --------------- */
+
+  // 18. Короткий/битый Token — это код 13, а не «внутренняя ошибка» 5000 (A-5)
+  const shortTok = await request(mockPort, 'POST', '/v2/Init', { TerminalKey: TERMINAL, Amount: '1000', OrderId: 'order-82', Token: 'abc' });
+  assert.strictEqual(JSON.parse(shortTok.body).ErrorCode, '13', 'короткий Token должен отклоняться кодом 13, не 5000');
+
+  // 19. Повторный Init с тем же OrderId — ошибка 7 (дока Init: OrderId уникален) (A-6)
+  const dupOrder = JSON.parse((await api(mockPort, 'Init', { Amount: '1000', OrderId: 'order-77', CreateDealWithType: 'NN' })).body);
+  assert.strictEqual(dupOrder.ErrorCode, '7', 'дубль OrderId должен отклоняться');
+  assert.ok(String(dupOrder.Message).includes('order-77'), 'сообщение должно называть OrderId');
+
+  // 20. Cancel сверх доступной суммы — ошибка 7, состояние не меняется (A-7)
+  const beforeBigCancel = state.payments[paymentId].status;
+  const bigCancel = JSON.parse((await api(mockPort, 'Cancel', { PaymentId: paymentId, Amount: '999999999' })).body);
+  assert.strictEqual(bigCancel.ErrorCode, '7', 'возврат больше суммы платежа должен отклоняться');
+  assert.strictEqual(state.payments[paymentId].status, beforeBigCancel, 'статус не должен меняться');
+  assert.strictEqual(bigCancel.OriginalAmount, 40000, 'должна возвращаться доступная сумма');
+
+  // 21. GetState по OrderId (A-9)
+  const byOrder = JSON.parse((await api(mockPort, 'GetState', { OrderId: 'order-77' })).body);
+  assert.strictEqual(byOrder.Success, true, 'GetState должен принимать OrderId: ' + JSON.stringify(byOrder));
+  assert.strictEqual(byOrder.PaymentId, paymentId);
+
+  // 22. Confirm/Cancel из недопустимого статуса — код 32 (каталог ошибок)
+  const confirmNew = JSON.parse((await api(mockPort, 'Confirm', { PaymentId: init5.PaymentId })).body);
+  assert.strictEqual(confirmNew.ErrorCode, '32', 'Confirm из CANCELED — это 32');
+
+  // 23. Медленный падающий вебхук: очередь не дублирует POST'ы самой себе (A-3)
+  const slowInit = JSON.parse((await api(mockPort, 'Init', {
+    Amount: '70000', OrderId: 'order-83', CreateDealWithType: 'NN', PayType: 'T',
+    NotificationURL: `http://127.0.0.1:${port}/slow`, SuccessURL: successUrl, FailURL: failUrl,
+  })).body);
+  await request(mockPort, 'POST', `/payment/${slowInit.PaymentId}/pay`, 'pan=2201382000000013&exp=1227&cvv=123', { 'Content-Type': 'application/x-www-form-urlencoded' });
+  await new Promise((r) => setTimeout(r, 4500)); // ретрай 1 с + тик 1 с: успеваем увидеть 2–3 попытки
+  const slowNotif = Object.values(state.notifications).find((n) => n.paymentId === slowInit.PaymentId);
+  assert.ok(slowHook.hits >= 2, `ретраев не было: ${slowHook.hits}`);
+  assert.strictEqual(slowHook.maxConcurrent, 1, `параллельных POST на одну нотификацию: ${slowHook.maxConcurrent}`);
+  assert.ok(slowNotif && slowHook.hits - slowNotif.attempts <= 1, `attempts=${slowNotif && slowNotif.attempts}, POST'ов=${slowHook.hits} — очередь отправляет больше, чем учитывает`);
+
+  // 23a. Чужой TerminalKey — ошибка 7 (A-15)
+  const wrongTerminal = JSON.parse((await api(mockPort, 'Init', { TerminalKey: 'OTHER-TERMINAL', Amount: '1000', OrderId: 'order-84', CreateDealWithType: 'NN' })).body);
+  assert.strictEqual(wrongTerminal.ErrorCode, '7', 'чужой TerminalKey должен отклоняться');
+  assert.ok(String(wrongTerminal.Message).includes('OTHER-TERMINAL'));
+
+  // 24. Журнал запросов отдаётся и содержит наши вызовы
+  const journalRes = JSON.parse((await request(mockPort, 'GET', '/admin/journal')).body);
+  const journalPaths = journalRes.entries.map((e) => e.path);
+  assert.ok(journalPaths.includes('/v2/Init'), 'в журнале должен быть Init');
+  const initEntry = journalRes.entries.find((e) => e.path === '/v2/Init' && e.body.OrderId === 'order-77');
+  assert.ok(initEntry && initEntry.status === 200, 'запись журнала должна содержать статус ответа');
 
   console.log(`selftest: ${WEBHOOK_HITS.length} webhook deliveries, ${Object.keys(state.payments).length} payment sessions`);
   console.log('SELFTEST PASSED ✅');

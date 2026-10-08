@@ -1,0 +1,42 @@
+name: Расхождение с протоколом провайдера
+description: Мок ведёт себя не так, как официальная документация банка/ОФД
+title: "[protocol] "
+labels: ["protocol"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Главная ценность проекта — точность протокола. Если мок расходится с
+        официальной докой, это приоритетный дефект.
+  - type: input
+    id: provider
+    attributes:
+      label: Провайдер и метод
+      placeholder: "Т-Банк, POST /v2/Cancel"
+    validations:
+      required: true
+  - type: input
+    id: doc
+    attributes:
+      label: Ссылка на официальный раздел документации
+      description: Если документ закрыт личным кабинетом — приложите скриншот/цитату с датой
+      placeholder: "https://developer.tbank.ru/eacq/api/cancel"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Что написано в документации
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Что делает мок
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Почему это важно для интеграции
+      placeholder: "Проверка не пройдёт так же в бою: …"
