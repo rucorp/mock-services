@@ -156,6 +156,16 @@ async function main() {
   r = await request('GET', `/possystem/v1/Main/report/${hangUuid}?token=${token}`);
   check('hang- -> wait', r.json().status === 'wait');
 
+  // 12b. Универсальный драйвер негативов: X-Mock-Scenario на запросе
+  // (для внешних интеграторов, чьи external_id не начинаются с fail-/hang-)
+  const hdr = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, { ...sellBody, external_id: 'order-42', }, { 'X-Mock-Scenario': 'fail' })).json();
+  await sleep(2200);
+  r = await request('GET', `/possystem/v1/Main/report/${hdr.uuid}?token=${token}`);
+  check('X-Mock-Scenario: fail -> статус fail для обычного external_id', r.json().status === 'fail' && r.json().external_id === 'order-42');
+  const hdrHang = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, { ...sellBody, external_id: 'order-43' }, { 'X-Mock-Scenario': 'hang' })).json();
+  r = await request('GET', `/possystem/v1/Main/report/${hdrHang.uuid}?token=${token}`);
+  check('X-Mock-Scenario: hang -> вечный wait', r.json().status === 'wait');
+
   // 13. stats кассы
   r = await request('GET', `/possystem/v1/stats/cashboxes/extended?token=${token}`);
   check('stats: Готова к работе', r.json().Status === 'Success' && r.json().Data[0].kktState === 'Готова к работе');

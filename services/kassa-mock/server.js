@@ -407,9 +407,14 @@ setInterval(() => {
 
 /* ------------------------------------------------------------- request API */
 
-function createDocument(operation, group, body) {
+function createDocument(operation, group, body, scenarioHeader = '') {
   const uuid = crypto.randomUUID();
   const externalId = String(body.external_id || '');
+  // Универсальный драйвер негативов (аудит §3.1): заголовок X-Mock-Scenario
+  // (fail|hang) на самом запросе — для CI и внешних интеграторов, чьи
+  // external_id не начинаются с префиксов fail-/hang- (соглашение Lovii,
+  // остаётся для совместимости).
+  const scenario = String(scenarioHeader || '').trim().toLowerCase();
   const doc = {
     uuid,
     externalId,
@@ -419,8 +424,8 @@ function createDocument(operation, group, body) {
     createdAt: Date.now(),
     processAt: Date.now() + PROCESS_MS,
     processedAt: null,
-    forceFail: externalId.startsWith('fail-'),
-    hang: externalId.startsWith('hang-'),
+    forceFail: externalId.startsWith('fail-') || scenario === 'fail',
+    hang: externalId.startsWith('hang-') || scenario === 'hang',
     receipt: body.receipt,
     supplierLabel: shortSupplierName(body.receipt?.items?.[0]?.supplier_info?.name) || '—',
     supplierInnLabel: body.receipt?.items?.[0]?.supplier_info?.inn || '—',
@@ -566,7 +571,7 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
         }
       }
 
-      const doc = createDocument(sellMatch[2], sellMatch[1], body);
+      const doc = createDocument(sellMatch[2], sellMatch[1], body, req.headers['x-mock-scenario']);
       if (doc.hang) {
         // Документ «завис»: в очередь не попал, но externalId занят — как
         // реальный «принят, не обработан».

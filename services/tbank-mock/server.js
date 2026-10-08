@@ -37,6 +37,7 @@ const {
   MOCK_AUTO_CONFIRM_MS = '0',
   MOCK_STRICT_TOKEN = 'true',
   MOCK_STATE_FILE = '',
+  MOCK_PROFILE = 'plain',
   MOCK_ALLOW_DUPLICATE_ORDER_ID = 'false',
   MOCK_BLOCK_PRIVATE_WEBHOOKS = 'false',
 } = process.env;
@@ -50,6 +51,10 @@ const STRICT_TOKEN = String(MOCK_STRICT_TOKEN).toLowerCase() !== 'false';
 // (0 = disabled, confirm via admin console button instead).
 const AUTO_CONFIRM_MS = Math.max(0, parseInt(MOCK_AUTO_CONFIRM_MS, 10) || 0);
 const ALLOW_DUPLICATE_ORDER_ID = String(MOCK_ALLOW_DUPLICATE_ORDER_ID).toLowerCase() === 'true';
+// Провайдеро-нейтральность (аудит §3.1): plain — обычный эквайринг (дефолт,
+// 99% интеграций), multisplit — профиль Lovii со сделками. В plain мульти-
+// расчётные поля игнорируются, как незнакомые реальному банку без Мультирасчетов.
+const PROFILE = String(MOCK_PROFILE).toLowerCase() === 'multisplit' ? 'multisplit' : 'plain';
 // Для публичного стенда включайте принудительно: иначе мок становится
 // SSRF-прокси (NotificationURL задаёт интегратор).
 const BLOCK_PRIVATE_WEBHOOKS = String(MOCK_BLOCK_PRIVATE_WEBHOOKS).toLowerCase() === 'true';
@@ -298,7 +303,11 @@ function handleInit(body) {
   }
   let dealId = null;
   const createDeal = String(body.CreateDealWithType || '').toUpperCase() === 'NN';
-  if (body.DealId) {
+  if (PROFILE === 'plain' && !body.DealId && !createDeal) {
+    // plain-профиль: сделочные поля не приходят — платёж без сделки, как в
+    // классическом эквайринге. PaymentRecipientId/CreateDealWithType не
+    // являются ошибкой (банк без Мультирасчетов просто не знает этих полей).
+  } else if (body.DealId) {
     const deal = findDeal(body.DealId);
     if (!deal || deal.status === 'closed') {
       return err(7, 'Сделка не найдена или закрыта', `DealId=${body.DealId}`);

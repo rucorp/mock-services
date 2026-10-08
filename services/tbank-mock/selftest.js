@@ -9,8 +9,14 @@
  */
 
 const http = require('http');
+const path = require('path');
 const assert = require('assert');
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Основной инстанс — профиль Lovii (Мультирасчеты); plain тестируется
+// отдельным процессом в сценарии 25.
+process.env.MOCK_PROFILE = 'multisplit';
 process.env.MOCK_RETRY_MS = '1000';
 process.env.MOCK_STATE_FILE = '';
 process.env.MOCK_PUBLIC_BASE_URL = 'http://mock.test';
@@ -70,7 +76,10 @@ function waitNotification(pred, timeoutMs = 4000) {
 }
 
 async function main() {
-  process.env.MOCK_RETRY_MS = '1000';
+  // Основной инстанс — профиль Lovii (Мультирасчеты); plain тестируется
+// отдельным процессом в сценарии 25.
+process.env.MOCK_PROFILE = 'multisplit';
+process.env.MOCK_RETRY_MS = '1000';
   // /webhook — подтверждает доставку; /slow — «медленный и падающий» мерчант
   // (проверка, что очередь не шлёт одну нотификацию параллельно сама себе).
   const slowHook = { hits: 0, concurrent: 0, maxConcurrent: 0 };
@@ -107,7 +116,7 @@ async function main() {
   assert.strictEqual(JSON.parse(badTok.body).ErrorCode, '13', 'wrong token must be rejected');
 
   // 3. Multisplit Init without DealId/CreateDealWithType -> rejected
-  const noDeal = await api(mockPort, 'Init', { Amount: '1000', OrderId: 'o-1', PaymentRecipientId: '+79001234567' });
+  const noDeal = await api(mockPort, 'Init', { Amount: '1000', OrderId: 'o-1', PaymentRecipientId: '+79001234567' }); // multisplit: сделка обязательна
   assert.strictEqual(JSON.parse(noDeal.body).ErrorCode, '7', 'recipient without deal must be rejected');
   {
     const d = JSON.parse(noDeal.body).Details || {};
@@ -279,6 +288,31 @@ async function main() {
   assert.ok(journalPaths.includes('/v2/Init'), 'в журнале должен быть Init');
   const initEntry = journalRes.entries.find((e) => e.path === '/v2/Init' && e.body.OrderId === 'order-77');
   assert.ok(initEntry && initEntry.status === 200, 'запись журнала должна содержать статус ответа');
+
+  // 25. plain-профиль (дефолт): Init без сделочных полей, PaymentRecipientId
+  // не является ошибкой (классический эквайринг не знает полей Мультирасчетов)
+  {
+    const { spawn } = require('child_process');
+    const plainProc = spawn('node', [path.join(__dirname, 'server.js')], {
+      env: { ...process.env, MOCK_PORT: '3198', MOCK_RETRY_MS: '1000', MOCK_PROFILE: 'plain', MOCK_STATE_FILE: '' },
+      stdio: 'ignore',
+    });
+    try {
+    await new Promise((r) => setTimeout(r, 700));
+    const plainApi = (method, body) => { const signed = { ...body, Token: tokenOf(body) }; return request(3198, 'POST', `/v2/${method}`, signed); };
+    const plainInit = await plainApi('Init', { TerminalKey: TERMINAL_KEY, OrderId: 'plain-1', Amount: '250000', PaymentRecipientId: 'acc-1', NotificationURL: `http://127.0.0.1:${port}/hook` });
+    const plainParsed = JSON.parse(plainInit.body);
+    assert.strictEqual(plainParsed.Success, true, 'plain Init с PaymentRecipientId должен проходить (профиль plain)');
+    const plainPay = await request(3198, 'POST', `/payment/${plainParsed.PaymentId}/pay`, 'pan=2201382000000013&exp=1227', { 'Content-Type': 'application/x-www-form-urlencoded' });
+    assert.ok([200, 302].includes(plainPay.statusCode), `оплата по тестовой карте должна проходить (статус ${plainPay.statusCode}: ${String(plainPay.body).slice(0, 80)})`);
+    await sleep(1500);
+    const plainConf = await plainApi('Confirm', { TerminalKey: TERMINAL_KEY, PaymentId: plainParsed.PaymentId, Amount: '250000' });
+    assert.strictEqual(JSON.parse(plainConf.body).Status, 'CONFIRMED', 'plain Confirm из AUTHORIZED');
+    const plainHook = WEBHOOK_HITS.map((h) => { try { return JSON.parse(h.body); } catch { return null; } }).filter(Boolean).find((n) => n.PaymentId === plainParsed.PaymentId);
+    assert.ok(plainHook, 'plain платёж должен уведомлять мерчанта');
+    assert.strictEqual(plainHook.SpAccumulationId, undefined, 'в plain-нотификации не должно быть SpAccumulationId');
+    } finally { plainProc.kill(); }
+  }
 
   console.log(`selftest: ${WEBHOOK_HITS.length} webhook deliveries, ${Object.keys(state.payments).length} payment sessions`);
   console.log('SELFTEST PASSED ✅');
