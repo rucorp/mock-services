@@ -12,14 +12,21 @@ Zero npm dependencies — чистый Node (>= 18), один файл `server.j
 | Метод | Поведение |
 |---|---|
 | `POST /possystem/v1/getToken` | `{login, pass}` → `{token}` (TTL 12 ч, `MOCK_TOKEN_TTL_MS`); неверные → `error.code=14`, истёкший токен → `error.code=11` |
-| `POST /possystem/v1/{group}/sell` | чек «Предоплата/Полный расчёт» → `{uuid, status:"wait"}`; дубли external_id → `error.code=12`; невалидный чек → `error.code=4` + `field` + `hint` |
-| `POST /possystem/v1/{group}/sell_refund` | чек возврата — тот же жизненный цикл |
-| `POST /possystem/v1/{group}/sell_correction` | чек коррекции (роут есть; спец-поля коррекции пока не валидируются) |
-| `GET /possystem/v1/{group}/report/{uuid}` | `{status: wait\|done\|fail, payload:{ФД/ФП, ofd_receipt_url,…}}` |
-| `GET /possystem/v1/stats/cashboxes/extended` | мониторинг кассы (kktState, тариф, счётчик чеков) |
-| `GET /admin` | консоль: последние 50 документов, фискальные данные, журнал запросов, кнопки сценариев |
+| `POST /possystem/v1/{group}/sell` | чек прихода («Предоплата/Аванс/Полный расчёт/Зачёт аванса») → `{uuid, status:"wait"}`; дубли external_id → `error.code=12`; невалидный чек → `error.code=4` + `field` + `hint` |
+| `POST /possystem/v1/{group}/sell_refund` | чек возврата прихода (опц. `origin_external_id` со сверкой остатка) |
+| `POST /possystem/v1/{group}/sell_correction` | чек коррекции прихода (валидация `correction_info`) |
+| `POST /possystem/v1/{group}/buy` | чек расхода (выплаты физлицам / агентские и неагентские схемы) |
+| `POST /possystem/v1/{group}/buy_refund` | чек возврата расхода (опц. `origin_external_id` со сверкой остатка) |
+| `POST /possystem/v1/{group}/buy_correction` | чек коррекции расхода |
+| `GET /possystem/v1/{group}/report/{uuid}` | `{status: wait\|done\|fail, ofd_status: pending\|sent\|rejected, payload:{ФД/ФП, ofd_receipt_url, vat_amounts, marking_verified,…}}` |
+| `GET /possystem/v1/ofd/queue` | очередь документов в ОФД (`ofdMode`, `count`, `items`) |
+| `POST /possystem/v1/ofd/mode` | управление связью с ОФД (`{mode: "online"\|"offline"\|"reject", flush: true}`) |
+| `GET /possystem/v1/stats/cashboxes/extended` | мониторинг кассы (kktState, тариф, счётчик чеков, `ofdMode`, `ofdQueueCount`) |
+| `GET/POST/PUT /mock/time` | виртуальные часы (`{"advance":"13h"}`, `{"reset":true}`) |
+| `GET/POST/DELETE /mock/scenarios` | сценарное API + заголовок `X-Mock-Scenario: fail\|hang\|ofd-queue\|ofd-reject\|mark-fail\|webhook-drop` |
+| `GET /admin` | консоль: последние 50 документов, фискальные данные, статус ОФД, журнал запросов, кнопки сценариев |
 | `GET /admin/journal` | JSON-журнал последних API-запросов |
-| `GET /healthz` | ok/касса недоступна |
+| `GET /healthz` | ok/касса недоступна + `ofdMode` и `ofdQueueCount` |
 
 ### Валидация чека (DX-слой)
 

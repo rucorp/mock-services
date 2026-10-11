@@ -170,10 +170,202 @@ async function main() {
   r = await request('GET', `/possystem/v1/stats/cashboxes/extended?token=${token}`);
   check('stats: Готова к работе', r.json().Status === 'Success' && r.json().Data[0].kktState === 'Готова к работе');
 
+  /* --- Этап 6–7 (бриф 2026-10-11): полнота 54-ФЗ, ОФД, маркировка, сценарии --- */
+
+  // 14. buy / buy_refund (расход / возврат расхода) в обычной (неагентской) схеме + связка origin_external_id
+  const buyRes = (await request('POST', `/possystem/v1/Main/buy?token=${token}`, {
+    external_id: 'buy-plain-1',
+    receipt: {
+      client: { phone: '+79990001122' },
+      company: { sno: 'usn_income_outcome', payment_address: 'shop.test' },
+      items: [{ name: 'Выкуп вторсырья', price: 45000, quantity: 2, sum: 90000, payment_method: 'full_payment', payment_object: 'commodity', vat: { type: 'vat5' }, measure_unit: 11 }],
+      payments: [{ type: 1, sum: 90000 }],
+      total: 90000,
+    },
+  })).json();
+  check('buy (неагентский расход) -> uuid + wait', Boolean(buyRes && buyRes.uuid && buyRes.status === 'wait'));
+
+  // Частичный возврат расхода (buy_refund) с привязкой к buy-plain-1
+  const buyRefundRes = (await request('POST', `/possystem/v1/Main/buy_refund?token=${token}`, {
+    external_id: 'buy-refund-1',
+    origin_external_id: 'buy-plain-1',
+    receipt: {
+      client: { phone: '+79990001122' },
+      items: [{ name: 'Выкуп вторсырья', price: 45000, quantity: 1, sum: 45000, payment_method: 'full_payment', payment_object: 'commodity', vat: { type: 'vat5' } }],
+      payments: [{ type: 1, sum: 45000 }],
+      total: 45000,
+    },
+  })).json();
+  check('buy_refund с origin_external_id в пределах суммы -> ok', Boolean(buyRefundRes && buyRefundRes.uuid));
+
+  // Повторный buy_refund сверх оставшегося лимита (осталось 45000, просим 90000) -> ошибка 4
+  const buyRefundTooBig = (await request('POST', `/possystem/v1/Main/buy_refund?token=${token}`, {
+    external_id: 'buy-refund-over',
+    origin_external_id: 'buy-plain-1',
+    receipt: {
+      client: { phone: '+79990001122' },
+      items: [{ name: 'Выкуп вторсырья', price: 45000, quantity: 2, sum: 90000, payment_method: 'full_payment', payment_object: 'commodity', vat: { type: 'vat5' } }],
+      payments: [{ type: 1, sum: 90000 }],
+      total: 90000,
+    },
+  })).json();
+  check('buy_refund сверх остатка исходного чека -> код 4', buyRefundTooBig.error && buyRefundTooBig.error.code === 4 && buyRefundTooBig.error.field === 'receipt.total');
+
+  // 15. Аванс / предоплата ( расчётная ставка vat20_120 ) -> Полный расчёт (зачёт аванса type=2)
+  const prepayDoc = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, {
+    external_id: 'adv-100',
+    receipt: {
+      client: { email: 'adv@test.ru' },
+      items: [{ name: 'Сертификат / предоплата заказа', price: 120000, quantity: 1, sum: 120000, payment_method: 'full_prepayment', payment_object: 'payment', vat: { type: 'vat20_120' } }],
+      payments: [{ type: 1, sum: 120000 }],
+      total: 120000,
+    },
+  })).json();
+  check('чек предоплаты с расчётным НДС vat20_120 принят', Boolean(prepayDoc && prepayDoc.uuid));
+
+  const offsetDoc = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, {
+    external_id: 'full-after-adv-100',
+    prepayment_external_id: 'adv-100',
+    receipt: {
+      client: { email: 'adv@test.ru' },
+      items: [{ name: 'Заказ по предоплате', price: 120000, quantity: 1, sum: 120000, payment_method: 'full_payment', payment_object: 'commodity', vat: { type: 'vat22' } }],
+      payments: [{ type: 2, sum: 120000 }], // type 2 = зачёт предоплаты (аванса)
+      total: 120000,
+    },
+  })).json();
+  check('зачёт предоплаты (type=2 + prepayment_external_id) принят', Boolean(offsetDoc && offsetDoc.uuid));
+
+  const doubleOffset = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, {
+    external_id: 'full-after-adv-100-dup',
+    prepayment_external_id: 'adv-100',
+    receipt: {
+      client: { email: 'adv@test.ru' },
+      items: [{ name: 'Повторный зачёт', price: 120000, quantity: 1, sum: 120000, payment_method: 'consideration', payment_object: 'commodity', vat: { type: 'vat22' } }],
+      payments: [{ type: 2, sum: 120000 }],
+      total: 120000,
+    },
+  })).json();
+  check('повторный зачёт уже погашенного аванса -> код 4', doubleOffset.error && doubleOffset.error.code === 4 && doubleOffset.error.field === 'receipt.payments');
+
+  // 16. Валидация ИНН поставщика и маркировки (Честный ЗНАК, ФФД 1.2)
+  const badSupplierInn = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, {
+    external_id: 'bad-inn-1',
+    receipt: {
+      client: { email: 'a@b.c' },
+      items: [{ name: 'Товар', price: 1000, quantity: 1, sum: 1000, vat: { type: 'none' }, supplier_info: { name: 'ООО Тест', inn: '12345' } }],
+      payments: [{ type: 1, sum: 1000 }],
+      total: 1000,
+    },
+  })).json();
+  check('валидация: невалидный ИНН поставщика -> код 4', badSupplierInn.error && badSupplierInn.error.code === 4 && badSupplierInn.error.field === 'receipt.items[0].supplier_info.inn');
+
+  const missingMark = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, {
+    external_id: 'mark-missing-1',
+    receipt: {
+      client: { email: 'a@b.c' },
+      items: [{ name: 'Вода маркированная', price: 5000, quantity: 1, sum: 5000, vat: { type: 'vat20' }, payment_object: 'marked_commodity' }],
+      payments: [{ type: 1, sum: 5000 }],
+      total: 5000,
+    },
+  })).json();
+  check('валидация: marked_commodity без кода маркировки -> код 4', missingMark.error && missingMark.error.code === 4 && missingMark.error.field === 'receipt.items[0].marking_code');
+
+  const markedOk = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, {
+    external_id: 'mark-ok-1',
+    receipt: {
+      client: { email: 'a@b.c' },
+      items: [{
+        name: 'Сыр маркированный',
+        price: 35000,
+        quantity: 1,
+        sum: 35000,
+        vat: { type: 'vat7' },
+        payment_method: 'full_payment',
+        payment_object: 'marked_commodity',
+        measure_unit: 0,
+        marking_code: '010460000000000021abcDEF1234567',
+        mark_quantity: { numerator: 1, denominator: 5 },
+      }],
+      payments: [{ type: 1, sum: 35000 }],
+      total: 35000,
+    },
+  })).json();
+  check('маркированный товар с КМ и mark_quantity принят', Boolean(markedOk && markedOk.uuid));
+
+  const markFailDoc = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, {
+    external_id: 'mark-fail-1',
+    receipt: {
+      client: { email: 'a@b.c' },
+      items: [{
+        name: 'Табак',
+        price: 20000,
+        quantity: 1,
+        sum: 20000,
+        vat: { type: 'vat20' },
+        payment_object: 'marked_excise',
+        marking_code: '010460000000000021badCODE9999',
+      }],
+      payments: [{ type: 1, sum: 20000 }],
+      total: 20000,
+    },
+  }, { 'X-Mock-Scenario': 'mark-fail' })).json();
+
+  // 17. Очередь ОФД и статусы «ждёт/передан/отказ» (pending / sent / rejected)
+  const ofdPendingDoc = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, {
+    external_id: 'ofd-q-1',
+    receipt: {
+      client: { email: 'ofd@test.ru' },
+      items: [{ name: 'Кофе', price: 15000, quantity: 1, sum: 15000, vat: { type: 'vat5' } }],
+      payments: [{ type: 1, sum: 15000 }],
+      total: 15000,
+    },
+  }, { 'X-Mock-Scenario': 'ofd-queue, webhook-drop' })).json();
+
+  const ofdRejectDoc = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, {
+    external_id: 'ofd-rej-1',
+    receipt: {
+      client: { email: 'ofd@test.ru' },
+      items: [{ name: 'Чай', price: 10000, quantity: 1, sum: 10000, vat: { type: 'none' } }],
+      payments: [{ type: 1, sum: 10000 }],
+      total: 10000,
+    },
+  }, { 'X-Mock-Scenario': 'ofd-reject' })).json();
+
+  await sleep(2200);
+
+  const markedReport = (await request('GET', `/possystem/v1/Main/report/${markedOk.uuid}?token=${token}`)).json();
+  check('отчёт маркированного чека содержит marking_verified + vat_amounts (vat7)', Boolean(markedReport.payload && markedReport.payload.marking_verified === true && markedReport.payload.marked_items_count === 1));
+  const markedReceiptPage = await request('GET', `/receipts/${markedOk.uuid}`);
+  check('лента маркированного чека печатает [М] и КМ', markedReceiptPage.status === 200 && markedReceiptPage.text.includes('[М]') && markedReceiptPage.text.includes('НДС 7%'));
+
+  const markFailReport = (await request('GET', `/possystem/v1/Main/report/${markFailDoc.uuid}?token=${token}`)).json();
+  check('X-Mock-Scenario: mark-fail -> status fail + код 58', markFailReport.status === 'fail' && markFailReport.error && markFailReport.error.code === 58);
+
+  const ofdPendingReport = (await request('GET', `/possystem/v1/Main/report/${ofdPendingDoc.uuid}?token=${token}`)).json();
+  check('X-Mock-Scenario: ofd-queue -> чек done в ККТ, но ofd_status=pending', ofdPendingReport.status === 'done' && ofdPendingReport.ofd_status === 'pending');
+
+  const ofdQueueRes = (await request('GET', '/possystem/v1/ofd/queue')).json();
+  check('GET /possystem/v1/ofd/queue показывает документ в очереди ОФД', ofdQueueRes.count >= 1 && ofdQueueRes.items.some((i) => i.uuid === ofdPendingDoc.uuid && i.status === 'pending'));
+
+  const ofdRejReport = (await request('GET', `/possystem/v1/Main/report/${ofdRejectDoc.uuid}?token=${token}`)).json();
+  check('X-Mock-Scenario: ofd-reject -> ofd_status=rejected + ofd_error', ofdRejReport.ofd_status === 'rejected' && Boolean(ofdRejReport.ofd_error));
+
+  // Прокачка очереди ОФД (flush) -> pending переходит в sent
+  const flushRes = (await request('POST', '/possystem/v1/ofd/mode', { mode: 'online', flush: true })).json();
+  const ofdAfterFlush = (await request('GET', `/possystem/v1/Main/report/${ofdPendingDoc.uuid}?token=${token}`)).json();
+  check('POST /possystem/v1/ofd/mode {flush:true} -> ofd_status=sent', flushRes.flushed >= 1 && ofdAfterFlush.ofd_status === 'sent');
+
+  // 18. Виртуальные часы (/mock/time): сдвиг на +13h делает 12-часовой токен просроченным мгновенно
+  const vClockSnap = (await request('POST', '/mock/time', { advance: '13h' })).json();
+  check('POST /mock/time {advance:"13h"} сдвигает виртуальные часы', vClockSnap.offsetMs >= 13 * 3600 * 1000);
+  const expiredByClock = (await request('GET', `/possystem/v1/Main/report/${uuid}?token=${token}`)).json();
+  check('после сдвига часов на +13h токен (TTL 12ч) возвращает код 11', expiredByClock.error && expiredByClock.error.code === 11);
+  await request('POST', '/mock/time', { reset: true });
+
   await phaseRestart();
 
   console.log(`\nИТОГ: ${passed} passed, ${failed} failed\n`);
-  process.exit(failed ? 1 : 0);
+  return failed ? 1 : 0;
 }
 
 /**
@@ -284,5 +476,15 @@ const proc = spawn('node', [path.join(__dirname, 'server.js')], {
 proc.stderr.on('data', (d) => process.stderr.write(d));
 
 setTimeout(async () => {
-  try { await main(); } catch (e) { console.error('selftest crashed:', e); process.exit(1); } finally { proc.kill(); catcher.close(); }
+  let code = 0;
+  try {
+    code = await main();
+  } catch (e) {
+    console.error('selftest crashed:', e);
+    code = 1;
+  } finally {
+    try { proc.kill('SIGKILL'); } catch { /* ignore */ }
+    try { catcher.close(); } catch { /* ignore */ }
+  }
+  process.exit(code);
 }, 800);
