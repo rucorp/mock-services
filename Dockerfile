@@ -11,7 +11,9 @@ COPY package.json ./
 COPY packages ./packages
 COPY services ./services
 COPY scripts ./scripts
+COPY protocols ./protocols
 COPY docs/integration ./docs/integration
+COPY docs/openapi ./docs/openapi
 
 ENV NODE_ENV=production \
     MOCK_HOST=0.0.0.0

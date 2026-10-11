@@ -1,0 +1,255 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "tbank-mock — Т-Банк EACQ / Мультирасчёты / СБП / Рекурренты / acqapi (Мок-стенд)",
+    "version": "0.5.0",
+    "description": "Полнофункциональный мок-стенд эквайринга и Мультирасчётов Т-Банка с поддержкой вебхуков, ретраев, чарджбэков, СБП QR, рекуррентов, регистрации партнёров acqapi, виртуальных часов и мульти-песочниц."
+  },
+  "servers": [
+    { "url": "http://localhost:3100", "description": "Локальный стенд tbank-mock" }
+  ],
+  "components": {
+    "parameters": {
+      "XMockScenario": {
+        "name": "X-Mock-Scenario",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string" },
+        "description": "Сценарий управления поведением: reject:<code>, 3ds, hold-confirm-after:<dur>, partial-refund:<N%>, chargeback-after:<dur>, webhook-drop, webhook-duplicate, latency:<dur>, http-500, http-504."
+      },
+      "XMockSandbox": {
+        "name": "X-Mock-Sandbox",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string" },
+        "description": "Имя изолированной песочницы для параллельных CI-воркеров (по умолчанию default)."
+      },
+      "XMockLatency": {
+        "name": "X-Mock-Latency",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string" },
+        "description": "Искусственная задержка ответа (например, 500ms или 2s)."
+      }
+    },
+    "schemas": {
+      "SignedRequest": {
+        "type": "object",
+        "required": ["TerminalKey", "Token"],
+        "properties": {
+          "TerminalKey": { "type": "string", "example": "TBANKMOCKTEST" },
+          "Token": { "type": "string", "description": "SHA-256 подпись скалярных полей верхнего уровня + Password" }
+        }
+      },
+      "BankResponse": {
+        "type": "object",
+        "required": ["Success", "ErrorCode"],
+        "properties": {
+          "Success": { "type": "boolean" },
+          "ErrorCode": { "type": "string" },
+          "Message": { "type": "string" },
+          "Details": { "type": "string" },
+          "field": { "type": "string" },
+          "hint": { "type": "string" },
+          "doc": { "type": "string" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/v2/Init": {
+      "post": {
+        "summary": "Инициализация платёжной сессии (O/T, DealId/CreateDealWithType, Recurrent=Y, DATA, RedirectDueDate)",
+        "parameters": [
+          { "$ref": "#/components/parameters/XMockScenario" },
+          { "$ref": "#/components/parameters/XMockSandbox" },
+          { "$ref": "#/components/parameters/XMockLatency" }
+        ],
+        "responses": { "200": { "description": "Сессия создана (статус NEW)" } }
+      }
+    },
+    "/v2/GetState": {
+      "post": {
+        "summary": "Получение статуса платежа по PaymentId",
+        "responses": { "200": { "description": "Текущий статус платежа" } }
+      }
+    },
+    "/v2/Confirm": {
+      "post": {
+        "summary": "Подтверждение двухстадийного холда (AUTHORIZED -> CONFIRMED)",
+        "responses": { "200": { "description": "Холд подтверждён" } }
+      }
+    },
+    "/v2/Cancel": {
+      "post": {
+        "summary": "Отмена или полный/частичный возврат платежа (с проверкой незакрытости сделки)",
+        "responses": { "200": { "description": "Возврат/отмена выполнены" } }
+      }
+    },
+    "/v2/CheckOrder": {
+      "post": {
+        "summary": "Проверка статуса заказа по OrderId (массив Payments)",
+        "responses": { "200": { "description": "Список платежей по заказу" } }
+      }
+    },
+    "/v2/Chargeback": {
+      "post": {
+        "summary": "Управление жизненным циклом спора/чарджбэка (DISPUTED -> REPRESENTMENT -> ARBITRATION -> WON|LOST)",
+        "responses": { "200": { "description": "Текущее состояние спора" } }
+      }
+    },
+    "/v2/Dispute": {
+      "post": {
+        "summary": "Алиас /v2/Chargeback для управления спором по платежу",
+        "responses": { "200": { "description": "Текущее состояние спора" } }
+      }
+    },
+    "/v2/createSpDeal": {
+      "post": {
+        "summary": "Явное создание сделки Мультирасчётов N:N (возвращает SpAccumulationId)",
+        "responses": { "200": { "description": "Сделка открыта" } }
+      }
+    },
+    "/v2/closeSpDeal": {
+      "post": {
+        "summary": "Явное закрытие сделки Мультирасчётов (SpAccumulationId)",
+        "responses": { "200": { "description": "Сделка закрыта" } }
+      }
+    },
+    "/v2/GetQr": {
+      "post": {
+        "summary": "Генерация QR-кода СБП (PAYLOAD или SVG IMAGE, минимум 1000 коп. = 10 ₽)",
+        "responses": { "200": { "description": "QR-код СБП сформирован" } }
+      }
+    },
+    "/v2/Charge": {
+      "post": {
+        "summary": "Автосписание по сохранённой карте (RebillId)",
+        "responses": { "200": { "description": "Платёж списан" } }
+      }
+    },
+    "/v2/SendClosingReceipt": {
+      "post": {
+        "summary": "Отправка закрывающего чека (полный расчёт после предоплаты, ФФД 1.2)",
+        "responses": { "200": { "description": "Закрывающий чек принят" } }
+      }
+    },
+    "/v2/AddCustomer": {
+      "post": {
+        "summary": "Регистрация покупателя (CustomerKey) для привязки карт и рекуррентов",
+        "responses": { "200": { "description": "Покупатель зарегистрирован" } }
+      }
+    },
+    "/v2/GetCustomer": {
+      "post": {
+        "summary": "Получение данных покупателя по CustomerKey",
+        "responses": { "200": { "description": "Данные покупателя" } }
+      }
+    },
+    "/v2/RemoveCustomer": {
+      "post": {
+        "summary": "Удаление покупателя и его привязанных карт",
+        "responses": { "200": { "description": "Покупатель удалён" } }
+      }
+    },
+    "/v2/AddCard": {
+      "post": {
+        "summary": "Привязка карты к покупателю (CustomerKey -> CardId + RebillId)",
+        "responses": { "200": { "description": "Карта привязана" } }
+      }
+    },
+    "/v2/GetCardList": {
+      "post": {
+        "summary": "Список сохранённых карт покупателя (CustomerKey)",
+        "responses": { "200": { "description": "Массив карт покупателя" } }
+      }
+    },
+    "/v2/RemoveCard": {
+      "post": {
+        "summary": "Удаление привязанной карты по CardId",
+        "responses": { "200": { "description": "Карта удалена (Status=D)" } }
+      }
+    },
+    "/e2c/v2/Init": {
+      "post": {
+        "summary": "Инициализация выплаты партнёру по сделке (с проверкой остатка DealId и флагом FinalPayout)",
+        "responses": { "200": { "description": "Выплата создана (Status=NEW)" } }
+      }
+    },
+    "/e2c/v2/Payment": {
+      "post": {
+        "summary": "Проведение выплаты партнёру (поддержка тестовой карты 5000000000000553 -> 1057 и автозакрытия сделки по FinalPayout)",
+        "responses": { "200": { "description": "Статус выплаты CONFIRMED или REJECTED" } }
+      }
+    },
+    "/e2c/v2/GetState": {
+      "post": {
+        "summary": "Получение статуса выплаты e2c",
+        "responses": { "200": { "description": "Текущий статус выплаты" } }
+      }
+    },
+    "/e2c/v2/CancelPayment": {
+      "post": {
+        "summary": "Отмена выплаты e2c с возвратом суммы в баланс сделки",
+        "responses": { "200": { "description": "Выплата отменена (Status=CANCELED)" } }
+      }
+    },
+    "/e2c/v2/GetSbpMembers": {
+      "post": {
+        "summary": "Справочник банков-участников СБП для выплат по номеру телефона",
+        "responses": { "200": { "description": "Список банков СБП" } }
+      }
+    },
+    "/oauth/token": {
+      "post": {
+        "summary": "Получение OAuth 2.0 Bearer-токена для API регистрации партнёров acqapi",
+        "responses": { "200": { "description": "Bearer access_token" } }
+      }
+    },
+    "/sm-register/register": {
+      "post": {
+        "summary": "Регистрация партнёра (ShopCode) в Мультирасчётах с валидацией billingDescriptor и ИНН",
+        "responses": { "200": { "description": "Зарегистрированный партнёр с shopCode и терминалами" } }
+      }
+    },
+    "/av/v1/payment": {
+      "post": {
+        "summary": "Сигнал о поступлении верификационного платежа МСП на спецсчёт",
+        "responses": { "200": { "description": "Поступление зарегистрировано" } }
+      }
+    },
+    "/av/v1/verification": {
+      "post": {
+        "summary": "Верификация реквизитов («прогон рубля»)",
+        "responses": { "200": { "description": "Статус RETURNED" } }
+      }
+    },
+    "/mock/time": {
+      "get": { "summary": "Чтение виртуальных часов стенда", "responses": { "200": { "description": "Снимок часов" } } },
+      "post": { "summary": "Сдвиг или установка виртуального времени ({advance:'7d'} / {reset:true})", "responses": { "200": { "description": "Обновлённый снимок часов" } } }
+    },
+    "/mock/scenarios": {
+      "get": { "summary": "Список активных сценарных правил и история срабатываний", "responses": { "200": { "description": "Правила и история" } } },
+      "post": { "summary": "Добавление одноразового или постоянного правила сценария", "responses": { "200": { "description": "Правило добавлено" } } },
+      "delete": { "summary": "Очистка правил и истории сценариев", "responses": { "200": { "description": "Очищено" } } }
+    },
+    "/mock/sandboxes": {
+      "get": { "summary": "Список изолированных песочниц", "responses": { "200": { "description": "Список песочниц" } } },
+      "post": { "summary": "Переключение или создание песочницы", "responses": { "200": { "description": "Активная песочница" } } },
+      "delete": { "summary": "Сброс песочницы", "responses": { "200": { "description": "Песочница сброшена" } } }
+    },
+    "/mock/reset": {
+      "post": { "summary": "Полный сброс состояния текущей песочницы, сценариев и журнала", "responses": { "200": { "description": "Сброшено" } } }
+    },
+    "/mock/state": {
+      "get": { "summary": "Экспорт полного снимка состояния песочницы", "responses": { "200": { "description": "JSON-снимок состояния" } } },
+      "post": { "summary": "Импорт снимка состояния песочницы", "responses": { "200": { "description": "Состояние загружено" } } }
+    },
+    "/mock/verify-merchant": {
+      "post": { "summary": "Активный экзаменатор webhook-приёмника мерчанта (3 пробы: валидная подпись, идемпотентность дубля, отказ на поддельном Token)", "responses": { "200": { "description": "Отчёт сертификации обработчика вебхуков" } } }
+    },
+    "/openapi.json": {
+      "get": { "summary": "Спецификация OpenAPI 3.1.0 сервиса tbank-mock", "responses": { "200": { "description": "OpenAPI JSON" } } }
+    }
+  }
+}

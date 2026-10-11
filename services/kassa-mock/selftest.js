@@ -364,6 +364,78 @@ async function main() {
   check('после сдвига часов на +13h токен (TTL 12ч) возвращает код 11', expiredByClock.error && expiredByClock.error.code === 11);
   await request('POST', '/mock/time', { reset: true });
 
+  // Получаем свежий токен для проверок смен, ФН, позиционного возврата и dry-run
+  const freshToken = (await request('POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' })).json().token;
+  const validBody = (extId) => JSON.parse(JSON.stringify({ ...sellBody, external_id: extId }));
+
+  // 19. Смены ККТ и Z-отчёты (/possystem/v1/shift/* + ограничение 24 часа 54-ФЗ -> код 62)
+  const shiftClose = (await request('POST', '/possystem/v1/shift/close', {})).json();
+  check('POST /possystem/v1/shift/close закрывает смену и формирует Z-отчёт', shiftClose.ok === true && shiftClose.zReport && shiftClose.zReport.fdNumber > 0);
+  const closedShiftReceipt = (await request('POST', `/possystem/v1/Main/sell?token=${freshToken}`, validBody('sell-closed-shift'))).json();
+  check('попытка фискализации при закрытой смене -> код 62', closedShiftReceipt.error && closedShiftReceipt.error.code === 62);
+  const shiftOpen = (await request('POST', '/possystem/v1/shift/open', {})).json();
+  check('POST /possystem/v1/shift/open открывает новую смену', shiftOpen.ok === true && shiftOpen.status === 'open');
+  // Сдвигаем часы на +25 часов (больше 24ч лимита смены по 54-ФЗ), предварительно обновив токен после сдвига
+  await request('POST', '/mock/time', { advance: '25h' });
+  const tokAfter25h = (await request('POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' })).json().token;
+  const expiredShiftReceipt = (await request('POST', `/possystem/v1/Main/sell?token=${tokAfter25h}`, validBody('sell-expired-shift'))).json();
+  check('смена открыта > 24 часов (ст. 4.3 54-ФЗ) -> код 62', expiredShiftReceipt.error && expiredShiftReceipt.error.code === 62);
+  await request('POST', '/mock/time', { reset: true });
+  const tokNormal = (await request('POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' })).json().token;
+
+  // 20. Ресурс и переполнение ФН (/possystem/v1/fn/state -> код 63)
+  await request('POST', '/possystem/v1/fn/state', { capacity: 10, used: 10 });
+  const fnOverflowReceipt = (await request('POST', `/possystem/v1/Main/sell?token=${tokNormal}`, validBody('sell-fn-overflow'))).json();
+  check('переполнение фискального накопителя (used >= capacity) -> код 63', fnOverflowReceipt.error && fnOverflowReceipt.error.code === 63);
+  const fnReset = (await request('POST', '/possystem/v1/fn/state', { reset: true, capacity: 250000, fnNumber: '9999078902009999' })).json();
+  check('POST /possystem/v1/fn/state {reset:true} сбрасывает счётчик ФН', fnReset.ok === true && fnReset.used === 0 && fnReset.overflow === false);
+
+  // 21. Позиционный контроль количества при возврате (origin_external_id)
+  const parentMulti = validBody('sell-multi-qty');
+  parentMulti.receipt.items = [
+    { name: 'Наушники', price: 10000, quantity: 2, sum: 20000, vat: { type: 'none' }, payment_method: 'full_payment', payment_object: 'commodity' },
+    { name: 'Чехол', price: 5000, quantity: 1, sum: 5000, vat: { type: 'none' }, payment_method: 'full_payment', payment_object: 'commodity' },
+  ];
+  parentMulti.receipt.payments = [{ type: 1, sum: 25000 }];
+  parentMulti.receipt.total = 25000;
+  await request('POST', `/possystem/v1/Main/sell?token=${tokNormal}`, parentMulti);
+
+  // Пытаемся вернуть 3 шт. «Наушники» по 5000 (сумма 15000 <= 25000, но количество 3 > 2 проданных!)
+  const badItemQtyRefund = validBody('refund-bad-item-qty');
+  badItemQtyRefund.origin_external_id = 'sell-multi-qty';
+  badItemQtyRefund.receipt.items = [
+    { name: 'Наушники', price: 5000, quantity: 3, sum: 15000, vat: { type: 'none' }, payment_method: 'full_payment', payment_object: 'commodity' },
+  ];
+  badItemQtyRefund.receipt.payments = [{ type: 1, sum: 15000 }];
+  badItemQtyRefund.receipt.total = 15000;
+  const badQtyRes = (await request('POST', `/possystem/v1/Main/sell_refund?token=${tokNormal}`, badItemQtyRefund)).json();
+  check('позиционный контроль возврата: возврат 3 шт. при 2 проданных -> код 4 на items[0].quantity',
+    badQtyRes.error && badQtyRes.error.code === 4 && badQtyRes.error.field === 'receipt.items[0].quantity');
+
+  // 22. Dry-run валидация чека без фискализации (POST /possystem/v1/validate)
+  const dryOk = (await request('POST', '/possystem/v1/validate', validBody('dry-run-ok'))).json();
+  check('POST /possystem/v1/validate на валидном чеке -> valid=true без записи в реестр',
+    dryOk.valid === true && dryOk.total === 61000);
+  const dryBadBody = validBody('dry-run-bad');
+  dryBadBody.receipt.total = 99999;
+  const dryBad = (await request('POST', '/possystem/v1/validate', dryBadBody)).json();
+  check('POST /possystem/v1/validate на битом чеке -> valid=false + error.field',
+    dryBad.valid === false && dryBad.error && dryBad.error.field === 'receipt.total');
+
+  // 23. Мульти-песочницы (X-Mock-Sandbox), активный экзаменатор вебхуков и curl в /admin/journal
+  const sbHealth = (await request('GET', '/healthz', null, { 'X-Mock-Sandbox': 'worker-kassa-2' })).json();
+  check('X-Mock-Sandbox изолирует состояние кассы (checks=0 в новой песочнице)',
+    sbHealth.sandbox === 'worker-kassa-2' && sbHealth.checks === 0);
+  await request('POST', '/mock/sandboxes', { sandbox: 'default' });
+
+  const verifyMerchantRes = (await request('POST', '/mock/verify-merchant', { url: `http://127.0.0.1:${PORT + 1}/callback` })).json();
+  check('POST /mock/verify-merchant проверяет callback мерчанта (readyForProd=true)',
+    verifyMerchantRes.ok === true && verifyMerchantRes.readyForProd === true);
+
+  const journalResp = (await request('GET', '/admin/journal')).json();
+  check('/admin/journal содержит готовый curl-сниппет для воспроизведения',
+    Array.isArray(journalResp.entries) && journalResp.entries.length > 0 && journalResp.entries[journalResp.entries.length - 1].curl.startsWith('curl '));
+
   await phaseRestart();
 
   console.log(`\nИТОГ: ${passed} passed, ${failed} failed\n`);

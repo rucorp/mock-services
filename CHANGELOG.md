@@ -3,6 +3,28 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версии — [SemVer](https://semver.org/lang/ru/).
 
+## [0.5.0] — 2026-10-11
+
+### Added
+- **Блок 1 — Активный экзаменатор, мульти-песочницы, хаос и `curl` (`packages/core`, оба сервиса)**:
+  - мульти-песочницы для параллельных CI-воркеров (`X-Mock-Sandbox: <id>`, `?sandbox=<id>`, `GET/POST/DELETE /mock/sandboxes`, `POST /mock/reset`, `GET/POST /mock/state`) с сохранением ссылочной целостности `state`;
+  - активный экзаменатор вебхук-приёмника интегратора (`POST /mock/verify-merchant`): проверяет приём валидного вебхука (`200 OK`), идемпотентность при повторной доставке и отклонение поддельного `Token`;
+  - инъекция сетевых задержек и сбоев (`X-Mock-Latency: 500ms`, `X-Mock-Scenario: latency:1s | http-500 | http-504`);
+  - автоматическая генерация готовых `curl`-сниппетов для каждого запроса в `/admin/journal` и UI `/admin`.
+- **Блок 2 — Полное покрытие протокола Т-Банка (`tbank-mock`)**:
+  - **Мультирасчёты Wave 2**: `/v2/createSpDeal`, `/v2/closeSpDeal`, строгий контроль баланса сделки при выплатах `/e2c/v2/Init` и `/e2c/v2/Payment` (приходы − возвраты − чарджбэки − выплаты), автозакрытие сделки по `FinalPayout: true` с фиксацией `PlatformReward`, запрет возврата покупателю по закрытой сделке (`ErrorCode: "32"`), отмена выплаты `/e2c/v2/CancelPayment`, справочник банков СБП `/e2c/v2/GetSbpMembers`, тестовая карта ошибки выплаты `5000000000000553` → `REJECTED` с `ErrorCode: "1057"`;
+  - **Регистрация партнёров `acqapi`**: `POST /oauth/token`, `POST /sm-register/register`, `GET /sm-register/register/shop/:shopCode`, `PATCH /sm-register/register/:shopCode` с валидацией `billingDescriptor` (≤14 символов латиницей) и ИНН;
+  - **СБП QR и закрывающие чеки**: `/v2/GetQr` (`PAYLOAD` и `IMAGE` SVG, проверка минимальной суммы 1000 коп. = 10 ₽), `POST /payment/:id/sbp-pay`, `/v2/SendClosingReceipt`;
+  - **Рекуррентные платежи и карты**: `Init` с `Recurrent=Y` и `CustomerKey`, выдача `RebillId` в вебхуке `AUTHORIZED`, автосписание `/v2/Charge`, управление покупателями и картами (`/v2/AddCustomer`, `GetCustomer`, `RemoveCustomer`, `AddCard`, `GetCardList`, `RemoveCard`), проверка лимитов `DATA` (≤20 пар, ключ ≤20, значение ≤100) и `RedirectDueDate` (≤90 дней).
+- **Блок 3 — Полное покрытие 54-ФЗ и ККТ (`kassa-mock`)**:
+  - **Смены ККТ и Z-отчёты**: `GET /possystem/v1/shift/status`, `POST /possystem/v1/shift/open`, `POST /possystem/v1/shift/close` (формирование Z-отчёта с итогами смены), контроль 24-часового лимита смены по ст. 4.3 54-ФЗ с виртуальными часами (`код 62`);
+  - **Ресурс Фискального Накопителя (ФН)**: `GET/POST /possystem/v1/fn/state`, симуляция переполнения ФН (`код 63`) и замены/сброса ФН (`reset: true`);
+  - **Позиционный контроль возвратов**: проверка остатка количества по каждой позиции чека (`receipt.items[i].quantity`) относительно исходного чека `origin_external_id`;
+  - **Dry-run валидация**: `POST /possystem/v1/validate` (проверка структуры, сумм и ставок НДС без фискализации и без расхода ФД/ФН).
+- **Блок 4 — OpenAPI 3.1 и детектор дрейфа протоколов (`docs/openapi/*`, `protocols/*`, `scripts/check-protocol-drift.js`)**:
+  - спецификации OpenAPI 3.1.0 (`docs/openapi/tbank-mock.openapi.json`, `docs/openapi/kassa-mock.openapi.json`) и встроенный маршрут `GET /openapi.json` на обоих сервисах;
+  - декларативные манифесты протоколов (`protocols/tbank-eacq.json`, `protocols/ferma-ofd.json`) и скрипт `npm run check:drift` (134 инварианта контракта).
+
 ## [0.4.0] — 2026-10-11
 
 ### Added

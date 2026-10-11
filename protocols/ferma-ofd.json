@@ -1,0 +1,82 @@
+{
+  "id": "ferma-ofd-54fz",
+  "title": "ОФД Ферма (ofd.ru) — Облачная касса 54-ФЗ (ФФД 1.2)",
+  "version": "2026.10",
+  "upstreamDocs": [
+    "docs/reference/README-kassa-mock.md",
+    "docs/canon/SZ-096-mock-kassa-service.md",
+    "docs/canon/T-038-fiscalization-54fz.md"
+  ],
+  "operations": [
+    "sell",
+    "sell_refund",
+    "sell_correction",
+    "buy",
+    "buy_refund",
+    "buy_correction"
+  ],
+  "routes": [
+    "/possystem/v1/getToken",
+    "/possystem/v1/{group}/{operation}",
+    "/possystem/v1/{group}/report/{uuid}",
+    "/possystem/v1/stats/cashboxes/extended",
+    "/possystem/v1/ofd/queue",
+    "/possystem/v1/ofd/mode",
+    "/possystem/v1/shift/status",
+    "/possystem/v1/shift/open",
+    "/possystem/v1/shift/close",
+    "/possystem/v1/fn/state",
+    "/possystem/v1/validate"
+  ],
+  "mockControlRoutes": [
+    "/mock/time",
+    "/mock/scenarios",
+    "/mock/sandboxes",
+    "/mock/reset",
+    "/mock/state",
+    "/mock/verify-merchant",
+    "/openapi.json"
+  ],
+  "vatTypes": [
+    "none",
+    "vat0",
+    "vat5",
+    "vat7",
+    "vat10",
+    "vat20",
+    "vat22",
+    "vat5_105",
+    "vat7_107",
+    "vat10_110",
+    "vat20_120",
+    "vat22_122"
+  ],
+  "paymentMethods": [
+    "full_prepayment",
+    "partial_prepayment",
+    "advance",
+    "full_payment",
+    "partial_payment",
+    "credit",
+    "credit_payment",
+    "consideration"
+  ],
+  "paymentObjects": [
+    "commodity",
+    "excise",
+    "job",
+    "service",
+    "payment",
+    "agent_commission",
+    "marked_commodity",
+    "marked_excise"
+  ],
+  "paymentTypes": [1, 2, 3, 4, 5],
+  "ofdStatuses": ["pending", "sent", "rejected"],
+  "limits": {
+    "tokenTtlHours": 12,
+    "shiftMaxDurationHours": 24,
+    "externalIdMaxLength": 36
+  },
+  "errorCodes": [0, 4, 5, 10, 11, 12, 14, 57, 58, 62, 63]
+}

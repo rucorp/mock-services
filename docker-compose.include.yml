@@ -20,7 +20,7 @@
 
 services:
   tbank-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.4.0}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.5.0}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/tbank-mock/server.js"]
@@ -59,7 +59,7 @@ services:
     restart: unless-stopped
 
   kassa-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.4.0}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.5.0}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/kassa-mock/server.js"]
