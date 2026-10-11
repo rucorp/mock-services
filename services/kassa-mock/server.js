@@ -935,17 +935,13 @@ function createDocument(operation, group, body, scenarioHeader = '', preResolved
   return doc;
 }
 
-/** Выжимка запроса для журнала: скаляры без token/pass, значения до 60 символов. */
+/**
+ * Выжимка запроса для журнала: скаляры, не более 6 полей, значения до 60
+ * символов. Редакцию секретов и PII делает ядро (F-09): `token`, `pass`,
+ * реквизиты покупателя (телефон/e-mail) и PAN в журнал не попадают.
+ */
 function bodySummary(body) {
-  const out = {};
-  let n = 0;
-  for (const [k, v] of Object.entries(body || {})) {
-    if (n >= 6) break;
-    if (k === 'token' || k === 'pass' || k === 'password' || v === null || v === undefined || typeof v === 'object') continue;
-    out[k] = String(v).slice(0, 60);
-    n += 1;
-  }
-  return out;
+  return core.summarizeBody(body, { maxKeys: 6, maxValueLength: 60 });
 }
 
 /**
@@ -1427,14 +1423,16 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
       res.__mockBody = raw;
       let creds = {};
       try { creds = JSON.parse(raw || '{}'); } catch { /* fallthrough */ }
+      // F-09: креды Ferma не пишутся в лог целиком — только различимый префикс.
+      const loginLabel = core.maskPiiValue('login', creds.login);
       if (creds.login !== FERMA_LOGIN_CRED || creds.pass !== FERMA_PASSWORD_CRED) {
-        log(`[kassa-mock] getToken DENIED for login=${creds.login}`);
+        log(`[kassa-mock] getToken DENIED for login=${loginLabel}`);
         return jsonRaw(res, 200, errBody(14, 'Неверный логин или пароль'));
       }
       const token = crypto.randomBytes(16).toString('hex');
-      state.tokens[token] = { login: creds.login, createdAt: clock.now() };
+      state.tokens[token] = { login: loginLabel, createdAt: clock.now() };
       persist();
-      log(`[kassa-mock] getToken OK for ${creds.login}`);
+      log(`[kassa-mock] getToken OK for ${loginLabel}`);
       return sendJson(res, { error: null, timestamp: clock.iso(), token });
     }
 
@@ -1614,7 +1612,7 @@ if (require.main === module) {
   server.listen(parseInt(MOCK_PORT, 10), MOCK_HOST, () => {
     const port = server.address().port; // MOCK_PORT=0 -> реальный порт
     log(`kassa-mock (Ferma cloud-cashbox mock) on ${MOCK_HOST}:${port}`);
-    log(`login=${FERMA_LOGIN_CRED} process_delay=${PROCESS_MS}ms state=${MOCK_STATE_FILE || 'memory'}`);
+    log(`login=${core.maskPiiValue('login', FERMA_LOGIN_CRED)} process_delay=${PROCESS_MS}ms state=${MOCK_STATE_FILE || 'memory'}`);
     log(`control-plane: admin_token=${MOCK_ADMIN_TOKEN ? 'on' : 'off'} operator_token=${OPERATOR_TOKEN ? 'on' : 'off'} hosted=${HOSTED} block_private_webhooks=${BLOCK_PRIVATE_WEBHOOKS}`);
   });
 }

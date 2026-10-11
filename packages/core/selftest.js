@@ -532,6 +532,147 @@ async function main() {
     assert.ok(!tokenEntry.path.includes('ferma-secret') && !tokenEntry.curl.includes('ferma-secret'));
   });
 
+  check('redactSecrets рекурсивно скрывает секреты, PAN и PII, не трогая обычные поля (F-09)', () => {
+    const sentinelPass = `sentinel-pass-${process.pid}`;
+    const redacted = core.redactSecrets({
+      Authorization: 'Basic cGFydG5lcjpzZWNyZXQ=',
+      Cookie: 'session=abc123',
+      login: 'loviitest',
+      pass: sentinelPass,
+      access_token: 'mock-acqapi-bearer-1234567890',
+      CardData: { PAN: '5000000000000553', CVV: '123', ExpDate: '1227' },
+      Description: 'выплата на карту 5000 0000 0000 0553 или 2201382000000013',
+      PayerInn: '7801111111',
+      Phone: '+79211234567',
+      Email: 'ivan@example.com',
+      Amount: '20000',
+      nested: [{ Password: 'x', note: 'без секретов' }],
+    });
+    assert.strictEqual(redacted.Authorization, core.REDACTED);
+    assert.strictEqual(redacted.Cookie, core.REDACTED);
+    assert.strictEqual(redacted.login, core.REDACTED);
+    assert.strictEqual(redacted.pass, core.REDACTED);
+    assert.strictEqual(redacted.access_token, core.REDACTED);
+    assert.strictEqual(redacted.CardData, core.REDACTED, 'CardData — контейнер реквизитов, скрывается целиком');
+    assert.strictEqual(redacted.Description, 'выплата на карту 500000**0553 или 220138**0013');
+    assert.strictEqual(redacted.PayerInn, '7801******');
+    assert.strictEqual(redacted.Phone, '***4567');
+    assert.strictEqual(redacted.Email, 'iv***@example.com');
+    assert.strictEqual(redacted.Amount, '20000', 'не секрет — остаётся для отладки');
+    assert.strictEqual(redacted.nested[0].Password, core.REDACTED);
+    assert.strictEqual(redacted.nested[0].note, 'без секретов');
+    const serialized = JSON.stringify(redacted);
+    assert.ok(!serialized.includes(sentinelPass), 'пароль не должен остаться в дереве');
+    assert.ok(!serialized.includes('5000000000000553'), 'PAN не должен остаться в дереве');
+  });
+
+  check('redactSecrets не переносит __proto__ и ограничивает глубину (F-01/F-09)', () => {
+    const pollutedKey = `f09_redact_${process.pid}`;
+    const dirty = JSON.parse(`{"__proto__":{"${pollutedKey}":true},"safe":"значение"}`);
+    const clean = core.redactSecrets(dirty);
+    assert.strictEqual(Object.prototype[pollutedKey], undefined);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(Object.prototype, pollutedKey), false);
+    assert.strictEqual(clean.safe, 'значение');
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(clean, '__proto__'), false);
+
+    let deep = {};
+    const tail = deep;
+    for (let i = 0; i < 30; i += 1) { deep.next = { level: i }; deep = deep.next; }
+    const flat = JSON.stringify(core.redactSecrets(tail));
+    assert.ok(flat.length < 2000, `глубина должна быть ограничена: ${flat.length}`);
+    assert.ok(flat.includes('[…]'), 'на предельной глубине — маркер, не рекурсия');
+  });
+
+  check('PAN-сканер маскирует только номера карт: Luhn + префикс платёжной системы (F-10)', () => {
+    assert.strictEqual(core.looksLikePan('5000000000000553'), true);
+    assert.strictEqual(core.looksLikePan('5000 0000 0000 0553'), true);
+    assert.strictEqual(core.looksLikePan('2201382000000013'), true);
+    assert.strictEqual(core.looksLikePan('1234567890123456'), false, 'не платёжный префикс');
+    assert.strictEqual(core.looksLikePan(String(Date.now())), false, '13-значный таймстамп — не PAN');
+    assert.strictEqual(core.maskPan('5000000000000553'), '500000**0553');
+    assert.strictEqual(
+      core.redactSecretsInText('карта 5000000000000553, заказ 1234567890123456'),
+      'карта 500000**0553, заказ 1234567890123456',
+    );
+    assert.strictEqual(core.redactSecretsInText('Bearer mock-acqapi-bearer-1234567890'), 'Bearer [REDACTED]');
+  });
+
+  check('redactRawBody понимает JSON, form-urlencoded и произвольный текст (F-09)', () => {
+    assert.strictEqual(
+      core.redactRawBody('{"login":"loviitest","pass":"secret-value"}'),
+      '{"login":"[REDACTED]","pass":"[REDACTED]"}',
+    );
+    assert.strictEqual(
+      core.redactRawBody('pan=5000000000000553&exp=1227&cvv=123&amount=100'),
+      'pan=[REDACTED]&exp=1227&cvv=[REDACTED]&amount=100',
+    );
+    assert.strictEqual(
+      core.redactRawBody('свободный текст с картой 2201382000000013'),
+      'свободный текст с картой 220138**0013',
+    );
+    assert.strictEqual(core.redactRawBody(''), '');
+  });
+
+  check('createJournal: креды и PAN не попадают в запись, JSON и curl; запись ограничена по длине (F-09)', () => {
+    const sentinelPass = `sentinel-pass-${process.pid}`;
+    const j = core.createJournal({ baseUrl: 'http://localhost:3101' });
+    j.record({
+      method: 'POST',
+      path: '/possystem/v1/getToken',
+      status: 200,
+      ms: 4,
+      body: { error: null, timestamp: '2026-10-11T00:00:00Z', token: 'issued-token-123456' },
+      rawBody: JSON.stringify({ login: 'loviitest', pass: sentinelPass }),
+      headers: {
+        authorization: 'Basic cGFydG5lcjpzZWNyZXQ=',
+        cookie: 'sid=abc',
+        'content-type': 'application/json',
+        'x-mock-scenario': 'fail',
+      },
+    });
+    j.record({
+      method: 'POST',
+      path: '/e2c/v2/Init',
+      status: 200,
+      ms: 6,
+      body: core.summarizeBody({ TerminalKey: 'T', Amount: '20000', Pan: '5000000000000553', OrderId: 'p-1' }),
+      headers: { authorization: 'Bearer mock-acqapi-bearer-1234567890', 'content-type': 'application/json' },
+    });
+
+    const serialized = JSON.stringify(j.list());
+    assert.ok(!serialized.includes(sentinelPass), 'пароль Ferma не должен храниться в журнале');
+    assert.ok(!serialized.includes('loviitest'), 'логин Ferma не должен храниться в журнале');
+    assert.ok(!serialized.includes('cGFydG5lcjpzZWNyZXQ'), 'Authorization не должен храниться в журнале');
+    assert.ok(!serialized.includes('mock-acqapi-bearer'), 'Bearer-токен не должен храниться в журнале');
+    assert.ok(!serialized.includes('5000000000000553'), 'PAN не должен храниться в журнале');
+    assert.ok(!serialized.includes('issued-token-123456'), 'выданный токен не должен храниться в журнале');
+
+    const [getTokenEntry, initEntry] = j.list();
+    assert.strictEqual(getTokenEntry.headers.authorization, undefined, 'allowlist заголовков должен отбросить Authorization');
+    assert.strictEqual(getTokenEntry.headers.cookie, undefined);
+    assert.strictEqual(getTokenEntry.headers['x-mock-scenario'], 'fail', 'служебные X-Mock-* остаются для отладки');
+    assert.strictEqual(getTokenEntry.body.token, core.REDACTED);
+    assert.strictEqual(getTokenEntry.rawBody, '{"login":"[REDACTED]","pass":"[REDACTED]"}');
+    assert.ok(getTokenEntry.curl.includes('"pass":"[REDACTED]"'), getTokenEntry.curl);
+    assert.strictEqual(initEntry.body.Pan, core.REDACTED);
+    assert.strictEqual(initEntry.body.OrderId, 'p-1', 'не секретные поля остаются читаемыми');
+
+    const capped = core.createJournal({ baseUrl: 'http://localhost:3101', maxEntryChars: 600 });
+    capped.record({
+      method: 'POST',
+      path: `/possystem/v1/Main/sell?${'q'.repeat(4000)}`,
+      status: 200,
+      ms: 1,
+      body: { note: 'x'.repeat(4000) },
+      rawBody: `{"note":"${'y'.repeat(5000)}"}`,
+    });
+    const cappedEntry = capped.list()[0];
+    const cappedLength = JSON.stringify(cappedEntry).length;
+    assert.ok(cappedLength <= 600, `длина записи должна быть ограничена 600, получено ${cappedLength}`);
+    assert.ok(cappedEntry.path.length <= 513, 'путь ограничен');
+    assert.ok(cappedEntry.rawBody.length < 1100, 'сырое тело ограничено');
+  });
+
   check('createSandboxManager изолирует песочницы по X-Mock-Sandbox и сохраняет ссылки state', () => {
     const st = { payments: {}, notifications: {} };
     const notifRef = st.notifications;

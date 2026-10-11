@@ -64,7 +64,7 @@ TBANK_NOTIFICATION_URL=https://<домен ядра>/api/v1/payments/tbank/webho
 | `GET /mock/time` · `POST/PUT /mock/time` | виртуальные часы (`{"advance":"7d"}`, `{"advance":"60d"}`, `{"reset":true}`) |
 | `GET /mock/scenarios` · `POST/DELETE /mock/scenarios` | сценарное API и журнал срабатываний; заголовок `X-Mock-Scenario: chargeback-after:7d, partial-refund:30%, webhook-drop, webhook-duplicate` |
 | `GET /admin` | консоль: платежи/споры/сделки/нотификации/поступления/верификации, журнал запросов, кнопки сценариев (опц. защита `MOCK_ADMIN_TOKEN`) |
-| `GET /admin/journal` | JSON-журнал последних API-запросов (метод, путь, поля, код, время) |
+| `GET /admin/journal` | JSON-журнал последних API-запросов (метод, путь, поля, код, время); секреты, PAN и PII редактируются — `[REDACTED]`/маска, заголовки только из allowlist (`Content-Type`, `X-Mock-*`) |
 | `GET /health` | health-check |
 
 Нотификации: подписанный POST (Token покрывает `SpAccumulationId`) на
