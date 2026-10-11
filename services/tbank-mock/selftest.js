@@ -144,6 +144,36 @@ process.env.MOCK_RETRY_MS = '1000';
   const successUrl = `https://app.test/success/{order_id}`;
   const failUrl = `https://app.test/fail/{order_id}`;
 
+  // #23 F-01: импорт небезопасного снимка отклоняется атомарно; сервер в этом
+  // selftest работает в том же процессе, поэтому проверяем сам Object.prototype.
+  {
+    const pollutedKey = `f01_tbank_${process.pid}`;
+    const paymentsRef = state.payments;
+    const beforeCount = Object.keys(state.payments).length;
+    const unsafe = `{"state":{"payments":{"__proto__":{"${pollutedKey}":true}}}}`;
+    const rejected = await request(mockPort, 'POST', '/mock/state', unsafe);
+    const response = JSON.parse(rejected.body);
+    assert.strictEqual(rejected.statusCode, 400);
+    assert.strictEqual(response.Success, false);
+    assert.strictEqual(response.Details.Field, 'state');
+    assert.ok(String(response.Details.Details).includes('__proto__'), response.Details.Details);
+    assert.strictEqual(Object.prototype[pollutedKey], undefined);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(Object.prototype, pollutedKey), false);
+    assert.strictEqual(state.payments, paymentsRef);
+    assert.strictEqual(Object.keys(state.payments).length, beforeCount);
+    delete Object.prototype[pollutedKey];
+  }
+
+  // #23 F-02: один байт сверх лимита даёт DX 413 и не проваливается в 5000.
+  {
+    const tooLarge = await request(mockPort, 'POST', '/mock/state', ' '.repeat(5 * 1024 * 1024 + 1));
+    const response = JSON.parse(tooLarge.body);
+    assert.strictEqual(tooLarge.statusCode, 413);
+    assert.strictEqual(response.ErrorCode, '7');
+    assert.strictEqual(response.Details.Field, 'body');
+    assert.ok(response.Details.Hint.includes('байт'));
+  }
+
   // 1. Init without token under strict mode -> rejected
   const noTok = await request(mockPort, 'POST', '/v2/Init', { TerminalKey: TERMINAL, Amount: '1000', OrderId: 'o-1' });
   assert.strictEqual(JSON.parse(noTok.body).ErrorCode, '13', 'missing token must be rejected');
