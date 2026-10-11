@@ -17,6 +17,7 @@ services:
       # Для публичного размещения включите защиту исходящих вебхуков от SSRF:
       # MOCK_BLOCK_PRIVATE_WEBHOOKS: "1"
     volumes: ["mock-data:/data"]
+    mem_limit: "${MOCK_MEM_LIMIT:-128m}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3100,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 10s
@@ -33,12 +34,14 @@ services:
     ports: ["3101:3101"]
     environment:
       MOCK_PORT: "3101"
+      MOCK_HEALTH_PATH: /healthz
       MOCK_STATE_FILE: /data/kassa-state.json
       # Публичный адрес кассы глазами покупателя — от него зависит ofd_receipt_url.
       MOCK_PUBLIC_BASE_URL: "http://localhost:3101"
       MOCK_GROUPS: "Main"
       # MOCK_BLOCK_PRIVATE_WEBHOOKS: "1"
     volumes: ["mock-data:/data"]
+    mem_limit: "${MOCK_MEM_LIMIT:-128m}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3101,path:'/healthz'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 10s

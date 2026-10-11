@@ -1,6 +1,6 @@
 {
   "name": "mock-services",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Mock bank & fiscal (OFD) services for testing payment integrations against official provider protocols",
   "scripts": {
@@ -8,6 +8,7 @@
     "test:core": "node packages/core/selftest.js",
     "test:tbank": "node services/tbank-mock/selftest.js",
     "test:kassa": "node services/kassa-mock/selftest.js",
+    "test:compose": "node scripts/compose-selftest.js",
     "start:tbank": "node services/tbank-mock/server.js",
     "start:kassa": "node services/kassa-mock/server.js",
     "smoke": "node -e \"const h=require('http');for(const [name,url] of [['tbank','http://127.0.0.1:3100/health'],['kassa','http://127.0.0.1:3101/healthz']]){h.get(url,(r)=>console.log(name,r.statusCode)).on('error',(e)=>console.log(name,'нет ответа:',e.message))}\""
@@ -39,6 +40,8 @@
   "files": [
     "packages",
     "services",
+    "scripts",
+    "docker-compose.include.yml",
     "docs/integration",
     "README.md",
     "LICENSE",

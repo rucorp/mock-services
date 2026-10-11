@@ -1,8 +1,11 @@
+# © 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
 name: CI
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
 
 jobs:
@@ -13,8 +16,8 @@ jobs:
       matrix:
         node: ['18', '20', '22']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ matrix.node }}
       # Зависимостей нет (zero-dependency) — install нужен только для корректного npm-контекста
@@ -29,10 +32,24 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Проверка prod-изоляции docker-compose.include.yml (без профиля mock сервисы не поднимаются)
+        run: |
+          SERVICES_DEFAULT=$(docker compose -f docker-compose.include.yml config --services)
+          if [ -n "$SERVICES_DEFAULT" ]; then
+            echo "ОШИБКА: без профиля mock compose вернул сервисы: $SERVICES_DEFAULT"
+            exit 1
+          fi
+          SERVICES_MOCK=$(docker compose -f docker-compose.include.yml --profile mock config --services | sort | tr '\n' ' ')
+          echo "Сервисы в профиле mock: $SERVICES_MOCK"
+          echo "$SERVICES_MOCK" | grep -q "tbank-mock"
+          echo "$SERVICES_MOCK" | grep -q "kassa-mock"
       - name: Сборка образа
-        run: docker build -t mock-services:ci .
-      - name: Запуск compose-стенда и smoke-проверка
+        run: docker build -t mock-services:local .
+      - name: Запуск compose-стенда и ожидание healthcheck
         run: |
           docker compose up -d
           for i in $(seq 1 30); do
@@ -42,6 +59,50 @@ jobs:
             sleep 1
           done
           echo "стенд не поднялся за 30 с"; docker compose logs; exit 1
+      - name: Black-box selftest против контейнеров compose (:3100 и :3101)
+        run: npm run test:compose
+      - name: Прогон selftest-наборов внутри собранного образа
+        run: |
+          docker compose exec -T tbank-mock node packages/core/selftest.js
+          docker compose exec -T tbank-mock node services/tbank-mock/selftest.js
+          docker compose exec -T kassa-mock node services/kassa-mock/selftest.js
       - name: Логи и остановка
         if: always()
         run: docker compose down -v
+
+  publish-ghcr:
+    name: Публикация образа в GHCR
+    needs: [test, docker]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Вход в GitHub Container Registry (ghcr.io)
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Вычисление тегов образа (semver + latest + sha)
+        id: meta
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+      - name: Сборка и публикация ghcr.io/rucorp/mock-services
+        run: |
+          IMAGE="ghcr.io/rucorp/mock-services"
+          VER="${{ steps.meta.outputs.version }}"
+          SHA="${{ steps.meta.outputs.short_sha }}"
+          docker build \
+            -t "${IMAGE}:${VER}" \
+            -t "${IMAGE}:latest" \
+            -t "${IMAGE}:sha-${SHA}" \
+            .
+          docker push "${IMAGE}:${VER}"
+          docker push "${IMAGE}:latest"
+          docker push "${IMAGE}:sha-${SHA}"

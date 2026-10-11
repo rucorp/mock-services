@@ -3,6 +3,30 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версии — [SemVer](https://semver.org/lang/ru/).
 
+## [0.4.0] — 2026-10-11
+
+### Added
+- **Внешний мок-контур для платформ (`docker-compose.include.yml` + GHCR + `docs/integration/lovii.md`)**:
+  - `docker-compose.include.yml` с профилем `mock`, фиксированными именами `tbank-mock`/`kassa-mock`, лимитами памяти (`128m`), healthcheck-ами и параметризуемыми Caddy-лейблами (`MOCK_TBANK_CADDY_DOMAIN`, `MOCK_KASSA_CADDY_DOMAIN`);
+  - пошаговая инструкция миграции `lovii-core` и полная матрица переменных окружения `dev / staging / prod` в `docs/integration/lovii.md`;
+  - публикация образа `ghcr.io/rucorp/mock-services` (теги `:0.4.0`, `:latest`, `:sha-*`) и прогон selftest-ов против собранного образа и compose-стенда в `.github/workflows/ci.yml` + `scripts/compose-selftest.js` (`npm run test:compose`).
+- **Полнота 54-ФЗ (этап 6, `kassa-mock`)**:
+  - операции `buy`, `buy_refund`, `buy_correction` (наряду с `sell`, `sell_refund`, `sell_correction`) как для агентской, так и для неагентской схемы;
+  - двухчековая схема авансов и зачётов (`full_prepayment` / `partial_prepayment` / `advance` → `full_payment` / `consideration`) со связкой по `prepayment_external_id` и контролем остатка аванса; связка возвратов по `origin_external_id` с контролем остатка суммы;
+  - все ставки НДС по 54-ФЗ, включая расчётные ставки предоплаты (`vat5_105`, `vat7_107`, `vat10_110`, `vat20_120`, `vat22_122`) и расчёт `vat_amounts` в фискальном снимке;
+  - маркировка («Честный ЗНАК», ФФД 1.2): `marking_code` / `nomenclature_code`, `mark_quantity` (дробная маркировка), `measure_unit`, обязательность КМ для `marked_commodity` / `marked_excise`, сценарий отказа `mark-fail` (код 58);
+  - очередь ОФД и статусы `ofd_status: pending | sent | rejected`, маршруты `GET /possystem/v1/ofd/queue` и `POST /possystem/v1/ofd/mode`, сценарии `ofd-queue` и `ofd-reject`;
+  - валидация `payment_object`, `agent_info.type`, ИНН поставщика (`supplier_info.inn` — 10/12 цифр) и `correction_info`.
+- **Сценарное API и виртуальные часы (этап 7, `packages/core`, `tbank-mock`, `kassa-mock`)**:
+  - `createVirtualClock` (`MOCK_VIRTUAL_CLOCK`) и HTTP API `GET/POST/PUT /mock/time` (`advance: "7d"`, `"60d"`, `"36h"`, `reset: true`) для мгновенной проверки авто-подтверждения холда (7 дней), авто-отмены заказа/сделки (60 дней), истечения 3DS (36 часов) и TTL токена кассы (12 часов);
+  - `createScenarioRegistry` и HTTP API `GET/POST/DELETE /mock/scenarios` + расширенный заголовок `X-Mock-Scenario`: `chargeback-after:Nd`, `partial-refund:<sum|%>`, `webhook-drop` («вебхук не пришёл»), `webhook-duplicate`.
+- **Чарджбэк-сценарий банка end-to-end (`tbank-mock`, T-024)**:
+  - полная машина состояний спора `DISPUTED` (`CHARGEBACK` / `PARTIAL_CHARGEBACK`) → `REPRESENTMENT` → `ARBITRATION` (`ARB`) → `WON` / `LOST` через `POST /v2/Chargeback` (и `/v2/Dispute`), `GET /v2/Dispute/:id` и кнопки в `/admin`, с подписанными `Token` вебхуками и пересчётом баланса сделки;
+  - опциональная защита `/admin*` токеном `MOCK_ADMIN_TOKEN` (A-20) и покрытие `/e2c/v2/*`, `/av/v1/*` в selftest (A-22).
+
+### Fixed
+- `services/kassa-mock/selftest.js`: гарантированная остановка дочернего процесса кассы перед `process.exit` (исключён `EADDRINUSE` на повторных локальных прогонах, A-22).
+
 ## [0.3.0] — 2026-10-08
 
 ### Added

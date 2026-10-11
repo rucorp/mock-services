@@ -5,41 +5,34 @@
  * «банк + касса»: tbank-mock + этот сервис).
  *
  * Emulates the Ferma cloud-cashbox contract per ofd.ru developer docs:
- *   POST /possystem/v1/getToken                  {login, pass} -> {token}
- *   POST /possystem/v1/{group}/sell|sell_refund  ?token= -> {uuid, status:"wait"}
- *   GET  /possystem/v1/{group}/report/{uuid}     ?token= -> {status:done, payload:{ФД/ФП...}}
- *   GET  /possystem/v1/stats/cashboxes/extended  ?token= -> cashbox monitor
- * Async delivery: after MOCK_PROCESS_MS the document "prints" and the result
- * is POSTed to receipt.receipts.service.callback_url (retries like the real
- * Ferma). The fiscal receipt itself is "delivered to the customer": the
- * body (positions, totals, ФД/ФП, ofd_receipt_url) is stored, logged in the
- * admin console and exposed via GET /admin (text console) + GET /receipts/:id.
- *
- * Failure scenarios (драйвер негативных кейсов):
- *   - ExternalId starting with "fail-"          -> document processed, status fail
- *   - ExternalId starting with "hang-"          -> stays "wait" forever (no callback)
- *   - MOCK_FERMA_DOWN=1                         -> /possystem/* returns 503 (касса недоступна)
- *   - MOCK_FERMA_DOWN_MS                        -> auto-recover after N ms
- *   - duplicate ExternalId                      -> error "уже существует" (как у Ferma)
- *   - bad/absent token                          -> {error:{code:11}}
+ *   POST /possystem/v1/getToken                                                  {login, pass} -> {token}
+ *   POST /possystem/v1/{group}/sell|sell_refund|sell_correction|buy|buy_refund|buy_correction  ?token= -> {uuid, status:"wait"}
+ *   GET  /possystem/v1/{group}/report/{uuid}                                     ?token= -> {status:done, ofd_status, payload:{ФД/ФП...}}
+ *   GET  /possystem/v1/stats/cashboxes/extended                                  ?token= -> cashbox monitor (+ ofdQueueCount)
+ *   GET  /possystem/v1/ofd/queue                                                 -> очередь документов в ОФД (pending/sent/rejected)
+ *   POST /possystem/v1/ofd/mode                                                  -> {mode: "online"|"offline"|"reject", flush?: true}
+ *   GET|POST|PUT /mock/time                                                      -> виртуальные часы (MOCK_VIRTUAL_CLOCK)
+ *   GET|POST|DELETE /mock/scenarios                                              -> сценарное API + журнал срабатываний
  *
  * Zero npm dependencies. Config via environment; secrets are fake.
- * Never expose this service publicly.
+ * Never expose this service publicly without protection.
  */
 
 const http = require('http');
 const crypto = require('crypto');
 
 const core = require('../../packages/core');
-const { createLog, readBody, send, sendJson, escapeHtml } = core;
+const { createLog, readBody, send, sendJson, escapeHtml, checkAdminAuth } = core;
 // Журнал входящих запросов: интегратору видно в /admin/journal (спека §2).
 const journal = core.createJournal({ size: 200 });
 
 const {
   MOCK_HOST = '0.0.0.0',
   MOCK_PORT = '3101',
-  MOCK_FERMA_LOGIN = 'loviitest',
-  MOCK_FERMA_PASSWORD = 'mockpass123',
+  MOCK_FERMA_LOGIN = '',
+  MOCK_FERMA_PASSWORD = '',
+  FERMA_LOGIN = '',
+  FERMA_PASSWORD = '',
   MOCK_PROCESS_MS = '15000',
   MOCK_CALLBACK_RETRY_MS = '10000',
   MOCK_CALLBACK_MAX_ATTEMPTS = '24',
@@ -51,7 +44,14 @@ const {
   MOCK_FERMA_DOWN = 'false',
   MOCK_FERMA_DOWN_MS = '0',
   MOCK_PUBLIC_BASE_URL = `http://localhost:${MOCK_PORT}`,
+  MOCK_VIRTUAL_CLOCK = '',
+  MOCK_ADMIN_TOKEN = '',
+  MOCK_OFD_MODE = 'online',
 } = process.env;
+
+// Креды кассы: приоритет MOCK_FERMA_* -> FERMA_* -> дефолт стенда
+const FERMA_LOGIN_CRED = MOCK_FERMA_LOGIN || FERMA_LOGIN || 'loviitest';
+const FERMA_PASSWORD_CRED = MOCK_FERMA_PASSWORD || FERMA_PASSWORD || 'mockpass123';
 
 // ВАЖНО: не `parseInt(...) || 4000` — ноль (печатать мгновенно) тоже валидное
 // значение; старый код превращал MOCK_PROCESS_MS=0 в 4 секунды (дефект A-10).
@@ -78,6 +78,8 @@ Object.assign(state, {
   receipts: state.receipts || {},
   externalIds: state.externalIds || {},
   callbacks: state.callbacks || {},
+  ofdQueue: state.ofdQueue || {}, // uuid -> { uuid, externalId, queuedAt, status: 'pending'|'rejected', error }
+  clockOffsetMs: state.clockOffsetMs || 0,
   cashbox: state.cashbox || {
     deviceId: 0,
     name: 'KASSA-MOCK-1',
@@ -86,32 +88,42 @@ Object.assign(state, {
     checksCnt: 0,
     fnVolumePercent: 3,
     downUntil: 0,
+    ofdMode: ['online', 'offline', 'reject'].includes(String(MOCK_OFD_MODE).toLowerCase())
+      ? String(MOCK_OFD_MODE).toLowerCase()
+      : 'online',
   },
 });
 
+const clock = core.createVirtualClock({
+  initial: MOCK_VIRTUAL_CLOCK,
+  getStateOffset: () => state.clockOffsetMs || 0,
+  setStateOffset: (v) => { state.clockOffsetMs = v; persist(); },
+});
+
+const scenarios = core.createScenarioRegistry({ clock });
 const log = createLog('kassa-mock');
 
 /* ---------------------------------------------------------------- helpers */
 
 function isDown() {
-  return state.cashbox.downUntil > Date.now();
+  return state.cashbox.downUntil > clock.now();
 }
 
 // DX-слой (спека §6.2): коды Ferma разложены на объяснение, поле,
-// рекомендацию и ссылку на документацию (контур доков Ferma закрыт личным
-// кабинетом — ссылка ведёт на раздел документации в ЛК + на наш конспект).
+// рекомендацию и ссылку на документацию.
 const derr = core.createErrorCatalog({
   provider: 'ferma-ofd',
   docsBase: 'https://ferma.ofd.ru/documents/documentation',
   codes: {
-    0: { message: 'Касса недоступна', hint: 'Включён сценарий MOCK_FERMA_DOWN или кнопкой в /admin. Касса сама вернётся в строй (downUntil) или снимите сценарий кнопкой.', doc: '' },
-    4: { message: 'Неверный формат запроса', field: 'body', hint: 'Тело запроса — не валидный JSON. Проверьте Content-Type: application/json и структуру по конспекту docs/reference/tbank/* (для кассы — README-kassa-mock.md).', doc: '' },
-    5: { message: 'external_id обязателен', field: 'external_id', hint: 'Передайте свой уникальный идентификатор документа (до 36 символов). По нему работает дедупликация и повторные запросы.', doc: '' },
-    10: { message: 'Документ не найден', field: 'uuid', hint: 'uuid не существует в этом стенде (или чек ещё не напечатан — страница /receipts отдаёт только done-чеки). Список документов: /admin.', doc: '' },
-    11: { message: 'Не выполнена авторизация', field: 'token', hint: 'Передайте ?token=, полученный в getToken; токен живёт 12 часов. Один токен на все вызовы API.', doc: '' },
-    12: { message: 'Документ с таким external_id уже существует', field: 'external_id', hint: 'Дедупликация Ferma: повторите с новым external_id или запросите статус по report/{uuid} старого. В боевом контуре это защита от двойного чека.', doc: '' },
-    14: { message: 'Неверный логин или пароль', field: 'login, pass', hint: 'Креды стенда задаются env MOCK_FERMA_LOGIN / MOCK_FERMA_PASSWORD (по умолчанию loviitest / mockpass123).', doc: '' },
-    57: { message: 'Отказ печати по сценарию', field: 'external_id', hint: 'ExternalId с префиксом «fail-» — управляемый отказ ККТ. Переименуйте документ без префикса для нормального флоу.', doc: '' },
+    0: { message: 'Касса недоступна', hint: 'Включён сценарий MOCK_FERMA_DOWN или кнопкой в /admin. Касса сама вернётся в строй (downUntil) или снимите сценарий кнопкой.', doc: '#cashbox-status' },
+    4: { message: 'Неверный формат запроса', field: 'body', hint: 'Тело запроса — не валидный JSON или нарушены инварианты чека 54-ФЗ. Проверьте Content-Type: application/json и структуру по docs/integration/ferma-ofd.md.', doc: '#receipt-validation' },
+    5: { message: 'external_id обязателен', field: 'external_id', hint: 'Передайте свой уникальный идентификатор документа (до 36 символов). По нему работает дедупликация и повторные запросы.', doc: '#external-id' },
+    10: { message: 'Документ не найден', field: 'uuid', hint: 'uuid не существует в этом стенде (или чек ещё не напечатан — страница /receipts отдаёт только done-чеки). Список документов: /admin.', doc: '#report' },
+    11: { message: 'Не выполнена авторизация', field: 'token', hint: 'Передайте ?token=, полученный в getToken; токен живёт 12 часов. Один токен на все вызовы API.', doc: '#auth' },
+    12: { message: 'Документ с таким external_id уже существует', field: 'external_id', hint: 'Дедупликация Ferma: повторите с новым external_id или запросите статус по report/{uuid} старого. В боевом контуре это защита от двойного чека.', doc: '#deduplication' },
+    14: { message: 'Неверный логин или пароль', field: 'login, pass', hint: 'Креды стенда задаются env MOCK_FERMA_LOGIN / MOCK_FERMA_PASSWORD (или FERMA_LOGIN / FERMA_PASSWORD, по умолчанию loviitest / mockpass123).', doc: '#auth' },
+    57: { message: 'Отказ печати по сценарию', field: 'external_id', hint: 'ExternalId с префиксом «fail-» или заголовок X-Mock-Scenario: fail — управляемый отказ ККТ. Уберите сценарий для нормального флоу.', doc: '#scenarios' },
+    58: { message: 'Отказ проверки кода маркировки (Честный ЗНАК)', field: 'marking_code', hint: 'Код маркировки не прошёл проверку в ГИС МТ (сценарий X-Mock-Scenario: mark-fail или префикс FAIL- в коде). Проверьте КМ и статус товара.', doc: '#marking' },
     404: { message: 'Неизвестный маршрут', hint: 'Список маршрутов — /admin и README сервиса.', doc: '' },
     500: { message: 'Внутренняя ошибка мок-стенда', hint: 'Смотрите лог сервиса; воспроизводится — это дефект мока, заводите issue.', doc: '' },
   },
@@ -129,7 +141,7 @@ function err(code, text, overrides = {}) {
       hint: desc.hint || undefined,
       doc: desc.doc || undefined,
     },
-    timestamp: new Date().toISOString(),
+    timestamp: clock.iso(),
   };
 }
 
@@ -144,68 +156,249 @@ function jsonRaw(res, code, body) {
 
 /* ------------------------------------------------------- валидация чека */
 
-// Значения реквизитов по 54-ФЗ (приказы ФНС): неизвестное значение — почти
-// всегда опечатка интегратора, и её дешевле поймать на моке, чем на боевой
-// кассе (в бою документ уйдёт в ОФД с неверным признаком).
-const PAYMENT_METHODS = ['full_prepayment', 'partial_prepayment', 'advance', 'full_payment', 'partial_payment', 'credit', 'credit_payment', 'consideration'];
-const VAT_TYPES = ['none', 'vat0', 'vat5', 'vat7', 'vat10', 'vat20', 'vat22'];
-const PAYMENT_TYPES = [1, 2, 3, 4, 5]; // 1 безнал, 2 предоплата, 3 постоплата, 4 иная, 5 наличные
+// Значения реквизитов по 54-ФЗ (приказы ФНС, ФФД 1.2):
+const PAYMENT_METHODS = [
+  'full_prepayment',
+  'partial_prepayment',
+  'advance',
+  'full_payment',
+  'partial_payment',
+  'credit',
+  'credit_payment',
+  'consideration',
+];
+
+const PAYMENT_OBJECTS = [
+  'commodity',
+  'excise',
+  'job',
+  'service',
+  'gambling_bet',
+  'gambling_prize',
+  'lottery',
+  'lottery_prize',
+  'intellectual_activity',
+  'payment',
+  'agent_commission',
+  'composite',
+  'another',
+  'property_right',
+  'non_operating_gain',
+  'insurance_premium',
+  'sales_tax',
+  'resort_fee',
+  'deposit',
+  'expense',
+  'pension_insurance_ip',
+  'pension_insurance',
+  'medical_insurance_ip',
+  'medical_insurance',
+  'social_insurance',
+  'casino_payment',
+  'marked_excise',
+  'marked_commodity',
+];
+
+// Все ставки НДС по 54-ФЗ: базовые (none, vat0, vat5, vat7, vat10, vat20, vat22)
+// и расчётные ставки предоплаты/аванса (vat5_105, vat7_107, vat10_110, vat20_120, vat22_122).
+const VAT_TYPES = [
+  'none',
+  'vat0',
+  'vat5',
+  'vat7',
+  'vat10',
+  'vat20',
+  'vat22',
+  'vat5_105',
+  'vat7_107',
+  'vat10_110',
+  'vat20_120',
+  'vat22_122',
+];
+
+const AGENT_TYPES = [
+  'bank_paying_agent',
+  'bank_paying_subagent',
+  'paying_agent',
+  'paying_subagent',
+  'attorney',
+  'commission_agent',
+  'another',
+];
+
+const MEASURE_UNITS = [0, 10, 11, 12, 20, 21, 22, 30, 31, 32, 40, 41, 42, 50, 51, 70, 71, 72, 73, 80, 81, 82, 83, 255];
+
+const PAYMENT_TYPES = [1, 2, 3, 4, 5]; // 1 безнал, 2 зачёт предоплаты/аванса, 3 кредит/постоплата, 4 иная (встречное предоставление), 5 наличные
+
+const OPERATIONS = ['sell', 'sell_refund', 'sell_correction', 'buy', 'buy_refund', 'buy_correction'];
 
 const isInt = (v) => Number.isInteger(v);
 const isPosInt = (v) => Number.isInteger(v) && v > 0;
+const isValidInn = (inn) => typeof inn === 'string' && /^(\d{10}|\d{12})$/.test(inn.trim());
+
+/** Извлечение кода маркировки из позиции (marking_code или nomenclature_code). */
+function extractMarkingCode(item) {
+  if (!item || typeof item !== 'object') return null;
+  const mc = item.marking_code !== undefined ? item.marking_code : item.nomenclature_code;
+  if (mc === undefined || mc === null) return null;
+  if (typeof mc === 'string') return mc.trim();
+  if (typeof mc === 'object') {
+    const code = mc.code || mc.raw || mc.hex || mc.gtin || '';
+    return String(code).trim();
+  }
+  return '';
+}
 
 /**
- * Проверка инвариантов фискального чека ДО «печати». Возвращает описание
- * ошибки в формате DX (код 4 + поле + подсказка) или null.
- *
- * Дефект A-1 аудита: мок принимал чек с total=50000 при позициях на 100 копеек
- * и без контакта покупателя — невозможный чек «печатался» успешно.
- *
- * Правила (все — воспроизведение требований кассы, а не придирки мока):
- *   receipt.items[]      — непустой массив, у позиции есть name, price,
- *                          quantity и sum = price × quantity;
- *   receipt.total        — равен сумме позиций;
- *   receipt.payments[]   — известный тип, суммы положительные, Σ payments = total;
- *   payment_method/vat   — из списка допустимых значений (опечатка видна сразу).
+ * Проверка инвариантов фискального чека ДО «печати» (этап 6 роадмапа: полнота 54-ФЗ).
+ * Возвращает описание ошибки в формате DX (код 4 + поле + подсказка + ссылка) или null.
  */
-function validateReceipt(receipt) {
-  const bad = (field, hint) => ({ field, hint });
-  if (!receipt || typeof receipt !== 'object') return bad('receipt', 'Передайте объект receipt с items, payments и total (см. docs/integration/ferma-ofd.md).');
+function validateReceipt(receipt, operation = 'sell', body = {}) {
+  const bad = (field, hint, doc = '#receipt-validation') => ({ field, hint, doc });
+  if (!receipt || typeof receipt !== 'object') {
+    return bad('receipt', 'Передайте объект receipt с items, payments и total (см. docs/integration/ferma-ofd.md).');
+  }
+
+  // Валидация реквизитов чека коррекции (если передан correction_info)
+  const corr = body.correction_info || receipt.correction_info;
+  if (corr !== undefined) {
+    if (!corr || typeof corr !== 'object') {
+      return bad('correction_info', 'Для чека коррекции передайте объект correction_info: {type: "self"|"instruction", base_date: "YYYY-MM-DD", base_number?: "..."}.', '#correction');
+    }
+    if (!['self', 'instruction'].includes(corr.type)) {
+      return bad('correction_info.type', `Неизвестный тип коррекции ${JSON.stringify(corr.type)}. Допустимо: 'self' (самостоятельно), 'instruction' (по предписанию ФНС).`, '#correction');
+    }
+    if (!corr.base_date || typeof corr.base_date !== 'string') {
+      return bad('correction_info.base_date', 'Укажите дату документа-основания коррекции в поле correction_info.base_date (например, "2026-10-11").', '#correction');
+    }
+  }
 
   const items = receipt.items;
-  if (!Array.isArray(items) || !items.length) return bad('receipt.items', 'Нужен непустой массив позиций: [{name, price, quantity, sum, vat, payment_method, payment_object}].');
+  if (!Array.isArray(items) || !items.length) {
+    return bad('receipt.items', 'Нужен непустой массив позиций: [{name, price, quantity, sum, vat, payment_method, payment_object}].');
+  }
 
   let itemsSum = 0;
   for (let i = 0; i < items.length; i += 1) {
     const it = items[i] || {};
     const at = `receipt.items[${i}]`;
-    if (!it.name || typeof it.name !== 'string') return bad(`${at}.name`, 'Название позиции — непустая строка (покупатель увидит её в чеке).');
-    if (!isPosInt(it.price)) return bad(`${at}.price`, `Цена — целое число копеек > 0 (получено ${JSON.stringify(it.price)}). Бесплатная позиция оформляется нулевой ценой только через скидку/коррекцию.`);
-    if (!isPosInt(it.quantity)) return bad(`${at}.quantity`, `Количество — целое > 0 (получено ${JSON.stringify(it.quantity)}). Для дробного количества используйте меру измерения и целые минорные единицы.`);
-    if (!isInt(it.sum)) return bad(`${at}.sum`, 'Сумма позиции — целое число копеек (price × quantity).');
-    if (it.sum !== it.price * it.quantity) return bad(`${at}.sum`, `Сумма позиции ${it.sum} ≠ price × quantity = ${it.price * it.quantity}. Касса ФНС отклонит такой чек.`);
+    if (!it.name || typeof it.name !== 'string') {
+      return bad(`${at}.name`, 'Название позиции — непустая строка (покупатель увидит её в чеке).');
+    }
+    if (!isPosInt(it.price)) {
+      return bad(`${at}.price`, `Цена — целое число копеек > 0 (получено ${JSON.stringify(it.price)}). Бесплатная позиция оформляется нулевой ценой только через скидку/коррекцию.`);
+    }
+    if (!isPosInt(it.quantity)) {
+      return bad(`${at}.quantity`, `Количество — целое > 0 (получено ${JSON.stringify(it.quantity)}). Для дробного количества используйте меру измерения и целые минорные единицы.`);
+    }
+    if (!isInt(it.sum)) {
+      return bad(`${at}.sum`, 'Сумма позиции — целое число копеек (price × quantity).');
+    }
+    if (it.sum !== it.price * it.quantity) {
+      return bad(`${at}.sum`, `Сумма позиции ${it.sum} ≠ price × quantity = ${it.price * it.quantity}. Касса ФНС отклонит такой чек.`);
+    }
     if (!it.vat || !VAT_TYPES.includes(it.vat.type)) {
-      return bad(`${at}.vat.type`, `Неизвестная ставка НДС ${JSON.stringify(it.vat && it.vat.type)}. Допустимо: ${VAT_TYPES.join(', ')}.`);
+      return bad(`${at}.vat.type`, `Неизвестная ставка НДС ${JSON.stringify(it.vat && it.vat.type)}. Допустимо: ${VAT_TYPES.join(', ')}.`, '#vat');
     }
     if (it.payment_method !== undefined && !PAYMENT_METHODS.includes(it.payment_method)) {
-      return bad(`${at}.payment_method`, `Неизвестный признак способа расчёта ${JSON.stringify(it.payment_method)}. Допустимо: ${PAYMENT_METHODS.join(', ')}. Для аванса — 'full_prepayment', для зачёта аванса — 'full_payment', для зачёта предоплаты — 'consideration'.`);
+      return bad(`${at}.payment_method`, `Неизвестный признак способа расчёта ${JSON.stringify(it.payment_method)}. Допустимо: ${PAYMENT_METHODS.join(', ')}. Для аванса — 'full_prepayment'/'advance', для зачёта аванса — 'full_payment'/'consideration'.`, '#payment-method');
     }
+    if (it.payment_object !== undefined && !PAYMENT_OBJECTS.includes(it.payment_object)) {
+      return bad(`${at}.payment_object`, `Неизвестный признак предмета расчёта ${JSON.stringify(it.payment_object)}. Допустимо: ${PAYMENT_OBJECTS.join(', ')}.`, '#payment-object');
+    }
+    if (it.measure_unit !== undefined && !MEASURE_UNITS.includes(it.measure_unit)) {
+      return bad(`${at}.measure_unit`, `Неизвестный код меры количества (ФФД 1.2 тег 2108) ${JSON.stringify(it.measure_unit)}. Допустимо: ${MEASURE_UNITS.join(', ')} (0 — шт., 11 — кг, 41 — л и т.д.).`, '#measure-unit');
+    }
+    // Валидация агентских реквизитов (если переданы)
+    if (it.agent_info !== undefined && it.agent_info !== null) {
+      if (typeof it.agent_info !== 'object' || !AGENT_TYPES.includes(it.agent_info.type)) {
+        return bad(`${at}.agent_info.type`, `Неизвестный тип агента ${JSON.stringify(it.agent_info && it.agent_info.type)}. Допустимо: ${AGENT_TYPES.join(', ')}.`, '#agent-info');
+      }
+    }
+    if (it.supplier_info !== undefined && it.supplier_info !== null) {
+      if (typeof it.supplier_info !== 'object') {
+        return bad(`${at}.supplier_info`, 'supplier_info должен быть объектом {name, inn, phones?}.', '#supplier-info');
+      }
+      if (it.supplier_info.inn !== undefined && !isValidInn(String(it.supplier_info.inn))) {
+        return bad(`${at}.supplier_info.inn`, `ИНН поставщика «${it.supplier_info.inn}» должен состоять из 10 (ЮЛ) или 12 (ИП) цифр (тег 1226 ФФД).`, '#supplier-info');
+      }
+    }
+    // Валидация маркировки (Честный ЗНАК, ФФД 1.2)
+    const isMarkedObject = it.payment_object === 'marked_commodity' || it.payment_object === 'marked_excise';
+    const markCode = extractMarkingCode(it);
+    if (isMarkedObject && !markCode) {
+      return bad(`${at}.marking_code`, `Для предмета расчёта '${it.payment_object}' обязателен код маркировки в поле marking_code или nomenclature_code (ФФД 1.2, тег 1163).`, '#marking');
+    }
+    if (markCode !== null && markCode.length < 8) {
+      return bad(`${at}.marking_code`, `Код маркировки слишком короткий (${markCode.length} симв.): передайте полный код DataMatrix / GS1 / GTIN+серийный номер (не менее 8 символов).`, '#marking');
+    }
+    if (it.mark_quantity !== undefined && it.mark_quantity !== null) {
+      const mq = it.mark_quantity;
+      if (typeof mq !== 'object' || !isPosInt(mq.numerator) || !isPosInt(mq.denominator) || mq.numerator >= mq.denominator) {
+        return bad(`${at}.mark_quantity`, 'Дробное количество маркированного товара (тег 1291) задаётся объектом {numerator, denominator}, где 0 < numerator < denominator.', '#marking');
+      }
+    }
+
     itemsSum += it.sum;
   }
 
   if (!isPosInt(receipt.total)) return bad('receipt.total', 'Итог чека — целое число копеек > 0.');
-  if (receipt.total !== itemsSum) return bad('receipt.total', `Итог ${receipt.total} ≠ сумме позиций ${itemsSum}. Проверьте арифметику до отправки — касса сверяет суммы сама.`);
+  if (receipt.total !== itemsSum) {
+    return bad('receipt.total', `Итог ${receipt.total} ≠ сумме позиций ${itemsSum}. Проверьте арифметику до отправки — касса сверяет суммы сама.`);
+  }
 
   const payments = receipt.payments;
-  if (!Array.isArray(payments) || !payments.length) return bad('receipt.payments', 'Нужен непустой массив оплат: [{type: 1..5, sum}] (в т.ч. при оплате одним способом).');
+  if (!Array.isArray(payments) || !payments.length) {
+    return bad('receipt.payments', 'Нужен непустой массив оплат: [{type: 1..5, sum}] (в т.ч. при оплате одним способом).');
+  }
   let paymentsSum = 0;
+  let prepaymentOffsetSum = 0;
   for (let i = 0; i < payments.length; i += 1) {
     const pay = payments[i] || {};
-    if (!PAYMENT_TYPES.includes(pay.type)) return bad(`receipt.payments[${i}].type`, `Неизвестный признак формы оплаты ${JSON.stringify(pay.type)}. Допустимо: ${PAYMENT_TYPES.join(', ')} (1 — электронными, 2 — предоплата, 3 — постоплата, 4 — иная/баллы, 5 — наличными).`);
+    if (!PAYMENT_TYPES.includes(pay.type)) {
+      return bad(`receipt.payments[${i}].type`, `Неизвестный признак формы оплаты ${JSON.stringify(pay.type)}. Допустимо: ${PAYMENT_TYPES.join(', ')} (1 — электронными, 2 — зачёт предоплаты/аванса, 3 — постоплата/кредит, 4 — иная/встречное предоставление, 5 — наличными).`);
+    }
     if (!isPosInt(pay.sum)) return bad(`receipt.payments[${i}].sum`, 'Сумма оплаты — целое число копеек > 0.');
     paymentsSum += pay.sum;
+    if (pay.type === 2) prepaymentOffsetSum += pay.sum;
   }
-  if (paymentsSum !== receipt.total) return bad('receipt.payments', `Σ оплат ${paymentsSum} ≠ итогу ${receipt.total}. Смешанная оплата (например, баллы + карта) должна сходиться в копейку.`);
+  if (paymentsSum !== receipt.total) {
+    return bad('receipt.payments', `Σ оплат ${paymentsSum} ≠ итогу ${receipt.total}. Смешанная оплата (например, зачёт аванса + доплата или баллы + карта) должна сходиться в копейку.`);
+  }
+
+  // Проверка связки зачёта предоплаты/аванса (prepayment_external_id)
+  const prepayExtId = body.prepayment_external_id || receipt.prepayment_external_id;
+  if (prepayExtId) {
+    const prepayUuid = state.externalIds[String(prepayExtId)];
+    const prepayDoc = prepayUuid ? state.receipts[prepayUuid] : null;
+    if (!prepayDoc) {
+      return bad('prepayment_external_id', `Исходный чек предоплаты с external_id «${prepayExtId}» не найден.`, '#prepayment');
+    }
+    const availablePrepay = prepayDoc.prepaymentRemaining !== undefined && prepayDoc.prepaymentRemaining !== null
+      ? prepayDoc.prepaymentRemaining
+      : (prepayDoc.receipt?.total || 0);
+    const offsetNeed = prepaymentOffsetSum > 0 ? prepaymentOffsetSum : receipt.total;
+    if (offsetNeed > availablePrepay) {
+      return bad('receipt.payments', `Сумма зачёта предоплаты ${offsetNeed} больше доступного остатка аванса ${availablePrepay} по чеку «${prepayExtId}».`, '#prepayment');
+    }
+  }
+
+  // Проверка связки чека возврата (origin_external_id)
+  const originExtId = body.origin_external_id || receipt.origin_external_id;
+  if (originExtId) {
+    const originUuid = state.externalIds[String(originExtId)];
+    const originDoc = originUuid ? state.receipts[originUuid] : null;
+    const expectedOriginOp = operation === 'buy_refund' ? 'buy' : 'sell';
+    if (!originDoc || originDoc.operation !== expectedOriginOp) {
+      return bad('origin_external_id', `Исходный чек (${expectedOriginOp}) с external_id «${originExtId}» не найден.`, '#refund');
+    }
+    const availableRefund = originDoc.refundableRemaining !== undefined && originDoc.refundableRemaining !== null
+      ? originDoc.refundableRemaining
+      : (originDoc.receipt?.total || 0);
+    if (receipt.total > availableRefund) {
+      return bad('receipt.total', `Сумма возврата ${receipt.total} больше доступного остатка ${availableRefund} по чеку «${originExtId}».`, '#refund');
+    }
+  }
 
   return null;
 }
@@ -218,15 +411,14 @@ function tokenFromUrl(url) {
 
 /**
  * Проверка токена с TTL (контракт: токен живёт 12 часов, затем нужен новый
- * getToken). Раньше срок не проверялся вообще — «вечный» токен маскировал
- * целый класс ошибок интеграции (дефект A-11).
+ * getToken). Использует виртуальные часы (clock.now()).
  */
 function checkToken(url) {
   const token = tokenFromUrl(url);
   if (!token) return false;
   const session = state.tokens[token];
   if (!session) return false;
-  const age = Date.now() - (session.createdAt || 0);
+  const age = clock.now() - (session.createdAt || 0);
   if (TOKEN_TTL_MS > 0 && age > TOKEN_TTL_MS) {
     delete state.tokens[token];
     persist();
@@ -238,9 +430,6 @@ function checkToken(url) {
 
 /* ------------------------------------------------------- document pipeline */
 
-// Короткое имя поставщика для печатной ленты: «ООО «Ромашка Трейд»» →
-// «Ромашка Трейд», «ИП Иванов Иван» → «ИП Иванов». Полное legal_name
-// остаётся в JSON чека (/receipts/:uuid — поле supplier_info).
 function shortSupplierName(name) {
   if (typeof name !== 'string' || !name.trim()) return name;
   const ip = name.match(/^ИП\s+(\S+)/);
@@ -250,49 +439,107 @@ function shortSupplierName(name) {
   return name.replace(/^(ООО|АО|ЗАО|ПАО|ОАО)\s+/i, '').trim() || name;
 }
 
+const AGENT_LINE = process.env.MOCK_AGENT_LINE || 'ТЕСТОВАЯ КАССА (МОК)';
+const AGENT_INN = process.env.MOCK_AGENT_INN || '7800000000';
+const OFD_INN = process.env.MOCK_OFD_INN || '7800000000';
+const FN_NUMBER = process.env.MOCK_FN_NUMBER || '9999078902001294';
+const ECR_RN = process.env.MOCK_ECR_RN || '0001234567025896';
+const OPERATOR_NAME = process.env.MOCK_OPERATOR || 'Кассир-мок';
+const FNS_SITE = process.env.MOCK_FNS_SITE || 'www.nalog.gov.ru';
+
+// Ставки и подписи НДС для ленты чека и фискального снимка (включая расчётные ставки аванса)
+const VAT_META = {
+  none: { rate: 0, calc: false, label: 'без НДС' },
+  vat0: { rate: 0, calc: false, label: '0%' },
+  vat5: { rate: 5, calc: false, label: '5%' },
+  vat7: { rate: 7, calc: false, label: '7%' },
+  vat10: { rate: 10, calc: false, label: '10%' },
+  vat20: { rate: 20, calc: false, label: '20%' },
+  vat22: { rate: 22, calc: false, label: '22%' },
+  vat5_105: { rate: 5, calc: true, label: '5/105' },
+  vat7_107: { rate: 7, calc: true, label: '7/107' },
+  vat10_110: { rate: 10, calc: true, label: '10/110' },
+  vat20_120: { rate: 20, calc: true, label: '20/120' },
+  vat22_122: { rate: 22, calc: true, label: '22/122' },
+};
+
+function computeVatBreakdown(items) {
+  const acc = {};
+  for (const item of items || []) {
+    const type = (item.vat && item.vat.type) || 'none';
+    acc[type] = (acc[type] || 0) + (item.sum || 0);
+  }
+  return Object.entries(acc).map(([type, gross]) => {
+    const meta = VAT_META[type] || VAT_META.none;
+    const tax = meta.rate ? Math.round((gross * meta.rate) / (100 + meta.rate)) : 0;
+    return { type, rate: meta.rate, label: meta.label, gross, tax };
+  });
+}
+
+/** Строки НДС по позициям: «НДС 20%: 16.67 р», «НДС 20/120: 16.67 р» либо «НДС: без НДС». */
+function vatLines(items) {
+  const breakdown = computeVatBreakdown(items);
+  if (!breakdown.length || breakdown.every((b) => !b.rate && b.type === 'none')) return ['НДС: без НДС'];
+  return breakdown.map((b) => {
+    if (b.rate) return `НДС ${b.label}: ${(b.tax / 100).toFixed(2)} р`;
+    return `НДС ${b.type}: без НДС (${(b.gross / 100).toFixed(2)} р)`;
+  });
+}
+
 function fiscalSnapshot(doc) {
+  const items = doc.receipt?.items || [];
+  const markedItems = items.filter((it) => extractMarkingCode(it));
   return {
     total: doc.receipt.total,
-    ofd_inn: '7800000000',
-    fns_site: 'www.nalog.gov.ru',
-    fn_number: '9999078902001294',
-    ecr_registration_number: '0001234567025896',
+    operation: doc.operation,
+    ofd_inn: OFD_INN,
+    fns_site: FNS_SITE,
+    fn_number: FN_NUMBER,
+    ecr_registration_number: ECR_RN,
     shift_number: 77,
     receipt_datetime: new Date(doc.processedAt).toISOString().slice(0, 19),
     fiscal_receipt_number: doc.fiscalReceiptNumber,
     fiscal_document_number: doc.fiscalDocumentNumber,
     fiscal_document_attribute: String(1000000000 + (doc.fiscalDocumentNumber * 7919) % 8999999999),
     ofd_receipt_url: `${MOCK_PUBLIC_BASE_URL}/receipts/${doc.uuid}`,
-    operator: 'Кассир-мок',
+    ofd_status: doc.ofdStatus || 'sent',
+    operator: OPERATOR_NAME,
     taxation_type: doc.receipt.company?.sno || 'ОСН',
+    vat_amounts: computeVatBreakdown(items),
+    ...(markedItems.length ? {
+      marked_items_count: markedItems.length,
+      marking_verified: true,
+    } : {}),
   };
 }
 
-// Лента чека: шапка настраивается, чтобы публичный стенд не печатал бренд
-// владельца стенда (дефект A-17: в исходном моке было жёстко «ЛОВИ» и строка
-// «НДС: без НДС» независимо от ставок в позициях).
-const AGENT_LINE = process.env.MOCK_AGENT_LINE || 'ТЕСТОВАЯ КАССА (МОК)';
-const AGENT_INN = process.env.MOCK_AGENT_INN || '7800000000';
+const OPERATION_LABELS = {
+  sell: 'КАССОВЫЙ ЧЕК · ПРИХОД',
+  sell_refund: 'КАССОВЫЙ ЧЕК · ВОЗВРАТ ПРИХОДА',
+  sell_correction: 'ЧЕК КОРРЕКЦИИ · ПРИХОД',
+  buy: 'КАССОВЫЙ ЧЕК · РАСХОД',
+  buy_refund: 'КАССОВЫЙ ЧЕК · ВОЗВРАТ РАСХОДА',
+  buy_correction: 'ЧЕК КОРРЕКЦИИ · РАСХОД',
+};
 
-// Ставки и подписи для ленты чека (НДС включён в цену — так считает касса).
-const VAT_RATES = { none: 0, vat0: 0, vat5: 5, vat7: 7, vat10: 10, vat20: 20, vat22: 22 };
+const PAYMENT_METHOD_LABELS = {
+  full_prepayment: 'ПРЕДОПЛАТА 100%',
+  partial_prepayment: 'ПРЕДОПЛАТА',
+  advance: 'АВАНС',
+  full_payment: 'ПОЛНЫЙ РАСЧЁТ',
+  partial_payment: 'ЧАСТИЧНЫЙ РАСЧЁТ И КРЕДИТ',
+  credit: 'ПЕРЕДАЧА В КРЕДИТ',
+  credit_payment: 'ОПЛАТА КРЕДИТА',
+  consideration: 'ЗАЧЁТ ПРЕДОПЛАТЫ (АВАНСА)',
+};
 
-/** Строки НДС по позициям: «НДС 20%: 16.67» либо «НДС: без НДС». */
-function vatLines(items) {
-  const acc = {};
-  for (const item of items || []) {
-    const type = (item.vat && item.vat.type) || 'none';
-    acc[type] = (acc[type] || 0) + (item.sum || 0);
-  }
-  const types = Object.keys(acc);
-  if (!types.length || types.every((t) => !VAT_RATES[t])) return ['НДС: без НДС'];
-  return types.map((t) => {
-    const rate = VAT_RATES[t] || 0;
-    const gross = acc[t];
-    const tax = rate ? Math.round(gross - gross / (1 + rate / 100)) : 0;
-    return rate ? `НДС ${rate}%: ${(tax / 100).toFixed(2)} р` : `НДС ${t}: без НДС (${(gross / 100).toFixed(2)} р)`;
-  });
-}
+const PAYMENT_TYPE_LABELS = {
+  1: 'БЕЗНАЛИЧНЫМИ',
+  2: 'ПРЕДОПЛАТА (ЗАЧЁТ АВАНСА)',
+  3: 'ПОСТОПЛАТА (КРЕДИТ)',
+  4: 'ИНАЯ (БАЛЛЫ / ВСТРЕЧНОЕ)',
+  5: 'НАЛИЧНЫМИ',
+};
 
 function customerReceiptText(doc) {
   const p = doc.payload;
@@ -300,23 +547,33 @@ function customerReceiptText(doc) {
   lines.push('================================');
   lines.push(AGENT_LINE);
   lines.push(`ИНН: ${AGENT_INN}`);
-  lines.push(`Поставщик: ${doc.supplierLabel}`);
-  lines.push(`ИНН поставщика: ${doc.supplierInnLabel}`);
+  lines.push(OPERATION_LABELS[doc.operation] || `ЧЕК (${doc.operation})`);
+  if (doc.hasSupplier || doc.supplierLabel !== '—' || doc.supplierInnLabel !== '—') {
+    lines.push(`Поставщик: ${doc.supplierLabel}`);
+    lines.push(`ИНН поставщика: ${doc.supplierInnLabel}`);
+  }
   lines.push('--------------------------------');
   for (const item of doc.receipt.items) {
-    lines.push(`${String(item.name).slice(0, 30).padEnd(30)} ${((item.price * item.quantity) / 100).toFixed(2)} р`);
+    const mc = extractMarkingCode(item);
+    const markPrefix = mc ? '[М] ' : '';
+    const pmLabel = item.payment_method && PAYMENT_METHOD_LABELS[item.payment_method]
+      ? ` [${PAYMENT_METHOD_LABELS[item.payment_method]}]`
+      : '';
+    lines.push(`${String(markPrefix + item.name).slice(0, 30).padEnd(30)} ${((item.price * item.quantity) / 100).toFixed(2)} р${pmLabel}`);
+    if (mc) lines.push(`  КМ: ${mc.slice(0, 32)}`);
   }
   lines.push('--------------------------------');
   for (const pay of doc.receipt.payments || []) {
-    lines.push(`${pay.type === 1 ? 'БЕЗНАЛИЧНЫМИ' : pay.type === 2 ? 'ПРЕДОПЛАТА (аванс)' : pay.type === 4 ? 'ИНАЯ (баллы)' : 'НАЛИЧНЫМИ'}: ${(pay.sum / 100).toFixed(2)} р`);
+    lines.push(`${PAYMENT_TYPE_LABELS[pay.type] || 'НАЛИЧНЫМИ'}: ${(pay.sum / 100).toFixed(2)} р`);
   }
   lines.push(`ИТОГ: ${(p.total / 100).toFixed(2)} р`);
   for (const vat of vatLines(doc.receipt.items)) lines.push(vat);
   lines.push(`Дата: ${p.receipt_datetime.replace('T', ' ')}`);
   lines.push(`ФД №${p.fiscal_document_number} ФН №${p.fn_number}`);
   lines.push(`ФП: ${p.fiscal_document_attribute}`);
+  lines.push(`Статус ОФД: ${doc.ofdStatus || 'sent'}`);
   lines.push(`Чек: ${p.ofd_receipt_url}`);
-  lines.push('Проверка: www.nalog.gov.ru');
+  lines.push(`Проверка: ${FNS_SITE}`);
   lines.push('================================');
   return lines.join('\n');
 }
@@ -327,12 +584,17 @@ const deliveryQueue = core.createDeliveryQueue({
   maxAttempts: CALLBACK_MAX_ATTEMPTS,
   persist,
   log,
+  now: () => clock.now(),
   request: (entry) => ({ url: entry.url, data: entry.body }),
   onSuccess: (entry, res, id) => { delete state.callbacks[id]; },
   blockPrivateHosts: BLOCK_PRIVATE_WEBHOOKS,
 });
 
-function scheduleCallback(doc) {
+function scheduleCallback(doc, duplicate = false) {
+  if (doc.callbackSuppressed) {
+    log(`[kassa-mock] doc ${doc.uuid}: callback suppressed by scenario (webhook-drop)`);
+    return;
+  }
   const url = doc.receipt.receipts?.service?.callback_url
     || doc.receipt.service?.callback_url
     || (doc.receipt.receipts ? doc.receipt.receipts.service && doc.receipt.receipts.service.callback_url : null);
@@ -342,58 +604,121 @@ function scheduleCallback(doc) {
     return;
   }
 
-  const id = state.counters.notification++;
-  state.callbacks[id] = {
-    uuid: doc.uuid,
-    url,
-    body: doc.callbackBody,
-    attempts: 0,
-    nextAttemptAt: Date.now() + 500,
-    lastStatus: null,
-  };
+  const count = duplicate ? 2 : 1;
+  for (let i = 0; i < count; i += 1) {
+    const id = state.counters.notification++;
+    state.callbacks[id] = {
+      uuid: doc.uuid,
+      url,
+      body: doc.callbackBody,
+      attempts: 0,
+      nextAttemptAt: clock.now() + 500,
+      lastStatus: null,
+    };
+  }
   persist();
-  log(`[kassa-mock] doc ${doc.uuid}: callback scheduled -> ${url}`);
+  log(`[kassa-mock] doc ${doc.uuid}: callback scheduled -> ${url}${duplicate ? ' (duplicate x2)' : ''}`);
 }
 
-// Тик раз в секунду: «печать чеков» + доставка колбэков (ретраи как у Ferma).
-setInterval(() => {
-  const now = Date.now();
+/** Применение режима ОФД к напечатанному чеку. */
+function processOfdDelivery(doc) {
+  const mode = doc.ofdScenarioMode || state.cashbox.ofdMode || 'online';
+  if (mode === 'offline' || mode === 'queue' || mode === 'pending') {
+    doc.ofdStatus = 'pending';
+    doc.ofdError = null;
+    state.ofdQueue[doc.uuid] = {
+      uuid: doc.uuid,
+      externalId: doc.externalId,
+      operation: doc.operation,
+      total: doc.receipt?.total || 0,
+      queuedAt: new Date(clock.now()).toISOString(),
+      status: 'pending',
+    };
+  } else if (mode === 'reject' || mode === 'rejected') {
+    doc.ofdStatus = 'rejected';
+    doc.ofdError = { code: 61, text: 'ОФД отклонил фискальный документ (сценарий ofd-reject)' };
+    state.ofdQueue[doc.uuid] = {
+      uuid: doc.uuid,
+      externalId: doc.externalId,
+      operation: doc.operation,
+      total: doc.receipt?.total || 0,
+      queuedAt: new Date(clock.now()).toISOString(),
+      status: 'rejected',
+      error: doc.ofdError,
+    };
+  } else {
+    doc.ofdStatus = 'sent';
+    doc.ofdSentAt = new Date(clock.now()).toISOString();
+    doc.ofdError = null;
+    delete state.ofdQueue[doc.uuid];
+  }
+  if (doc.payload) {
+    doc.payload.ofd_status = doc.ofdStatus;
+    if (doc.ofdError) doc.payload.ofd_error = doc.ofdError;
+  }
+}
+
+/** Отправка накопленной очереди ОФД при восстановлении связи. */
+function flushOfdQueue() {
+  let flushed = 0;
+  for (const [uuid, q] of Object.entries(state.ofdQueue)) {
+    if (q.status !== 'pending') continue;
+    const doc = state.receipts[uuid];
+    if (doc) {
+      doc.ofdStatus = 'sent';
+      doc.ofdSentAt = new Date(clock.now()).toISOString();
+      doc.ofdError = null;
+      if (doc.payload) doc.payload.ofd_status = 'sent';
+    }
+    delete state.ofdQueue[uuid];
+    flushed += 1;
+  }
+  if (flushed > 0) persist();
+  return flushed;
+}
+
+function tickKassa() {
+  const now = clock.now();
 
   // «Печать чеков» из очереди wait -> done/fail
   for (const doc of Object.values(state.receipts)) {
-    if (doc.status !== 'wait') continue;
+    if (doc.status !== 'wait' || doc.hang) continue;
     if (now < doc.processAt) continue;
 
-    if (doc.forceFail) {
+    if (doc.forceMarkFail) {
       doc.status = 'fail';
+      doc.ofdStatus = 'rejected';
+      doc.error = { code: 58, text: 'Касса-мок: отказ проверки кода маркировки в ГИС МТ «Честный ЗНАК»' };
+      doc.processedAt = now;
+      log(`[kassa-mock] doc ${doc.uuid}: FAILED (mark-fail)`);
+    } else if (doc.forceFail) {
+      doc.status = 'fail';
+      doc.ofdStatus = 'rejected';
       doc.error = { code: 57, text: 'Касса-мок: отказ по сценарию (forceFail)' };
       doc.processedAt = now;
       log(`[kassa-mock] doc ${doc.uuid}: FAILED (сценарий fail-)`);
     } else {
-      // Порядок важен: processedAt выставляется ДО снимка (иначе в чеке
-      // оставался receipt_datetime = 1970-01-01, дефект A-12 аудита), а номер
-      // чека за смену присваивается в момент печати — иначе у двух чеков,
-      // созданных до печати, совпадал fiscal_receipt_number (дефект A-13).
       doc.processedAt = now;
       state.cashbox.checksCnt += 1;
       doc.fiscalReceiptNumber = state.cashbox.checksCnt;
       doc.status = 'done';
+      processOfdDelivery(doc);
       doc.payload = fiscalSnapshot(doc);
       log(`\n[kassa-mock] ===== ЧЕК НАПЕЧАТАН (${doc.operation}) =====\n${customerReceiptText(doc)}\n============================================`);
     }
-    // Тело callback в формате Ferma (контракт): статус + payload/error.
     doc.callbackBody = JSON.stringify({
       uuid: doc.uuid,
       external_id: doc.externalId,
       group_code: doc.group,
       type: doc.operation,
       status: doc.status,
+      ofd_status: doc.ofdStatus,
       timestamp: new Date(now).toISOString(),
       error: doc.error,
       payload: doc.payload,
     });
     persist();
-    scheduleCallback(doc);
+    scheduleCallback(doc, doc.callbackDuplicate);
   }
 
   deliveryQueue.tick();
@@ -403,6 +728,10 @@ setInterval(() => {
     state.cashbox.downUntil = 0;
     log('[kassa-mock] касса снова готова к работе');
   }
+}
+
+setInterval(() => {
+  tickKassa();
 }, 1000).unref();
 
 /* ------------------------------------------------------------- request API */
@@ -410,31 +739,83 @@ setInterval(() => {
 function createDocument(operation, group, body, scenarioHeader = '') {
   const uuid = crypto.randomUUID();
   const externalId = String(body.external_id || '');
-  // Универсальный драйвер негативов (аудит §3.1): заголовок X-Mock-Scenario
-  // (fail|hang) на самом запросе — для CI и внешних интеграторов, чьи
-  // external_id не начинаются с префиксов fail-/hang- (соглашение Lovii,
-  // остаётся для совместимости).
-  const scenario = String(scenarioHeader || '').trim().toLowerCase();
+  const spec = scenarios.resolve({
+    header: scenarioHeader,
+    bodyScenario: body.mock_scenario || body.receipt?.mock_scenario || '',
+    target: operation,
+    context: { externalId, group, operation },
+  });
+
+  const items = body.receipt?.items || [];
+  const hasFailMarking = items.some((it) => {
+    const mc = extractMarkingCode(it);
+    return mc && mc.toUpperCase().startsWith('FAIL-');
+  });
+
+  const isPrepaymentDoc = items.some((it) => ['full_prepayment', 'partial_prepayment', 'advance'].includes(it.payment_method));
+  const prepayExtId = body.prepayment_external_id || body.receipt?.prepayment_external_id || null;
+  const originExtId = body.origin_external_id || body.receipt?.origin_external_id || null;
+
+  let ofdScenarioMode = null;
+  if (spec.has('ofd-queue') || spec.has('ofd-pending')) ofdScenarioMode = 'queue';
+  else if (spec.has('ofd-reject') || spec.has('ofd-fail')) ofdScenarioMode = 'reject';
+  else if (spec.has('ofd-sent') || spec.has('ofd-online')) ofdScenarioMode = 'online';
+
+  const supplierObj = items.find((it) => it && it.supplier_info)?.supplier_info || null;
+
   const doc = {
     uuid,
     externalId,
     group,
-    operation,                       // sell | sell_refund
+    operation, // sell | sell_refund | sell_correction | buy | buy_refund | buy_correction
     status: 'wait',
-    createdAt: Date.now(),
-    processAt: Date.now() + PROCESS_MS,
+    ofdStatus: 'pending',
+    ofdScenarioMode,
+    ofdError: null,
+    createdAt: clock.now(),
+    processAt: clock.now() + PROCESS_MS,
     processedAt: null,
-    forceFail: externalId.startsWith('fail-') || scenario === 'fail',
-    hang: externalId.startsWith('hang-') || scenario === 'hang',
+    forceFail: externalId.startsWith('fail-') || spec.has('fail') || spec.has('kkt-fail'),
+    forceMarkFail: hasFailMarking || spec.has('mark-fail'),
+    hang: externalId.startsWith('hang-') || spec.has('hang'),
+    callbackSuppressed: spec.has('webhook-drop') || spec.has('no-webhook'),
+    callbackDuplicate: spec.has('webhook-duplicate'),
     receipt: body.receipt,
-    supplierLabel: shortSupplierName(body.receipt?.items?.[0]?.supplier_info?.name) || '—',
-    supplierInnLabel: body.receipt?.items?.[0]?.supplier_info?.inn || '—',
-    fiscalReceiptNumber: null,       // присваивается при печати (см. тик)
+    hasSupplier: Boolean(supplierObj),
+    supplierLabel: shortSupplierName(supplierObj?.name) || '—',
+    supplierInnLabel: supplierObj?.inn || '—',
+    prepaymentExternalId: prepayExtId ? String(prepayExtId) : null,
+    originExternalId: originExtId ? String(originExtId) : null,
+    prepaymentRemaining: isPrepaymentDoc ? (body.receipt?.total || 0) : null,
+    refundableRemaining: ['sell', 'buy'].includes(operation) ? (body.receipt?.total || 0) : null,
+    fiscalReceiptNumber: null, // присваивается при печати
     fiscalDocumentNumber: ++state.counters.fd,
     callbackBody: null,
     payload: null,
     error: null,
   };
+
+  // Списываем зачтённый аванс у исходного чека предоплаты
+  if (prepayExtId && !doc.forceFail && !doc.forceMarkFail) {
+    const prepayUuid = state.externalIds[String(prepayExtId)];
+    const prepayDoc = prepayUuid ? state.receipts[prepayUuid] : null;
+    if (prepayDoc) {
+      const offsetPayments = (body.receipt?.payments || [])
+        .filter((p) => p.type === 2)
+        .reduce((acc, p) => acc + p.sum, 0);
+      const deduct = offsetPayments > 0 ? offsetPayments : (body.receipt?.total || 0);
+      prepayDoc.prepaymentRemaining = Math.max(0, (prepayDoc.prepaymentRemaining ?? prepayDoc.receipt.total) - deduct);
+    }
+  }
+
+  // Списываем сумму возврата у исходного чека прихода/расхода
+  if (originExtId && !doc.forceFail && !doc.forceMarkFail) {
+    const originUuid = state.externalIds[String(originExtId)];
+    const originDoc = originUuid ? state.receipts[originUuid] : null;
+    if (originDoc) {
+      originDoc.refundableRemaining = Math.max(0, (originDoc.refundableRemaining ?? originDoc.receipt.total) - (body.receipt?.total || 0));
+    }
+  }
 
   if (doc.hang) {
     log(`[kassa-mock] doc ${uuid}: сценарий hang- — останется в wait без callback`);
@@ -475,22 +856,108 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
+    // Опциональная защита /admin* по токену (A-20)
+    if (url.startsWith('/admin') && !checkAdminAuth(req, MOCK_ADMIN_TOKEN)) {
+      return jsonRaw(res, 401, errBody(11, 'Доступ к /admin ограничен MOCK_ADMIN_TOKEN'));
+    }
+
     if (req.method === 'GET' && url === '/admin/journal') {
       return sendJson(res, { entries: journal.list() });
     }
 
     if (req.method === 'GET' && url === '/healthz') {
-      return sendJson(res, { ok: !isDown(), checks: state.cashbox.checksCnt });
+      return sendJson(res, {
+        ok: !isDown(),
+        checks: state.cashbox.checksCnt,
+        ofdMode: state.cashbox.ofdMode || 'online',
+        ofdQueueCount: Object.keys(state.ofdQueue || {}).length,
+      });
     }
 
-    // Текстовая админ-консоль (как у tbank-mock).
-    // Все значения экранируются: данные приходят от интегратора, а страница
-    // публичная — без экранирования это XSS (дефект A-14 аудита).
+    // Виртуальные часы (этап 7, бриф §3.2)
+    if (url === '/mock/time') {
+      if (req.method === 'GET') return sendJson(res, clock.snapshot());
+      if (req.method === 'POST' || req.method === 'PUT') {
+        const raw = await readBody(req);
+        let spec = {};
+        try { spec = JSON.parse(raw || '{}'); } catch { return jsonRaw(res, 400, errBody(4, 'Некорректный JSON для /mock/time')); }
+        try {
+          const snap = clock.set(spec);
+          tickKassa();
+          return sendJson(res, snap);
+        } catch (e) {
+          return jsonRaw(res, 400, errBody(4, e.message, { field: 'advance|offset|iso' }));
+        }
+      }
+    }
+
+    // Сценарное API (этап 7, бриф §3.2)
+    if (url === '/mock/scenarios') {
+      if (req.method === 'GET') {
+        return sendJson(res, { rules: scenarios.listRules(), history: scenarios.listHistory() });
+      }
+      if (req.method === 'POST') {
+        const raw = await readBody(req);
+        let body = {};
+        try { body = JSON.parse(raw || '{}'); } catch { return jsonRaw(res, 400, errBody(4, 'Некорректный JSON для /mock/scenarios')); }
+        try {
+          const rule = scenarios.addRule(body);
+          return sendJson(res, { ok: true, rule });
+        } catch (e) {
+          return jsonRaw(res, 400, errBody(4, e.message, { field: 'scenario' }));
+        }
+      }
+      if (req.method === 'DELETE') {
+        scenarios.clearRules();
+        scenarios.clearHistory();
+        return sendJson(res, { ok: true, rules: [], history: [] });
+      }
+    }
+
+    // Очередь ОФД и управление связью с ОФД (этап 6, бриф §3.1)
+    if (req.method === 'GET' && url === '/possystem/v1/ofd/queue') {
+      const items = Object.values(state.ofdQueue || {});
+      return sendJson(res, {
+        ofdMode: state.cashbox.ofdMode || 'online',
+        count: items.length,
+        items,
+      });
+    }
+
+    if (req.method === 'POST' && url === '/possystem/v1/ofd/mode') {
+      const raw = await readBody(req);
+      res.__mockBody = raw;
+      let body = {};
+      try { body = JSON.parse(raw || '{}'); } catch { return jsonRaw(res, 400, errBody(4, 'Некорректный JSON')); }
+      if (body.mode !== undefined) {
+        const nextMode = String(body.mode).toLowerCase();
+        if (!['online', 'offline', 'reject'].includes(nextMode)) {
+          return jsonRaw(res, 200, errBody(4, `Неизвестный режим ОФД «${body.mode}»`, {
+            field: 'mode',
+            hint: "Допустимые режимы ОФД: 'online' (отправка сразу), 'offline' (копить в очереди pending), 'reject' (отказ ОФД).",
+          }));
+        }
+        state.cashbox.ofdMode = nextMode;
+      }
+      let flushed = 0;
+      if (body.flush || state.cashbox.ofdMode === 'online') {
+        flushed = flushOfdQueue();
+      }
+      persist();
+      return sendJson(res, {
+        ok: true,
+        ofdMode: state.cashbox.ofdMode,
+        flushed,
+        ofdQueueCount: Object.keys(state.ofdQueue || {}).length,
+      });
+    }
+
+    // Текстовая админ-консоль
     if (req.method === 'GET' && url === '/admin') {
       const docs = Object.values(state.receipts).sort((a, b) => b.createdAt - a.createdAt);
       const rows = docs.slice(0, 50).map((d) => `<tr>
         <td>${escapeHtml(d.uuid.slice(0, 8))}</td><td>${escapeHtml(d.operation)}</td><td>${escapeHtml(d.externalId)}</td>
-        <td>${escapeHtml(d.status)}</td><td>${d.payload ? `ФД №${escapeHtml(d.payload.fiscal_document_number)} ФП ${escapeHtml(d.payload.fiscal_document_attribute)}` : (d.error ? escapeHtml(d.error.text) : '—')}</td>
+        <td>${escapeHtml(d.status)} / ОФД: <b>${escapeHtml(d.ofdStatus || '—')}</b></td><td>${d.payload ? `ФД №${escapeHtml(d.payload.fiscal_document_number)} ФП ${escapeHtml(d.payload.fiscal_document_attribute)}` : (d.error ? escapeHtml(d.error.text) : '—')}</td>
         <td>${((d.receipt?.total || 0) / 100).toFixed(2)} р</td>
         <td>${d.callbackBody ? `<form method="POST" action="/admin/action" style="display:inline"><input type="hidden" name="action" value="resend-callback"><input type="hidden" name="uuid" value="${escapeHtml(d.uuid)}"><button style="width:auto;padding:2px 6px;font-size:11px">callback</button></form>` : '—'}</td></tr>`).join('');
       const journalRows = journal.list().slice(-15).reverse()
@@ -500,9 +967,9 @@ const server = http.createServer(async (req, res) => {
 body{font-family:monospace;background:#111;color:#ddd;margin:20px}table{border-collapse:collapse;width:100%}
 td,th{border:1px solid #444;padding:4px 8px;font-size:13px}th{background:#222}
 h1{font-size:18px} a{color:#8cf}</style></head><body>
-<h1>kassa-mock — Ferma cloud-cashbox mock (${state.cashbox.kktState}, чеков: ${state.cashbox.checksCnt})</h1>
-<p>POST /possystem/v1/getToken · POST /possystem/v1/{group}/sell|sell_refund · GET /possystem/v1/{group}/report/&#123;uuid&#125; · GET /possystem/v1/stats/cashboxes/extended</p>
-<p>Негатив: ExternalId с префиксом <b>fail-</b> (отказ печати) / <b>hang-</b> (вечный wait); env MOCK_FERMA_DOWN=1 — касса недоступна при старте.</p>
+<h1>kassa-mock — Ferma cloud-cashbox mock (${escapeHtml(state.cashbox.kktState)}, чеков: ${state.cashbox.checksCnt}, ОФД: ${escapeHtml(state.cashbox.ofdMode || 'online')}, очередь ОФД: ${Object.keys(state.ofdQueue || {}).length})</h1>
+<p>POST /possystem/v1/getToken · POST /possystem/v1/{group}/sell|sell_refund|sell_correction|buy|buy_refund|buy_correction · GET /possystem/v1/{group}/report/&#123;uuid&#125; · GET /possystem/v1/stats/cashboxes/extended</p>
+<p>Негатив: X-Mock-Scenario: <b>fail</b> / <b>hang</b> / <b>webhook-drop</b> / <b>ofd-queue</b> / <b>ofd-reject</b> / <b>mark-fail</b>; ExternalId с префиксом <b>fail-</b> / <b>hang-</b>.</p>
 <form method="POST" action="/admin/action" style="display:inline">
   <input type="hidden" name="action" value="kassa-down">
   <input type="hidden" name="ms" value="300000">
@@ -513,10 +980,18 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
   <button type="submit">Вернуть в строй</button>
 </form>
 <form method="POST" action="/admin/action" style="display:inline">
+  <input type="hidden" name="action" value="ofd-offline">
+  <button type="submit">ОФД: оффлайн (копить очередь)</button>
+</form>
+<form method="POST" action="/admin/action" style="display:inline">
+  <input type="hidden" name="action" value="ofd-online">
+  <button type="submit">ОФД: онлайн (отправить очередь)</button>
+</form>
+<form method="POST" action="/admin/action" style="display:inline">
   <input type="hidden" name="action" value="clear-external-ids">
   <button type="submit">Сбросить реестр external_id</button>
 </form>
-<p>Статус: ${isDown() ? `НЕДОСТУПНА до ${new Date(state.cashbox.downUntil).toISOString()}` : 'готова'} · external_id в реестре: ${Object.keys(state.externalIds).length}</p>
+<p>Статус: ${isDown() ? `НЕДОСТУПНА до ${new Date(state.cashbox.downUntil).toISOString()}` : 'готова'} · external_id в реестре: ${Object.keys(state.externalIds).length} · Виртуальное время: ${escapeHtml(clock.iso())}</p>
 <table><tr><th>uuid</th><th>op</th><th>external_id</th><th>status</th><th>фискальные данные</th><th>сумма</th><th>действия</th></tr>${rows}</table>
 <h2 style="font-size:15px">Журнал запросов к API (последние 15) — <a href="/admin/journal">json</a></h2>
 <table><tr><th>время</th><th>метод</th><th>путь</th><th>поля</th><th>код</th><th>время</th></tr>${journalRows}</table>
@@ -533,29 +1008,32 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
       res.__mockBody = raw;
       let creds = {};
       try { creds = JSON.parse(raw || '{}'); } catch { /* fallthrough */ }
-      if (creds.login !== MOCK_FERMA_LOGIN || creds.pass !== MOCK_FERMA_PASSWORD) {
+      if (creds.login !== FERMA_LOGIN_CRED || creds.pass !== FERMA_PASSWORD_CRED) {
         log(`[kassa-mock] getToken DENIED for login=${creds.login}`);
         return jsonRaw(res, 200, errBody(14, 'Неверный логин или пароль'));
       }
       const token = crypto.randomBytes(16).toString('hex');
-      state.tokens[token] = { login: creds.login, createdAt: Date.now() };
+      state.tokens[token] = { login: creds.login, createdAt: clock.now() };
+      persist();
       log(`[kassa-mock] getToken OK for ${creds.login}`);
-      return sendJson(res, { error: null, timestamp: new Date().toISOString(), token });
+      return sendJson(res, { error: null, timestamp: clock.iso(), token });
     }
 
-    const sellMatch = /^\/possystem\/v1\/([^/]+)\/(sell|sell_refund|sell_correction)$/.exec(url);
-    if (req.method === 'POST' && sellMatch) {
+    const opMatch = /^\/possystem\/v1\/([^/]+)\/(sell|sell_refund|sell_correction|buy|buy_refund|buy_correction)$/.exec(url);
+    if (req.method === 'POST' && opMatch) {
       if (!checkToken(req.url)) return jsonRaw(res, 200, errBody(11, 'Не выполнена авторизация'));
       const raw = await readBody(req);
       res.__mockBody = raw;
       let body;
       try { body = JSON.parse(raw || '{}'); } catch { return jsonRaw(res, 200, errBody(4, 'Неверный формат запроса')); }
 
+      const groupCode = opMatch[1];
+      const operation = opMatch[2];
       const externalId = String(body.external_id || '');
       if (!externalId) return jsonRaw(res, 200, errBody(5, 'external_id обязателен'));
-      // A-16: опечатка в группе раньше проходила молча, в бою это отказ кассы.
-      if (GROUPS.length && !GROUPS.includes(sellMatch[1])) {
-        return jsonRaw(res, 200, errBody(4, `Группа «${sellMatch[1]}» не зарегистрирована на стенде`, {
+      // A-16: опечатка в группе отклоняется
+      if (GROUPS.length && !GROUPS.includes(groupCode)) {
+        return jsonRaw(res, 200, errBody(4, `Группа «${groupCode}» не зарегистрирована на стенде`, {
           field: 'group_code',
           hint: `Разрешённые группы задаются env MOCK_GROUPS: ${GROUPS.join(', ')}. Опечатка в группе на боевой кассе = отказ регистрации документа.`,
         }));
@@ -564,22 +1042,23 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
         return jsonRaw(res, 200, errBody(12, `Идентификатор счёта (external_id) «${externalId}» уже существует`));
       }
       if (VALIDATE_RECEIPTS) {
-        const problem = validateReceipt(body.receipt);
+        const problem = validateReceipt(body.receipt, operation, body);
         if (problem) {
-          log(`[kassa-mock] sell REJECTED (validation): ${problem.field} — ${externalId}`);
+          log(`[kassa-mock] ${operation} REJECTED (validation): ${problem.field} — ${externalId}`);
           return jsonRaw(res, 200, errBody(4, `Чек не прошёл проверку кассы: ${problem.field}`, problem));
         }
       }
 
-      const doc = createDocument(sellMatch[2], sellMatch[1], body, req.headers['x-mock-scenario']);
+      const doc = createDocument(operation, groupCode, body, req.headers['x-mock-scenario']);
       if (doc.hang) {
-        // Документ «завис»: в очередь не попал, но externalId занят — как
-        // реальный «принят, не обработан».
         state.receipts[doc.uuid] = doc;
         state.externalIds[externalId] = doc.uuid;
         persist();
+      } else if (PROCESS_MS === 0) {
+        // При мгновенной печати (MOCK_PROCESS_MS=0) сразу выполняем тик
+        tickKassa();
       }
-      return sendJson(res, { uuid: doc.uuid, timestamp: new Date().toISOString(), error: null, status: 'wait' });
+      return sendJson(res, { uuid: doc.uuid, timestamp: clock.iso(), error: null, status: 'wait' });
     }
 
     const reportMatch = /^\/possystem\/v1\/([^/]+)\/report\/([^/]+)$/.exec(url);
@@ -587,7 +1066,18 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
       if (!checkToken(req.url)) return jsonRaw(res, 200, errBody(11, 'Не выполнена авторизация'));
       const doc = state.receipts[reportMatch[2]];
       if (!doc) return jsonRaw(res, 200, errBody(10, 'Документ не найден'));
-      const out = { uuid: doc.uuid, external_id: doc.externalId, group_code: doc.group, type: doc.operation, status: doc.status, timestamp: new Date().toISOString(), error: doc.error, payload: doc.payload };
+      const out = {
+        uuid: doc.uuid,
+        external_id: doc.externalId,
+        group_code: doc.group,
+        type: doc.operation,
+        status: doc.status,
+        ofd_status: doc.ofdStatus || (doc.status === 'done' ? 'sent' : 'pending'),
+        ...(doc.ofdError ? { ofd_error: doc.ofdError } : {}),
+        timestamp: clock.iso(),
+        error: doc.error,
+        payload: doc.payload,
+      };
       return sendJson(res, out);
     }
 
@@ -602,6 +1092,8 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
           tariffType: state.cashbox.tariffType,
           checksCnt: state.cashbox.checksCnt,
           fnVolumePercent: state.cashbox.fnVolumePercent,
+          ofdMode: state.cashbox.ofdMode || 'online',
+          ofdQueueCount: Object.keys(state.ofdQueue || {}).length,
           tariffExpires: '2036-01-01T00:00:00',
         }],
         Errors: [],
@@ -625,12 +1117,21 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
         if (i > 0) body[decodeURIComponent(pair.slice(0, i))] = decodeURIComponent(pair.slice(i + 1));
       }
       if (body.action === 'kassa-down') {
-        state.cashbox.downUntil = Date.now() + Math.max(0, parseInt(body.ms, 10) || 300000);
+        state.cashbox.downUntil = clock.now() + Math.max(0, parseInt(body.ms, 10) || 300000);
         log(`сценарий: касса недоступна до ${new Date(state.cashbox.downUntil).toISOString()}`);
         persist();
       } else if (body.action === 'kassa-up') {
         state.cashbox.downUntil = 0;
         log('сценарий: касса снова готова к работе');
+        persist();
+      } else if (body.action === 'ofd-offline') {
+        state.cashbox.ofdMode = 'offline';
+        log('сценарий: связь с ОФД отключена (документы копятся в очереди)');
+        persist();
+      } else if (body.action === 'ofd-online') {
+        state.cashbox.ofdMode = 'online';
+        const flushed = flushOfdQueue();
+        log(`сценарий: связь с ОФД восстановлена (отправлено из очереди: ${flushed})`);
         persist();
       } else if (body.action === 'resend-callback') {
         const doc = state.receipts[body.uuid];
@@ -659,11 +1160,15 @@ store.restore();
 // MOCK_FERMA_DOWN_MS: авто-восстановление задаётся и при старте
 if (process.env.MOCK_FERMA_DOWN === 'true' || process.env.MOCK_FERMA_DOWN === '1') {
   const ms = Math.max(0, parseInt(MOCK_FERMA_DOWN_MS, 10) || 0);
-  state.cashbox.downUntil = Date.now() + ms;
+  state.cashbox.downUntil = clock.now() + ms;
   log(`[kassa-mock] старт в режиме «касса недоступна»${ms ? `, восстановление через ${ms} мс` : ' (до MOCK_FERMA_DOWN=0)'}`);
 }
 
-server.listen(parseInt(MOCK_PORT, 10), MOCK_HOST, () => {
-  log(`kassa-mock (Ferma cloud-cashbox mock) on ${MOCK_HOST}:${MOCK_PORT}`);
-  log(`login=${MOCK_FERMA_LOGIN} process_delay=${PROCESS_MS}ms state=${MOCK_STATE_FILE || 'memory'}`);
-});
+if (require.main === module) {
+  server.listen(parseInt(MOCK_PORT, 10), MOCK_HOST, () => {
+    log(`kassa-mock (Ferma cloud-cashbox mock) on ${MOCK_HOST}:${MOCK_PORT}`);
+    log(`login=${FERMA_LOGIN_CRED} process_delay=${PROCESS_MS}ms state=${MOCK_STATE_FILE || 'memory'}`);
+  });
+}
+
+module.exports = { server, state, clock, scenarios, OPERATIONS };

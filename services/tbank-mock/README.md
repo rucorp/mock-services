@@ -56,10 +56,14 @@ TBANK_NOTIFICATION_URL=https://<домен ядра>/api/v1/payments/tbank/webho
 | `POST /v2/Confirm` | только из `AUTHORIZED`, сумма ≤ авторизованной → `CONFIRMED`; иначе код 32 |
 | `POST /v2/Cancel` | переходы по таблице банка (`NEW→CANCELED`, `→REVERSED/PARTIAL_REVERSED`, `→REFUNDED/PARTIAL_REFUNDED`), идемпотентность по `ExternalRequestId`; `Amount` больше доступной суммы → код 7 |
 | `POST /v2/GetState` | текущий статус/сумма; принимает `PaymentId` **или** `OrderId` |
-| `POST /v2/CheckOrder` | все попытки по `OrderId` |
+| `POST /v2/CheckOrder` | все попытки по `OrderId` (+ `RRN`) |
+| `POST /v2/Chargeback` · `POST /v2/Dispute` | машина состояний чарджбэка: `DISPUTED` (`CHARGEBACK` / `PARTIAL_CHARGEBACK`) → `REPRESENTMENT` → `ARBITRATION` (`ARB`) → `WON` / `LOST` + подписанные вебхуки |
+| `GET /v2/Dispute/{id}` | карточка спора и история переходов |
 | `GET /payment/{id}` | платёжная форма: тестовые карты-пресеты, ввод карты, «отклонить покупателем» |
 | `POST /payment/{id}/pay` · `/otp` | сценарий по PAN (см. ниже), challenge → OTP `1qwezxc`, 3 неверных → отказ |
-| `GET /admin` | консоль: платежи/сделки/нотификации/поступления/верификации, журнал запросов, кнопки сценариев и дублей нотификаций |
+| `GET /mock/time` · `POST/PUT /mock/time` | виртуальные часы (`{"advance":"7d"}`, `{"advance":"60d"}`, `{"reset":true}`) |
+| `GET /mock/scenarios` · `POST/DELETE /mock/scenarios` | сценарное API и журнал срабатываний; заголовок `X-Mock-Scenario: chargeback-after:7d, partial-refund:30%, webhook-drop, webhook-duplicate` |
+| `GET /admin` | консоль: платежи/споры/сделки/нотификации/поступления/верификации, журнал запросов, кнопки сценариев (опц. защита `MOCK_ADMIN_TOKEN`) |
 | `GET /admin/journal` | JSON-журнал последних API-запросов (метод, путь, поля, код, время) |
 | `GET /health` | health-check |
 
