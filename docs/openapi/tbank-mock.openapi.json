@@ -9,6 +9,20 @@
     { "url": "http://localhost:3100", "description": "Локальный стенд tbank-mock" }
   ],
   "components": {
+    "securitySchemes": {
+      "operatorToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Operator-Token",
+        "description": "Токен управляющей поверхности (MOCK_OPERATOR_TOKEN; также Authorization: Bearer или ?operator_token=). Если токены не заданы, локальный стенд открыт; при MOCK_HOSTED=1 без секрета маршрут закрыт (fail-closed)."
+      },
+      "adminToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Admin-Token",
+        "description": "Токен админки /admin* (MOCK_ADMIN_TOKEN)."
+      }
+    },
     "parameters": {
       "XMockScenario": {
         "name": "X-Mock-Scenario",
@@ -225,28 +239,40 @@
       }
     },
     "/mock/time": {
-      "get": { "summary": "Чтение виртуальных часов стенда", "responses": { "200": { "description": "Снимок часов" } } },
-      "post": { "summary": "Сдвиг или установка виртуального времени ({advance:'7d'} / {reset:true})", "responses": { "200": { "description": "Обновлённый снимок часов" } } }
+      "get": {
+      "security": [{ "operatorToken": [] }], "summary": "Чтение виртуальных часов стенда", "responses": { "200": { "description": "Снимок часов" } } },
+      "post": {
+      "security": [{ "operatorToken": [] }], "summary": "Сдвиг или установка виртуального времени ({advance:'7d'} / {reset:true})", "responses": { "200": { "description": "Обновлённый снимок часов" } } }
     },
     "/mock/scenarios": {
-      "get": { "summary": "Список активных сценарных правил и история срабатываний", "responses": { "200": { "description": "Правила и история" } } },
-      "post": { "summary": "Добавление одноразового или постоянного правила сценария", "responses": { "200": { "description": "Правило добавлено" } } },
-      "delete": { "summary": "Очистка правил и истории сценариев", "responses": { "200": { "description": "Очищено" } } }
+      "get": {
+      "security": [{ "operatorToken": [] }], "summary": "Список активных сценарных правил и история срабатываний", "responses": { "200": { "description": "Правила и история" } } },
+      "post": {
+      "security": [{ "operatorToken": [] }], "summary": "Добавление одноразового или постоянного правила сценария", "responses": { "200": { "description": "Правило добавлено" } } },
+      "delete": {
+      "security": [{ "operatorToken": [] }], "summary": "Очистка правил и истории сценариев", "responses": { "200": { "description": "Очищено" } } }
     },
     "/mock/sandboxes": {
-      "get": { "summary": "Список изолированных песочниц", "responses": { "200": { "description": "Список песочниц" } } },
-      "post": { "summary": "Переключение или создание песочницы", "responses": { "200": { "description": "Активная песочница" } } },
-      "delete": { "summary": "Сброс песочницы", "responses": { "200": { "description": "Песочница сброшена" } } }
+      "get": {
+      "security": [{ "operatorToken": [] }], "summary": "Список изолированных песочниц", "responses": { "200": { "description": "Список песочниц" } } },
+      "post": {
+      "security": [{ "operatorToken": [] }], "summary": "Переключение или создание песочницы", "responses": { "200": { "description": "Активная песочница" } } },
+      "delete": {
+      "security": [{ "operatorToken": [] }], "summary": "Сброс песочницы", "responses": { "200": { "description": "Песочница сброшена" } } }
     },
     "/mock/reset": {
-      "post": { "summary": "Полный сброс состояния текущей песочницы, сценариев и журнала", "responses": { "200": { "description": "Сброшено" } } }
+      "post": {
+      "security": [{ "operatorToken": [] }], "summary": "Полный сброс состояния текущей песочницы, сценариев и журнала", "responses": { "200": { "description": "Сброшено" } } }
     },
     "/mock/state": {
-      "get": { "summary": "Экспорт полного снимка состояния песочницы", "responses": { "200": { "description": "JSON-снимок состояния" } } },
-      "post": { "summary": "Импорт снимка состояния песочницы", "responses": { "200": { "description": "Состояние загружено" } } }
+      "get": {
+      "security": [{ "operatorToken": [] }], "summary": "Экспорт полного снимка состояния песочницы", "responses": { "200": { "description": "JSON-снимок состояния" } } },
+      "post": {
+      "security": [{ "operatorToken": [] }], "summary": "Импорт снимка состояния песочницы", "responses": { "200": { "description": "Состояние загружено" } } }
     },
     "/mock/verify-merchant": {
-      "post": { "summary": "Активный экзаменатор webhook-приёмника мерчанта (3 пробы: валидная подпись, идемпотентность дубля, отказ на поддельном Token)", "responses": { "200": { "description": "Отчёт сертификации обработчика вебхуков" } } }
+      "post": {
+      "security": [{ "operatorToken": [] }], "summary": "Активный экзаменатор webhook-приёмника мерчанта (3 пробы: валидная подпись, идемпотентность дубля, отказ на поддельном Token)", "responses": { "200": { "description": "Отчёт сертификации обработчика вебхуков" } } }
     },
     "/openapi.json": {
       "get": { "summary": "Спецификация OpenAPI 3.1.0 сервиса tbank-mock", "responses": { "200": { "description": "OpenAPI JSON" } } }

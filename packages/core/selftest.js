@@ -43,6 +43,17 @@ function check(name, fn) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const listen = (srv) => new Promise((r) => srv.listen(0, '127.0.0.1', () => r(srv.address().port)));
 
+async function acheck(name, fn) {
+  try {
+    await fn();
+    passed += 1;
+    console.log(`  ✓ ${name}`);
+  } catch (e) {
+    failed += 1;
+    console.log(`  ✗ ${name}\n      ${e.message}`);
+  }
+}
+
 async function main() {
   console.log('\n== core selftest ==\n');
 
@@ -193,6 +204,110 @@ async function main() {
     assert.strictEqual(core.checkAdminAuth({ headers: { authorization: 'Bearer sec-1' }, url: '/admin' }, 'sec-1'), true);
     assert.strictEqual(core.checkAdminAuth({ headers: { 'x-admin-token': 'sec-1' }, url: '/admin' }, 'sec-1'), true);
     assert.strictEqual(core.checkAdminAuth({ headers: {}, url: '/admin?admin_token=sec-1' }, 'sec-1'), true);
+  });
+
+  /* --- #22: access-control управляющей поверхности и SSRF-политика ------- */
+
+  check('flagEnabled принимает 1/true и различает явное false (F-08)', () => {
+    assert.strictEqual(core.flagEnabled('1'), true);
+    assert.strictEqual(core.flagEnabled('true'), true);
+    assert.strictEqual(core.flagEnabled('TRUE'), true);
+    assert.strictEqual(core.flagEnabled('0'), false);
+    assert.strictEqual(core.flagEnabled('false'), false);
+    assert.strictEqual(core.flagEnabled(''), false);
+    assert.strictEqual(core.flagEnabled('', true), true, 'пустое значение — fallback (hosted-политика)');
+    assert.strictEqual(core.flagEnabled('0', true), false, 'явное 0 перебивает fallback');
+  });
+
+  check('isPrivateAddress/isPrivateHost различают приватные IPv4/IPv6 и служебные имена (F-08)', () => {
+    for (const ip of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '224.0.0.1', '::1', '::', 'fc00::1', 'fd12:3456::1', 'fe80::1', '::ffff:192.168.0.1']) {
+      assert.strictEqual(core.isPrivateAddress(ip), true, `${ip} должен быть приватным`);
+    }
+    for (const ip of ['8.8.8.8', '93.184.216.34', '2606:4700::1111']) {
+      assert.strictEqual(core.isPrivateAddress(ip), false, `${ip} должен быть публичным`);
+    }
+    assert.strictEqual(core.isPrivateAddress('example.com'), null, 'имя хоста — не IP-литерал');
+    assert.strictEqual(core.isPrivateHost('http://[::1]:3100/hook'), true);
+    assert.strictEqual(core.isPrivateHost('http://localhost:3100/hook'), true);
+    assert.strictEqual(core.isPrivateHost('http://kassa.internal/hook'), true);
+    assert.strictEqual(core.isPrivateHost('http://93.184.216.34/hook'), false);
+    assert.strictEqual(core.isPrivateHost('file:///etc/passwd'), true, 'чужая схема — блок');
+  });
+
+  await acheck('assertPublicHost блокирует приватные адреса, имена и опасные схемы (F-08)', async () => {
+    const blocked = async (url, opts) => {
+      try {
+        await core.assertPublicHost(url, opts);
+      } catch (e) {
+        assert.strictEqual(e.code, 'SSRF_BLOCKED', `${url}: ожидался код SSRF_BLOCKED, получено ${e.code}`);
+        return;
+      }
+      assert.fail(`${url} должен быть заблокирован`);
+    };
+    await blocked('http://10.0.0.1/webhook');
+    await blocked('http://[::1]:3100/webhook');
+    await blocked('http://169.254.169.254/latest/meta-data/');
+    await blocked('http://localhost:3100/webhook');
+    await blocked('http://mock.local/webhook');
+    await blocked('file:///etc/passwd');
+    // Имя хоста, разрешающееся в приватный адрес (DNS-rebinding / внутренние имена)
+    await blocked('http://internal.example.com/hook', { lookup: async () => [{ address: '10.9.8.7', family: 4 }] });
+    await blocked('http://sneaky.example.com/hook', { lookup: async () => [{ address: '93.184.216.34', family: 4 }, { address: '::1', family: 6 }] });
+    await blocked('http://nxdomain.example.com/hook', { lookup: async () => { const e = new Error('ENOTFOUND'); e.code = 'ENOTFOUND'; throw e; } });
+    // Публичные адреса и имена проходят
+    assert.strictEqual(await core.assertPublicHost('http://93.184.216.34:8080/hook'), true);
+    assert.strictEqual(
+      await core.assertPublicHost('https://merchant.example.com/hook', { lookup: async () => [{ address: '93.184.216.34', family: 4 }] }),
+      true,
+    );
+  });
+
+  await acheck('postJson отклоняет не-http(s) схемы до открытия сокета (F-08)', async () => {
+    await assert.rejects(() => core.postJson('file:///etc/passwd', { ping: true }), /схема/);
+    await assert.rejects(() => core.postJson('gopher://127.0.0.1:11211/_x', { ping: true }), /схема/);
+  });
+
+  await acheck('delivery queue с blockPrivateHosts не отправляет на приватный адрес и не роняет цикл (F-08)', async () => {
+    let hits = 0;
+    const target = http.createServer((req, res) => { hits += 1; res.end('OK'); });
+    const targetPort = await listen(target);
+    const entries = {
+      a: { url: `http://127.0.0.1:${targetPort}/ok`, attempts: 0, nextAttemptAt: 0 },
+    };
+    const queue = core.createDeliveryQueue({
+      entries, retryMs: 200, maxAttempts: 3, log: () => {},
+      request: (e) => ({ url: e.url, data: { ping: true } }),
+      blockPrivateHosts: true,
+    });
+    await queue.tick();
+    await queue.tick();
+    assert.strictEqual(hits, 0, 'запрос на приватный адрес не должен уходить');
+    assert.ok(String(entries.a.lastStatus).startsWith('ERR'), `lastStatus должен фиксировать отказ, получено ${entries.a.lastStatus}`);
+    assert.ok(String(entries.a.lastStatus).includes('SSRF'), 'причина отказа должна быть явной (SSRF)');
+    target.close();
+  });
+
+  check('checkControlAccess: роли admin/operator, fallback и hosted fail-closed (F-07)', () => {
+    const req = (headers = {}, url = '/mock/state') => ({ headers, url });
+    // Локальный режим без токенов — открыт (обратная совместимость)
+    assert.strictEqual(core.checkControlAccess(req(), { hosted: false }).allowed, true);
+    // Hosted-режим без секрета — fail-closed
+    const closed = core.checkControlAccess(req(), { hosted: true });
+    assert.strictEqual(closed.allowed, false);
+    assert.strictEqual(closed.reason, 'hosted-fail-closed');
+    // Operator-поверхность: неверный и верный токен
+    const opts = { adminToken: 'adm-secret', operatorToken: 'op-secret', surface: 'operator' };
+    assert.strictEqual(core.checkControlAccess(req({ authorization: 'Bearer wrong' }), opts).allowed, false);
+    assert.strictEqual(core.checkControlAccess(req({ authorization: 'Bearer op-secret' }), opts).allowed, true);
+    assert.strictEqual(core.checkControlAccess(req({ 'x-operator-token': 'op-secret' }), opts).allowed, true);
+    assert.strictEqual(core.checkControlAccess(req({}, '/mock/time?operator_token=op-secret'), opts).allowed, true);
+    // Fallback: только админ-токен настроен -> он же закрывает operator-поверхность
+    assert.strictEqual(core.checkControlAccess(req({ authorization: 'Bearer adm-secret' }), { ...opts, operatorToken: '' }).allowed, true);
+    // Admin-поверхность операторским токеном не открывается
+    assert.strictEqual(core.checkControlAccess(req({ authorization: 'Bearer op-secret' }), { ...opts, surface: 'admin' }).allowed, false);
+    assert.strictEqual(core.checkControlAccess(req({ authorization: 'Bearer adm-secret' }), { ...opts, surface: 'admin' }).allowed, true);
+    // Пустой токен при заданном секрете не проходит
+    assert.strictEqual(core.checkControlAccess(req({ authorization: 'Bearer ' }), opts).allowed, false);
   });
 
   check('createJournal формирует готовый curl-сниппет для каждого запроса', () => {

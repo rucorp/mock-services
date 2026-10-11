@@ -3,6 +3,24 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версии — [SemVer](https://semver.org/lang/ru/).
 
+## [Unreleased]
+
+### Security
+- **Access-control управляющей поверхности (#22, F-07).** Управляющие и
+  служебные маршруты обоих сервисов закрыты токенами: `/mock/*`, смены ККТ,
+  ресурс ФН, режим/очередь ОФД и чтение спора `GET /v2/Dispute/{id}` —
+  `MOCK_OPERATOR_TOKEN` (fallback — `MOCK_ADMIN_TOKEN`), `/admin*` — `MOCK_ADMIN_TOKEN`.
+  Токены принимаются в `Authorization: Bearer`, `X-Operator-Token`/`X-Admin-Token`
+  или query-параметре и сравниваются constant-time. Новый режим `MOCK_HOSTED=1`
+  закрывает управляющую поверхность без настроенного секрета (fail-closed);
+  локальный дефолт без токенов не изменился.
+- **SSRF-политика исходящих вебхуков (#22, F-08).** `MOCK_BLOCK_PRIVATE_WEBHOOKS`
+  теперь включает guard и при значении `1` (не только `true`), а `MOCK_HOSTED=1`
+  включает его по умолчанию; защита действует и в очереди доставки, и в
+  `/mock/verify-merchant`. Проверка усилена: приватные IPv4/IPv6-литералы,
+  служебные имена и имена, которые резолвятся в приватные адреса, запрещены схемы
+  кроме http/https; редиректы не отслеживаются.
+
 ## [0.5.0] — 2026-10-11
 
 ### Added
