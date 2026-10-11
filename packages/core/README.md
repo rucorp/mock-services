@@ -25,9 +25,18 @@ Zero dependencies, Node >= 18. Self-test: `npm run test:core`.
   на HTML-страницах сервисов (чек покупателю, `/admin`).
 - `createJournal({size})` → `{record, list, clear}` — журнал входящих запросов
   для `/admin/journal`: метод, путь, ключевые поля, код ответа, длительность.
-- `postJson(url, payload, timeoutMs)` — исходящий POST (http/https по схеме).
-- `isPrivateHost(url)` — эвристика «адрес из приватного диапазона» для
-  opt-in защиты вебхуков от SSRF.
+- `postJson(url, payload, timeoutMs)` — исходящий POST (http/https по схеме;
+  другие схемы отклоняются, редиректы не отслеживаются).
+- `flagEnabled(value, fallback)` — разбор boolean-настроек из env: `1`/`true`/`yes`/`on`
+  против `0`/`false`/`no`/`off`, пустое значение — `fallback` (F-08: `=1` больше не «молчит»).
+- `isPrivateAddress(ip)` / `isPrivateHost(url)` — классификация IP-литералов и
+  URL («приватный/служебный адрес») для opt-in защиты вебхуков от SSRF.
+- `assertPublicHost(url, {lookup})` — async-проверка перед исходящим запросом:
+  схема http/https, публичный IP, имя резолвится только в публичные адреса;
+  бросает `Error` с `code === 'SSRF_BLOCKED'`.
+- `checkControlAccess(req, {adminToken, operatorToken, surface, hosted})` —
+  единый access-control управляющей поверхности (F-07): роли `admin`/`operator`,
+  constant-time сравнение токена, fail-closed при `hosted` без секрета.
 - `createDeliveryQueue({...})` — очередь исходящих вебхуков с ретраями:
   запись живёт в состоянии сервиса (переживает рестарт), `retryMs`/`maxAttempts`
   настраиваются, критерий доставки — хук (`isOk`: у Т-Банка это 200 + тело «OK»,
@@ -44,8 +53,9 @@ Zero dependencies, Node >= 18. Self-test: `npm run test:core`.
      дефект A-4);
   3. `request(entry)`, бросивший исключение, не роняет тик — запись уходит в
      `onFailure` с текстом ошибки;
-  4. при `blockPrivateHosts: true` отправка на приватные адреса блокируется
-     (best-effort SSRF-guard для публичного стенда, дефект A-18).
+  4. при `blockPrivateHosts: true` отправка на приватные адреса и имена,
+     которые в них резолвятся, блокируется (best-effort SSRF-guard для
+     публичного стенда, дефекты A-18/F-08).
 - `createErrorCatalog({provider, docsBase, codes})` — каталог ошибок DX-слоя:
   `{код, объяснение, поле, подсказка, ссылка на официальный раздел доки}`.
 

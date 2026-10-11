@@ -25,7 +25,7 @@ const crypto = require('crypto');
 
 const core = require('../../packages/core');
 const {
-  createLog, readBody, send, sendJson, escapeHtml, checkAdminAuth,
+  createLog, readBody, send, sendJson, escapeHtml, checkControlAccess,
   parseScenarioSpec, applyRequestChaos, createSandboxManager, verifyMerchantWebhook,
 } = core;
 // Журнал входящих запросов: интегратору видно в /admin/journal (спека §2).
@@ -51,6 +51,8 @@ const {
   MOCK_PUBLIC_BASE_URL = `http://localhost:${MOCK_PORT}`,
   MOCK_VIRTUAL_CLOCK = '',
   MOCK_ADMIN_TOKEN = '',
+  MOCK_OPERATOR_TOKEN = '',
+  MOCK_HOSTED = 'false',
   MOCK_OFD_MODE = 'online',
 } = process.env;
 
@@ -69,7 +71,11 @@ const TOKEN_TTL_MS = parseMs(MOCK_TOKEN_TTL_MS, 12 * 60 * 60 * 1000);
 const VALIDATE_RECEIPTS = String(MOCK_VALIDATE_RECEIPTS).toLowerCase() !== 'false';
 // MOCK_GROUPS=Main,Shop-1 — если задан, группа с опечаткой отклоняется (как в бою).
 const GROUPS = String(MOCK_GROUPS).split(',').map((g) => g.trim()).filter(Boolean);
-const BLOCK_PRIVATE_WEBHOOKS = String(MOCK_BLOCK_PRIVATE_WEBHOOKS).toLowerCase() === 'true';
+// F-07/F-08: hosted-режим включает fail-closed управляющей поверхности и
+// SSRF-политику по умолчанию; env-флаг (1/true, 0/false) переопределяет.
+const HOSTED = core.flagEnabled(MOCK_HOSTED);
+const OPERATOR_TOKEN = MOCK_OPERATOR_TOKEN || '';
+const BLOCK_PRIVATE_WEBHOOKS = core.flagEnabled(MOCK_BLOCK_PRIVATE_WEBHOOKS, HOSTED);
 const CALLBACK_RETRY_MS = Math.max(1000, parseInt(MOCK_CALLBACK_RETRY_MS, 10) || 10000);
 const CALLBACK_MAX_ATTEMPTS = Math.max(1, parseInt(MOCK_CALLBACK_MAX_ATTEMPTS, 10) || 24);
 
@@ -942,6 +948,20 @@ function bodySummary(body) {
   return out;
 }
 
+/**
+ * Какая авторизация нужна маршруту (F-07):
+ *   'admin'    — /admin* (консоль, журнал и действия);
+ *   'operator' — управляющая поверхность: /mock/*, смены ККТ, ресурс ФН и
+ *                режим/очередь ОФД;
+ *   null       — контракт Ferma (getToken/sell/report/stats) и страницы чека.
+ */
+function controlSurface(url) {
+  if (url.startsWith('/admin')) return 'admin';
+  if (url.startsWith('/mock/')) return 'operator';
+  if (/^\/possystem\/v1\/(shift\/(open|close|status)|fn\/state|ofd\/(mode|queue))$/.test(url)) return 'operator';
+  return null;
+}
+
 const server = http.createServer(async (req, res) => {
   const parsedUrl = new URL(req.url, 'http://x');
   const url = parsedUrl.pathname;
@@ -977,9 +997,27 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
-    // Опциональная защита /admin* по токену (A-20)
-    if (url.startsWith('/admin') && !checkAdminAuth(req, MOCK_ADMIN_TOKEN)) {
-      return jsonRaw(res, 401, errBody(11, 'Доступ к /admin ограничен MOCK_ADMIN_TOKEN'));
+    // Единый access-control управляющей поверхности (F-07, A-20):
+    // /admin* — MOCK_ADMIN_TOKEN; /mock/*, смены/ФН/ОФД — MOCK_OPERATOR_TOKEN
+    // (с fallback на админ-токен). В hosted-режиме без секрета — fail-closed.
+    const surface = controlSurface(url);
+    if (surface) {
+      const access = checkControlAccess(req, {
+        adminToken: MOCK_ADMIN_TOKEN,
+        operatorToken: OPERATOR_TOKEN,
+        surface,
+        hosted: HOSTED,
+      });
+      if (!access.allowed) {
+        const envName = surface === 'admin' ? 'MOCK_ADMIN_TOKEN' : 'MOCK_OPERATOR_TOKEN';
+        const message = access.reason === 'hosted-fail-closed'
+          ? `Маршрут ${url} закрыт: hosted-режим (MOCK_HOSTED) требует ${envName} для управляющей поверхности`
+          : `Доступ к управляющему маршруту ${url} ограничен: требуется ${envName}`;
+        return jsonRaw(res, 401, errBody(11, message, {
+          field: surface === 'admin' ? 'Authorization' : 'X-Operator-Token',
+          hint: `Передайте токен в заголовке Authorization: Bearer <${envName}> или X-Operator-Token/X-Admin-Token.`,
+        }));
+      }
     }
 
     if (req.method === 'GET' && url === '/openapi.json') {
@@ -1066,6 +1104,12 @@ const server = http.createServer(async (req, res) => {
         });
         return sendJson(res, report);
       } catch (e) {
+        if (e && e.code === 'SSRF_BLOCKED') {
+          return jsonRaw(res, 403, errBody(4, e.message, {
+            field: 'url',
+            hint: 'Для активной проверки укажите публично доступный приёмник. Приватные адреса разрешены только при MOCK_BLOCK_PRIVATE_WEBHOOKS=0 на локальном стенде.',
+          }));
+        }
         return jsonRaw(res, 500, errBody(500, e.message));
       }
     }
@@ -1550,8 +1594,10 @@ if (process.env.MOCK_FERMA_DOWN === 'true' || process.env.MOCK_FERMA_DOWN === '1
 
 if (require.main === module) {
   server.listen(parseInt(MOCK_PORT, 10), MOCK_HOST, () => {
-    log(`kassa-mock (Ferma cloud-cashbox mock) on ${MOCK_HOST}:${MOCK_PORT}`);
+    const port = server.address().port; // MOCK_PORT=0 -> реальный порт
+    log(`kassa-mock (Ferma cloud-cashbox mock) on ${MOCK_HOST}:${port}`);
     log(`login=${FERMA_LOGIN_CRED} process_delay=${PROCESS_MS}ms state=${MOCK_STATE_FILE || 'memory'}`);
+    log(`control-plane: admin_token=${MOCK_ADMIN_TOKEN ? 'on' : 'off'} operator_token=${OPERATOR_TOKEN ? 'on' : 'off'} hosted=${HOSTED} block_private_webhooks=${BLOCK_PRIVATE_WEBHOOKS}`);
   });
 }
 

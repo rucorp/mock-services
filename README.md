@@ -79,7 +79,7 @@ docker-compose.include.yml — внешний compose-модуль (профил
 | Негативные сценарии и часы | `X-Mock-Scenario` (`chargeback-after:7d`, `partial-refund`, `webhook-drop`), `/mock/scenarios`, `/mock/time` (`+7d`/`+60d`) | `X-Mock-Scenario` (`fail`, `hang`, `ofd-queue`, `ofd-reject`, `mark-fail`, `webhook-drop`), `/mock/time` |
 | DX | ошибка = код + поле + подсказка + ссылка на официальную доку; OpenAPI 3.1 (`/openapi.json`); готовый `curl` в журнале | то же в формате Ferma (включая dry-run `/possystem/v1/validate`, валидацию 54-ФЗ, ставок НДС, ИНН, маркировки) |
 | Песочницы и проверка интегратора | `X-Mock-Sandbox`, `/mock/sandboxes`, `/mock/reset`, `/mock/state`, активный экзаменатор `POST /mock/verify-merchant` | `X-Mock-Sandbox`, `/mock/sandboxes`, `/mock/reset`, `/mock/state`, `POST /mock/verify-merchant` |
-| Наблюдаемость | `/admin` (+ журнал запросов с `curl`, опц. `MOCK_ADMIN_TOKEN`), `/health` | `/admin` (+ журнал запросов с `curl`, очередь ОФД), `/healthz`, чек покупателю |
+| Наблюдаемость | `/admin` (+ журнал запросов с `curl`), `/health`; управляющая поверхность — под `MOCK_OPERATOR_TOKEN`, админка — под `MOCK_ADMIN_TOKEN` | `/admin` (+ журнал запросов с `curl`, очередь ОФД), `/healthz`, чек покупателю; смены/ФН/ОФД/`/mock/*` — под `MOCK_OPERATOR_TOKEN` |
 
 ## Дорожная карта
 
@@ -99,7 +99,7 @@ docker-compose.include.yml — внешний compose-модуль (профил
 
 ```bash
 npm test              # всё (core + tbank + kassa + check:drift)
-npm run test:core     # ядро (15 проверок): restore/очередь/каталог ошибок/часы/сценарии/песочницы/экзаменатор
+npm run test:core     # ядро (21 проверка): restore/очередь/каталог ошибок/часы/сценарии/песочницы/экзаменатор/access-control/SSRF
 npm run test:tbank    # 33 сценария контракта Т-Банка (вкл. чарджбэки e2e, Wave 2, СБП, рекурренты, acqapi)
 npm run test:kassa    # 57 проверок контракта Ferma и 54-ФЗ (вкл. buy/авансы/маркировку/смены 24ч/ФН/dry-run)
 npm run check:drift   # 134 инварианта: сверка protocols/*.json <-> server.js <-> OpenAPI 3.1 <-> docs/reference
@@ -113,8 +113,10 @@ CI гоняет то же на Node 18/20/22 и проверяет, что compo
 Проект — **тестовый стенд**: все креды фейковые, платежи идут только по
 тестовым картам, реальные данные использовать нельзя. `/admin` по умолчанию
 без аутентификации (локальный DX) — перед публикацией стенда прочитайте
-[`SECURITY.md`](SECURITY.md). Для публичного размещения включайте
-`MOCK_BLOCK_PRIVATE_WEBHOOKS=1` и изоляцию песочниц (RFC-001).
+[`SECURITY.md`](SECURITY.md). Для публичного размещения задайте `MOCK_HOSTED=1`:
+управляющая поверхность (`/mock/*`, смены/ФН/ОФД, чтение спора) закрывается
+`MOCK_OPERATOR_TOKEN` (fail-closed, если токен не задан), админка — `MOCK_ADMIN_TOKEN`,
+а исходящие вебхуки по умолчанию не ходят на приватные адреса. Изоляция песочниц — RFC-001.
 
 ## Участие
 

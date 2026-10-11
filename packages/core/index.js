@@ -23,8 +23,30 @@
  */
 
 const http = require('http');
+const https = require('https');
+const crypto = require('crypto');
+const dns = require('dns');
 const fs = require('fs');
 const path = require('path');
+
+/* ------------------------------------------------------------- env flags */
+
+const FLAG_TRUTHY = new Set(['1', 'true', 'yes', 'on']);
+const FLAG_FALSY = new Set(['0', 'false', 'no', 'off']);
+
+/**
+ * Разбор boolean-настроек из env (F-08): принимает и `1`, и `true` (а также
+ * yes/on и их отрицания), при пустом значении возвращает fallback. Раньше
+ * `MOCK_BLOCK_PRIVATE_WEBHOOKS=1` молча не включал защиту — сравнение шло
+ * только с 'true'.
+ */
+function flagEnabled(value, fallback = false) {
+  const raw = String(value === undefined || value === null ? '' : value).trim().toLowerCase();
+  if (!raw) return Boolean(fallback);
+  if (FLAG_TRUTHY.has(raw)) return true;
+  if (FLAG_FALSY.has(raw)) return false;
+  return Boolean(fallback);
+}
 
 /* ------------------------------------------------------------------ store */
 
@@ -184,12 +206,20 @@ function createJournal({ size = 200, baseUrl = '' } = {}) {
   return { record, list: () => entries.slice(), clear: () => { entries.length = 0; } };
 }
 
-/** POST JSON наружу (вебхук); http/https выбирается по схеме URL. */
+/**
+ * POST JSON наружу (вебхук); http/https выбирается по схеме URL.
+ * Редиректы не отслеживаются (Node-клиент их не выполняет) — для SSRF-политики
+ * это безопасное поведение по умолчанию; схема кроме http/https отклоняется.
+ */
 function postJson(url, payload, timeoutMs = 10000) {
   return new Promise((resolve, reject) => {
     const target = new URL(url);
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+      reject(new Error(`Исходящий запрос на «${url}» отклонён: схема ${target.protocol} не поддерживается (разрешены http/https)`));
+      return;
+    }
     const data = typeof payload === 'string' ? payload : JSON.stringify(payload);
-    const transport = target.protocol === 'https:' ? require('https') : http;
+    const transport = target.protocol === 'https:' ? https : http;
     const req = transport.request({
       hostname: target.hostname,
       port: target.port || (target.protocol === 'https:' ? 443 : 80),
@@ -211,25 +241,108 @@ function postJson(url, payload, timeoutMs = 10000) {
 
 /* --------------------------------------------------- webhook host guard */
 
-const PRIVATE_HOST_RE = /^(localhost|127\.|0\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?$|\[?f[cd][0-9a-f]{2}:)/i;
+const PRIVATE_NAME_RE = /^(localhost|.*\.localhost|.*\.local|.*\.internal|.*\.home\.arpa)$/i;
 
 /**
- * Грубая защита исходящих вебхуков от SSRF (дефект A-18 аудита): на публичном
- * стенде интегратор
- * задаёт NotificationURL/callback_url сам, и стенд становится прокси внутрь
- * чужой сети (метаданные облака, внутренние API, Redis и т.п.).
+ * Классификация IP-литерала: true — приватный/служебный, false — публичный,
+ * null — это не IP-литерал (имя хоста).
+ */
+function isPrivateAddress(ip) {
+  let addr = String(ip === undefined || ip === null ? '' : ip).trim().toLowerCase();
+  if (!addr) return true;
+  if (addr.startsWith('[') && addr.endsWith(']')) addr = addr.slice(1, -1);
+  if (addr.includes('%')) addr = addr.split('%')[0]; // zone id: fe80::1%eth0
+  if (addr.startsWith('::ffff:')) addr = addr.slice(7); // IPv4-mapped IPv6
+
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(addr);
+  if (v4) {
+    const [a, b, c, d] = v4.slice(1).map(Number);
+    if ([a, b, c, d].some((n) => n > 255)) return true; // битый литерал — не рисковать
+    if (a === 0 || a === 10 || a === 127) return true;                       // this-net, private, loopback
+    if (a === 100 && b >= 64 && b <= 127) return true;                       // CGNAT 100.64/10
+    if (a === 169 && b === 254) return true;                                 // link-local (169.254.169.254 — метаданные облака)
+    if (a === 172 && b >= 16 && b <= 31) return true;                        // private 172.16/12
+    if (a === 192 && b === 168) return true;                                 // private
+    if (a === 192 && b === 0 && c === 0) return true;                        // IETF protocol assignments
+    if (a === 198 && (b === 18 || b === 19)) return true;                    // benchmarking 198.18/15
+    if (a >= 224) return true;                                               // multicast, reserved, broadcast
+    return false;
+  }
+
+  if (/^[0-9a-f:]+$/.test(addr)) {
+    if (addr === '::' || addr === '::1') return true;                        // unspecified, loopback
+    if (/^f[cd][0-9a-f]{0,2}:/.test(addr)) return true;                      // unique local fc00::/7
+    if (/^fe[89ab][0-9a-f]{0,2}:/.test(addr)) return true;                   // link-local fe80::/10
+    return false;
+  }
+  return null;
+}
+
+/**
+ * Грубая защита исходящих вебхуков от SSRF (дефект A-18 аудита, политика F-08):
+ * на публичном стенде интегратор задаёт NotificationURL/callback_url сам, и
+ * стенд становится прокси внутрь чужой сети (метаданные облака, внутренние
+ * API, Redis и т.п.).
  *
  * Для локальной разработки приватные адреса — норма (стенд и приложение на
- * одной машине), поэтому защита включается явно: MOCK_BLOCK_PRIVATE_WEBHOOKS=1.
- * Это best-effort по имени хоста: полную защиту даёт сетевой egress-фильтр.
+ * одной машине), поэтому защита включается явно: MOCK_BLOCK_PRIVATE_WEBHOOKS=1
+ * (или MOCK_HOSTED=1 — тогда по умолчанию). Полную защиту даёт egress-фильтр.
  */
 function isPrivateHost(url) {
   try {
-    const host = new URL(url).hostname;
-    return PRIVATE_HOST_RE.test(host);
+    const target = new URL(String(url));
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') return true;
+    const host = target.hostname;
+    if (!host) return true;
+    if (isPrivateAddress(host) === true) return true;
+    return PRIVATE_NAME_RE.test(host);
   } catch {
     return true; // нераспарсенный URL — отправлять некуда
   }
+}
+
+/**
+ * Усиленная проверка адреса перед исходящим запросом (F-08):
+ *   1) схема — только http/https;
+ *   2) литеральный приватный/служебный адрес запрещён;
+ *   3) имя хоста резолвится в приватный адрес (внутренние имена, DNS-rebinding).
+ *
+ * Бросает Error с `code = 'SSRF_BLOCKED'` — адаптеры превращают его в DX-ответ.
+ * `lookup` инжектируется для тестов.
+ */
+async function assertPublicHost(url, { lookup = dns.promises.lookup } = {}) {
+  const blocked = (reason) => {
+    const e = new Error(`Исходящий запрос на «${url}» заблокирован политикой SSRF: ${reason}. Приватные адреса запрещены (MOCK_BLOCK_PRIVATE_WEBHOOKS).`);
+    e.code = 'SSRF_BLOCKED';
+    return e;
+  };
+  let target;
+  try {
+    target = new URL(String(url));
+  } catch {
+    throw blocked('некорректный URL');
+  }
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+    throw blocked(`схема ${target.protocol} не поддерживается`);
+  }
+  if (isPrivateHost(url)) throw blocked('приватный или локальный адрес');
+
+  const host = target.hostname.replace(/^\[|\]$/g, '');
+  if (isPrivateAddress(host) === false) return true; // публичный IP-литерал — резолвить нечего
+
+  let resolved;
+  try {
+    resolved = await lookup(host, { all: true });
+  } catch (e) {
+    throw blocked(`имя хоста не разрешается (${e && e.code ? e.code : 'DNS error'})`);
+  }
+  const list = Array.isArray(resolved) ? resolved : [resolved];
+  if (!list.length) throw blocked('имя хоста не разрешается');
+  for (const item of list) {
+    const address = item && item.address;
+    if (isPrivateAddress(address) === true) throw blocked(`имя ${host} разрешается в приватный адрес ${address}`);
+  }
+  return true;
 }
 
 /* -------------------------------------------------------- delivery queue */
@@ -249,7 +362,8 @@ function isPrivateHost(url) {
  *   due(entry)      — готова ли к отправке (по умолчанию: не done и nextAttemptAt <= now)
  *   awaitSequential — отправлять по одной и ждать (tbank) или пачкой (kassa)
  *   unref           — не держать процесс из-за таймера
- *   blockPrivateHosts — не отправлять на приватные адреса (SSRF-guard хоста)
+ *   blockPrivateHosts — не отправлять на приватные адреса и хосты, которые в
+ *                       них резолвятся (SSRF-guard, assertPublicHost)
  *
  * Гарантии (дефекты A-3/A-4 аудита):
  *   1. Запись, находящаяся «в полёте», не отправляется повторно: тик не ждёт
@@ -293,9 +407,7 @@ function createDeliveryQueue({
     inFlight.add(id);
     try {
       const { url, data } = request(entry);
-      if (blockPrivateHosts && isPrivateHost(url)) {
-        throw new Error(`адрес ${url} — приватный (заблокирован MOCK_BLOCK_PRIVATE_WEBHOOKS)`);
-      }
+      if (blockPrivateHosts) await assertPublicHost(url);
       const res = await postJson(url, data);
       entry.lastStatus = res.statusCode;
       entry.lastBody = res.body;
@@ -676,15 +788,60 @@ function createScenarioRegistry({ clock, size = 200 } = {}) {
 function checkAdminAuth(req, adminToken = process.env.MOCK_ADMIN_TOKEN || '') {
   const expected = String(adminToken || '').trim();
   if (!expected) return true;
-  const authHeader = String(req.headers['authorization'] || '');
-  if (authHeader.toLowerCase().startsWith('bearer ') && authHeader.slice(7).trim() === expected) return true;
-  if (String(req.headers['x-admin-token'] || '').trim() === expected) return true;
+  return tokenMatches(req, expected);
+}
+
+/** Сравнение секретов без утечки длины по таймингу (constant-time). */
+function safeEqual(a, b) {
+  const left = Buffer.from(String(a));
+  const right = Buffer.from(String(b));
+  if (left.length !== right.length) return false;
+  return crypto.timingSafeEqual(left, right);
+}
+
+/** Токен из Authorization: Bearer, X-(Admin|Operator)-Token или query. */
+function tokenMatches(req, expected) {
+  const wanted = String(expected || '');
+  if (!wanted) return false;
+  const headers = (req && req.headers) || {};
+  const auth = String(headers.authorization || '');
+  if (auth.toLowerCase().startsWith('bearer ') && safeEqual(auth.slice(7).trim(), wanted)) return true;
+  if (safeEqual(String(headers['x-admin-token'] || '').trim(), wanted)) return true;
+  if (safeEqual(String(headers['x-operator-token'] || '').trim(), wanted)) return true;
   try {
-    const u = new URL(req.url, 'http://localhost');
-    if (u.searchParams.get('admin_token') === expected) return true;
+    const u = new URL((req && req.url) || '/', 'http://localhost');
+    if (safeEqual(String(u.searchParams.get('admin_token') || ''), wanted)) return true;
+    if (safeEqual(String(u.searchParams.get('operator_token') || ''), wanted)) return true;
   } catch { /* ignore */ }
   return false;
 }
+
+/**
+ * Единый access-control управляющей поверхности (F-07, задача #22).
+ *
+ *   surface='admin'    — /admin*: токен MOCK_ADMIN_TOKEN;
+ *   surface='operator' — /mock/*, смены/ФН/ОФД кассы и служебные чтения:
+ *                        MOCK_OPERATOR_TOKEN, с fallback на MOCK_ADMIN_TOKEN.
+ *
+ * Пока токены не заданы, локальный стенд остаётся открытым (обратная
+ * совместимость и DX). В hosted-режиме (MOCK_HOSTED=1) без настроенного секрета
+ * управляющая поверхность закрыта — fail-closed.
+ *
+ * Возвращает { allowed, role, reason }: адаптер сам выбирает формат DX-ответа.
+ */
+function checkControlAccess(req, { adminToken = '', operatorToken = '', surface = 'operator', hosted = false } = {}) {
+  const admin = String(adminToken || '').trim();
+  const operator = String(operatorToken || '').trim();
+  const expected = surface === 'admin' ? admin : (operator || admin);
+  if (!expected) {
+    return hosted
+      ? { allowed: false, role: null, reason: 'hosted-fail-closed', token: null }
+      : { allowed: true, role: 'open', reason: 'no-token-configured', token: null };
+  }
+  if (tokenMatches(req, expected)) return { allowed: true, role: surface, reason: null, token: null };
+  return { allowed: false, role: null, reason: 'invalid-token', token: null };
+}
+
 
 /* ------------------------------------------- chaos / latency / sandboxes */
 
@@ -858,9 +1015,7 @@ async function verifyMerchantWebhook({
   if (!url || typeof url !== 'string') {
     throw new Error('Передайте url вебхука мерчанта для проверки (например, {"url":"http://localhost:8000/webhook"})');
   }
-  if (blockPrivateHosts && isPrivateHost(url)) {
-    throw new Error(`Адрес ${url} заблокирован политикой MOCK_BLOCK_PRIVATE_WEBHOOKS`);
-  }
+  if (blockPrivateHosts) await assertPublicHost(url);
 
   const checks = [];
   const probeOrderId = `mock-verify-${Date.now()}`;
@@ -1013,6 +1168,7 @@ module.exports = {
   createStore,
   createLog,
   nowIso,
+  flagEnabled,
   readBody,
   parseBody,
   send,
@@ -1020,6 +1176,8 @@ module.exports = {
   html,
   escapeHtml,
   isPrivateHost,
+  isPrivateAddress,
+  assertPublicHost,
   buildCurlCommand,
   createJournal,
   postJson,
@@ -1030,6 +1188,7 @@ module.exports = {
   parseScenarioSpec,
   createScenarioRegistry,
   checkAdminAuth,
+  checkControlAccess,
   applyRequestChaos,
   createSandboxManager,
   verifyMerchantWebhook,

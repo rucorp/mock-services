@@ -64,6 +64,41 @@ const api = (port, method, body, sign = true) => {
   return request(port, 'POST', `/v2/${method}`, sign ? { ...payload, Token: tokenOf(payload) } : payload);
 };
 
+/**
+ * Дочерний стенд на свободном порту (MOCK_PORT=0): родитель узнаёт реальный
+ * порт из стартовой строки сервера — без фиксированных номеров (F-32).
+ */
+function startChild(env = {}) {
+  const { spawn } = require('child_process');
+  const proc = spawn('node', [path.join(__dirname, 'server.js')], {
+    env: {
+      ...process.env,
+      MOCK_PORT: '0',
+      MOCK_STATE_FILE: '',
+      MOCK_RETRY_MS: '1000',
+      MOCK_PROFILE: 'plain',
+      MOCK_ADMIN_TOKEN: '',
+      MOCK_OPERATOR_TOKEN: '',
+      MOCK_HOSTED: '',
+      MOCK_BLOCK_PRIVATE_WEBHOOKS: '',
+      ...env,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const port = new Promise((resolve, reject) => {
+    let buf = '';
+    const timer = setTimeout(() => reject(new Error(`дочерний стенд не сообщил порт: ${buf.slice(0, 300)}`)), 5000);
+    proc.stdout.on('data', (d) => {
+      buf += String(d);
+      const m = /on http:\/\/[^:]+:(\d+)/.exec(buf);
+      if (m) { clearTimeout(timer); resolve(Number(m[1])); }
+    });
+    proc.stderr.on('data', (d) => { buf += String(d); });
+    proc.on('exit', (code) => { clearTimeout(timer); reject(new Error(`дочерний стенд завершился с кодом ${code}: ${buf.slice(0, 300)}`)); });
+  });
+  return { proc, port, stop: () => { try { proc.kill('SIGKILL'); } catch { /* ignore */ } } };
+}
+
 function waitNotification(pred, timeoutMs = 4000) {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
@@ -690,6 +725,114 @@ process.env.MOCK_RETRY_MS = '1000';
     // Проверяем наличие готового curl в /admin/journal
     const journalResp = JSON.parse((await request(mockPort, 'GET', '/admin/journal')).body);
     assert.ok(journalResp.entries.length > 0 && journalResp.entries[journalResp.entries.length - 1].curl.startsWith('curl '));
+  }
+
+  /* --- #22 (F-07/F-08): access-control управляющей поверхности и SSRF ------ */
+
+  // 34. Управляющие маршруты закрыты токенами: без токена / неверный -> 401,
+  //     operator-токен открывает /mock/*, но не админку; платёжный API свободен
+  {
+    const child = startChild({ MOCK_ADMIN_TOKEN: 'adm-secret', MOCK_OPERATOR_TOKEN: 'op-secret' });
+    const childPort = await child.port;
+    try {
+      const guarded = [
+        ['GET', '/mock/state'],
+        ['GET', '/mock/time'],
+        ['GET', '/mock/scenarios'],
+        ['GET', '/mock/sandboxes'],
+        ['POST', '/mock/reset'],
+        ['GET', '/admin/journal'],
+        ['GET', '/v2/Dispute/DSP-1'],
+      ];
+      for (const [method, path] of guarded) {
+        const r = await request(childPort, method, path, method === 'POST' ? {} : undefined);
+        assert.strictEqual(r.statusCode, 401, `${method} ${path} без токена должен требовать авторизацию (получено ${r.statusCode})`);
+      }
+
+      const badToken = await request(childPort, 'GET', '/mock/state', undefined, { Authorization: 'Bearer nope' });
+      assert.strictEqual(badToken.statusCode, 401, 'неверный токен -> 401');
+
+      const opState = await request(childPort, 'GET', '/mock/state', undefined, { Authorization: 'Bearer op-secret' });
+      assert.strictEqual(opState.statusCode, 200, 'operator-токен должен открывать /mock/state');
+      const opTime = await request(childPort, 'GET', '/mock/time', undefined, { 'X-Operator-Token': 'op-secret' });
+      assert.strictEqual(opTime.statusCode, 200, 'X-Operator-Token должен приниматься');
+
+      const operatorOnAdmin = await request(childPort, 'GET', '/admin/journal', undefined, { Authorization: 'Bearer op-secret' });
+      assert.strictEqual(operatorOnAdmin.statusCode, 401, 'operator-токен не должен открывать /admin');
+      const adminOnAdmin = await request(childPort, 'GET', '/admin/journal', undefined, { Authorization: 'Bearer adm-secret' });
+      assert.strictEqual(adminOnAdmin.statusCode, 200, 'админ-токен должен открывать /admin/journal');
+
+      // Платёжный API остаётся доступен без управляющих токенов
+      const healthChild = await request(childPort, 'GET', '/health');
+      assert.strictEqual(healthChild.statusCode, 200);
+      const initPayload = { TerminalKey: TERMINAL, Amount: '1500', OrderId: 'auth-child-1' };
+      const initChild = await request(childPort, 'POST', '/v2/Init', { ...initPayload, Token: tokenOf(initPayload) });
+      assert.strictEqual(JSON.parse(initChild.body).Success, true, 'платёжный API не должен требовать operator-токен');
+    } finally {
+      child.stop();
+    }
+  }
+
+  // 35. Hosted-режим: fail-closed управляющей поверхности без секрета,
+  //     SSRF-политика включена по умолчанию (MOCK_BLOCK_PRIVATE_WEBHOOKS не задан)
+  {
+    const child = startChild({ MOCK_HOSTED: '1' });
+    const childPort = await child.port;
+    try {
+      for (const [method, path] of [['GET', '/mock/state'], ['GET', '/admin/journal'], ['GET', '/mock/sandboxes']]) {
+        const r = await request(childPort, method, path);
+        assert.strictEqual(r.statusCode, 401, `hosted без секрета: ${method} ${path} должен быть закрыт (fail-closed)`);
+        assert.ok(String(r.body).includes('hosted'), 'DX-ответ должен объяснять hosted-политику');
+      }
+      const healthHosted = await request(childPort, 'GET', '/health');
+      assert.strictEqual(healthHosted.statusCode, 200, 'health в hosted-режиме остаётся публичным');
+      const initHosted = await request(childPort, 'POST', '/v2/Init', { ...(() => { const p = { TerminalKey: TERMINAL, Amount: '1500', OrderId: 'hosted-1' }; return { ...p, Token: tokenOf(p) }; })() });
+      assert.strictEqual(JSON.parse(initHosted.body).Success, true, 'платёжный API работает и в hosted-режиме');
+    } finally {
+      child.stop();
+    }
+  }
+
+  // 36. SSRF: `=1`/`=true` блокируют приватные IPv4/IPv6 и в очереди, и в examiner'е
+  {
+    const child = startChild({ MOCK_BLOCK_PRIVATE_WEBHOOKS: '1' });
+    const childPort = await child.port;
+    try {
+      const v4 = await request(childPort, 'POST', '/mock/verify-merchant', { url: notificationUrl });
+      assert.strictEqual(v4.statusCode, 403, 'MOCK_BLOCK_PRIVATE_WEBHOOKS=1: private IPv4 в /mock/verify-merchant -> 403');
+      assert.ok(String(v4.body).includes('SSRF'), 'DX-ответ должен называть политику SSRF');
+
+      const v6 = await request(childPort, 'POST', '/mock/verify-merchant', { url: 'http://[::1]:3100/hook' });
+      assert.strictEqual(v6.statusCode, 403, 'MOCK_BLOCK_PRIVATE_WEBHOOKS=1: private IPv6 -> 403');
+
+      // Очередь вебхуков тоже под guard'ом: INCOMING-нотификация не уходит на 127.0.0.1
+      const incomingPayload = { TerminalKey: TERMINAL, VerificationCode: 'VER-SSRF', Amount: '100', PayerInn: '7801111111', NotificationURL: notificationUrl };
+      const incoming = await request(childPort, 'POST', '/av/v1/payment', { ...incomingPayload, Token: tokenOf(incomingPayload) });
+      assert.strictEqual(JSON.parse(incoming.body).Success, true);
+      await sleep(1500);
+      const exported = JSON.parse((await request(childPort, 'GET', '/mock/state')).body);
+      const childState = (exported.state && exported.state.state) || exported.state || {};
+      const notif = Object.values(childState.notifications || {}).find((n) => n.paymentId && n.paymentId.startsWith('IN-'));
+      assert.ok(notif, 'нотификация должна быть зарегистрирована в очереди');
+      assert.ok(String(notif.lastStatus).startsWith('ERR'), `доставка на приватный адрес должна быть заблокирована, lastStatus=${notif.lastStatus}`);
+      assert.ok(String(notif.lastStatus).includes('SSRF'), 'причина отказа должна быть явной (SSRF)');
+    } finally {
+      child.stop();
+    }
+  }
+
+  // 37. Оба написания env: `=1` и `=true` включают guard; живые вебхуки на
+  //     публичные адреса политикой не затрагиваются (локальный стенд = выключено)
+  {
+    const child = startChild({ MOCK_BLOCK_PRIVATE_WEBHOOKS: 'true' });
+    const childPort = await child.port;
+    try {
+      const r = await request(childPort, 'POST', '/mock/verify-merchant', { url: notificationUrl });
+      assert.strictEqual(r.statusCode, 403, 'MOCK_BLOCK_PRIVATE_WEBHOOKS=true тоже должен включать guard');
+    } finally {
+      child.stop();
+    }
+    assert.ok(WEBHOOK_HITS.length > 0, 'локальный режим без флага продолжает доставлять вебхуки на localhost');
   }
 
   console.log(`selftest: ${WEBHOOK_HITS.length} webhook deliveries, ${Object.keys(state.payments).length} payment sessions`);

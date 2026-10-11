@@ -100,7 +100,10 @@ POST «в полёте» (ретраи не накладываются), дос�
 | `MOCK_RETRY_MS` / `MOCK_MAX_ATTEMPTS` | `60000` / `24` | политика ретраев нотификаций |
 | `MOCK_STRICT_TOKEN` | `true` | отклонять запросы без валидного Token |
 | `MOCK_ALLOW_DUPLICATE_ORDER_ID` | `false` | разрешить повторный Init с тем же OrderId (по умолчанию — ошибка 7, как в банке) |
-| `MOCK_BLOCK_PRIVATE_WEBHOOKS` | `false` | не отправлять нотификации на приватные адреса (включать на публичном стенде) |
+| `MOCK_BLOCK_PRIVATE_WEBHOOKS` | `false` (в `MOCK_HOSTED=1` — `true`) | не отправлять нотификации на приватные адреса и имена, которые в них резолвятся (`1`/`true`; `0`/`false` выключает явно) |
+| `MOCK_OPERATOR_TOKEN` | — | токен управляющей поверхности: `/mock/*` и `GET /v2/Dispute/{id}` (fallback — `MOCK_ADMIN_TOKEN`) |
+| `MOCK_ADMIN_TOKEN` | — | токен админки `/admin*` |
+| `MOCK_HOSTED` | `false` | hosted-режим: управляющая поверхность fail-closed без токена, SSRF-политика по умолчанию |
 | `MOCK_AUTO_CONFIRM_MS` | `0` (выкл.) | авто-подтверждение холда через N мс (банк делает это через 4/7 дней) |
 | `MOCK_STATE_FILE` | — | файл персистентности (JSON); без него состояние в памяти |
 

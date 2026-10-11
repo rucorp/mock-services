@@ -25,7 +25,7 @@ const crypto = require('crypto');
 
 const core = require('../../packages/core');
 const {
-  readBody, parseBody, send, sendJson, html, escapeHtml, checkAdminAuth,
+  readBody, parseBody, send, sendJson, html, escapeHtml, checkControlAccess,
   parseScenarioSpec, applyRequestChaos, createSandboxManager, verifyMerchantWebhook,
 } = core;
 const log = core.createLog('tbank-mock');
@@ -49,9 +49,11 @@ const {
   MOCK_STATE_FILE = '',
   MOCK_PROFILE = 'plain',
   MOCK_ALLOW_DUPLICATE_ORDER_ID = 'false',
-  MOCK_BLOCK_PRIVATE_WEBHOOKS = 'false',
+  MOCK_BLOCK_PRIVATE_WEBHOOKS = '',
   MOCK_VIRTUAL_CLOCK = '',
   MOCK_ADMIN_TOKEN = '',
+  MOCK_OPERATOR_TOKEN = '',
+  MOCK_HOSTED = 'false',
 } = process.env;
 
 const TERMINAL_KEY = MOCK_TERMINAL_KEY || TBANK_TERMINAL_KEY || 'TBANKMOCKTEST';
@@ -69,7 +71,12 @@ const ALLOW_DUPLICATE_ORDER_ID = String(MOCK_ALLOW_DUPLICATE_ORDER_ID).toLowerCa
 // Провайдеро-нейтральность (аудит §3.1): plain — обычный эквайринг (дефолт,
 // 99% интеграций), multisplit — профиль Lovii со сделками.
 const PROFILE = String(MOCK_PROFILE).toLowerCase() === 'multisplit' ? 'multisplit' : 'plain';
-const BLOCK_PRIVATE_WEBHOOKS = String(MOCK_BLOCK_PRIVATE_WEBHOOKS).toLowerCase() === 'true';
+// F-07/F-08: hosted-режим включает fail-closed управляющей поверхности и
+// SSRF-политику по умолчанию; env-флаг MOCK_BLOCK_PRIVATE_WEBHOOKS (1/true)
+// может включить её и в локальном режиме, значение 0/false — выключить явно.
+const HOSTED = core.flagEnabled(MOCK_HOSTED);
+const OPERATOR_TOKEN = MOCK_OPERATOR_TOKEN || '';
+const BLOCK_PRIVATE_WEBHOOKS = core.flagEnabled(MOCK_BLOCK_PRIVATE_WEBHOOKS, HOSTED);
 
 /* ------------------------------------------------------------------ store */
 
@@ -1636,6 +1643,21 @@ function bodySummary(body) {
   return out;
 }
 
+/**
+ * Какая авторизация нужна маршруту (F-07):
+ *   'admin'    — /admin* (журнал, консоль и действия);
+ *   'operator' — управляющая поверхность: /mock/* (sandboxes/reset/state/time/
+ *                scenarios/verify-merchant) и служебное чтение спора
+ *                GET /v2/Dispute/{id};
+ *   null       — платёжный API и публичные страницы.
+ */
+function controlSurface(p) {
+  if (p.startsWith('/admin')) return 'admin';
+  if (p.startsWith('/mock/')) return 'operator';
+  if (/^\/v2\/Dispute\/[A-Za-z0-9_-]+$/.test(p)) return 'operator';
+  return null;
+}
+
 async function route(req, res) {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
@@ -1647,9 +1669,27 @@ async function route(req, res) {
     sandboxManager.fromRequest(req);
   }
 
-  // Опциональная защита /admin* по токену (A-20)
-  if (p.startsWith('/admin') && !checkAdminAuth(req, MOCK_ADMIN_TOKEN)) {
-    return sendJson(res, err(13, 'Доступ к /admin ограничен MOCK_ADMIN_TOKEN'), 401);
+  // Единый access-control управляющей поверхности (F-07, A-20):
+  // /admin* — MOCK_ADMIN_TOKEN; /mock/* и служебные чтения — MOCK_OPERATOR_TOKEN
+  // (с fallback на админ-токен). В hosted-режиме без секрета — fail-closed.
+  const surface = controlSurface(p);
+  if (surface) {
+    const access = checkControlAccess(req, {
+      adminToken: MOCK_ADMIN_TOKEN,
+      operatorToken: OPERATOR_TOKEN,
+      surface,
+      hosted: HOSTED,
+    });
+    if (!access.allowed) {
+      const envName = surface === 'admin' ? 'MOCK_ADMIN_TOKEN' : 'MOCK_OPERATOR_TOKEN';
+      const message = access.reason === 'hosted-fail-closed'
+        ? `Маршрут ${p} закрыт: hosted-режим (MOCK_HOSTED) требует ${envName} для управляющей поверхности`
+        : `Доступ к управляющему маршруту ${p} ограничен: требуется ${envName}`;
+      return sendJson(res, err(13, message, `${surface}: ${access.reason}`, {
+        field: surface === 'admin' ? 'Authorization' : 'X-Operator-Token',
+        hint: `Передайте токен в заголовке Authorization: Bearer <${envName}> или X-Operator-Token/X-Admin-Token. Подробности — docs/rfc/RFC-001-multi-tenant-sandboxes.md.`,
+      }), 401);
+    }
   }
 
   // Журналируем только API-вызовы (не страницы формы и не поллинг /admin).
@@ -1747,9 +1787,16 @@ async function route(req, res) {
         provider: 'tbank',
         terminalKey: TERMINAL_KEY,
         signPayload: (payload) => tokenOf(payload),
+        blockPrivateHosts: BLOCK_PRIVATE_WEBHOOKS,
       });
       return sendJson(res, report);
     } catch (e) {
+      if (e && e.code === 'SSRF_BLOCKED') {
+        return sendJson(res, err(7, e.message, `url=${targetUrl}`, {
+          field: 'url',
+          hint: 'Для активной проверки укажите публично доступный приёмник. Приватные адреса разрешены только при MOCK_BLOCK_PRIVATE_WEBHOOKS=0 на локальном стенде.',
+        }), 403);
+      }
       return sendJson(res, err(500, `Ошибка проверки вебхук-приёмника: ${e.message}`), 500);
     }
   }
@@ -2273,9 +2320,11 @@ restore();
 
 if (require.main === module) {
   server.listen(parseInt(MOCK_PORT, 10), MOCK_HOST, () => {
-    console.log(`[mock] T-Bank multisplit mock on http://${MOCK_HOST}:${MOCK_PORT}`);
+    const port = server.address().port; // MOCK_PORT=0 -> реальный порт (освобождает тесты от фиксированных номеров)
+    console.log(`[mock] T-Bank multisplit mock on http://${MOCK_HOST}:${port}`);
     console.log(`[mock] terminal=${TERMINAL_KEY} strict_token=${STRICT_TOKEN} public_base=${MOCK_PUBLIC_BASE_URL}`);
     console.log(`[mock] notifications: retry ${RETRY_MS}ms x${MAX_ATTEMPTS}${MOCK_DEFAULT_NOTIFICATION_URL ? `, fallback ${MOCK_DEFAULT_NOTIFICATION_URL}` : ', fallback none'}`);
+    console.log(`[mock] control-plane: admin_token=${MOCK_ADMIN_TOKEN ? 'on' : 'off'} operator_token=${OPERATOR_TOKEN ? 'on' : 'off'} hosted=${HOSTED} block_private_webhooks=${BLOCK_PRIVATE_WEBHOOKS}`);
   });
 }
 

@@ -436,10 +436,142 @@ async function main() {
   check('/admin/journal содержит готовый curl-сниппет для воспроизведения',
     Array.isArray(journalResp.entries) && journalResp.entries.length > 0 && journalResp.entries[journalResp.entries.length - 1].curl.startsWith('curl '));
 
+  /* --- #22 (F-07/F-08): доступ к управляющей поверхности и SSRF-политика --- */
+
+  // 24. Токены управляющей поверхности: /mock/*, смены, ФН и ОФД закрыты,
+  //     контракт Ferma (getToken/sell) управляющего токена не требует
+  {
+    const child = await startKassaChild({ MOCK_ADMIN_TOKEN: 'adm-secret', MOCK_OPERATOR_TOKEN: 'op-secret' });
+    try {
+      const guarded = [
+        ['GET', '/mock/state'], ['GET', '/mock/time'], ['GET', '/mock/sandboxes'],
+        ['GET', '/possystem/v1/shift/status'], ['POST', '/possystem/v1/shift/open'],
+        ['GET', '/possystem/v1/fn/state'], ['POST', '/possystem/v1/ofd/mode'],
+        ['GET', '/possystem/v1/ofd/queue'], ['GET', '/admin/journal'],
+      ];
+      for (const [method, url] of guarded) {
+        const r = await requestOn(child.port, method, url, method === 'POST' ? {} : null);
+        check(`#22: ${method} ${url} без токена -> 401`, r.status === 401, `получено ${r.status}`);
+      }
+      const badTok = await requestOn(child.port, 'GET', '/mock/state', null, { Authorization: 'Bearer nope' });
+      check('#22: неверный управляющий токен -> 401', badTok.status === 401);
+      const opState = await requestOn(child.port, 'GET', '/mock/state', null, { Authorization: 'Bearer op-secret' });
+      check('#22: operator-токен открывает /mock/state', opState.status === 200);
+      const opShift = await requestOn(child.port, 'GET', '/possystem/v1/shift/status', null, { 'X-Operator-Token': 'op-secret' });
+      check('#22: X-Operator-Token открывает /shift/status', opShift.status === 200);
+      const opFn = await requestOn(child.port, 'POST', '/possystem/v1/fn/state', { reset: true }, { Authorization: 'Bearer op-secret' });
+      check('#22: operator-токен открывает POST /fn/state', opFn.status === 200);
+      const operatorOnAdmin = await requestOn(child.port, 'GET', '/admin/journal', null, { Authorization: 'Bearer op-secret' });
+      check('#22: operator-токен не открывает /admin', operatorOnAdmin.status === 401);
+      const adminOnAdmin = await requestOn(child.port, 'GET', '/admin/journal', null, { Authorization: 'Bearer adm-secret' });
+      check('#22: админ-токен открывает /admin/journal', adminOnAdmin.status === 200);
+      const tk = (await requestOn(child.port, 'POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' })).json().token;
+      check('#22: getToken (контракт Ferma) не требует operator-токена', Boolean(tk));
+      const sell = await requestOn(child.port, 'POST', `/possystem/v1/Main/sell?token=${tk}`, validBody('auth-check-1'));
+      check('#22: sell (контракт Ferma) не требует operator-токена', Boolean(sell.json() && sell.json().uuid));
+    } finally {
+      child.stop();
+    }
+  }
+
+  // 25. Hosted-режим без секрета: управляющая поверхность fail-closed,
+  //     публичные маршруты (healthz, контракт Ferma) работают
+  {
+    const child = await startKassaChild({ MOCK_HOSTED: '1' });
+    try {
+      const st = await requestOn(child.port, 'GET', '/mock/state');
+      check('#22: hosted без секрета: /mock/state закрыт (fail-closed)', st.status === 401 && st.text.includes('hosted'));
+      const fn = await requestOn(child.port, 'GET', '/possystem/v1/fn/state');
+      check('#22: hosted без секрета: /fn/state закрыт', fn.status === 401);
+      const health = await requestOn(child.port, 'GET', '/healthz');
+      check('#22: hosted: /healthz публичный', health.status === 200);
+      const tk = (await requestOn(child.port, 'POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' })).json().token;
+      check('#22: hosted: контракт Ferma (getToken) работает', Boolean(tk));
+    } finally {
+      child.stop();
+    }
+  }
+
+  // 26. SSRF-политика: `=1` блокирует приватные IPv4/IPv6 и examiner, и очередь
+  //     callback'ов; `=true` работает так же
+  {
+    const catchPort = await freePort();
+    let hits = 0;
+    const catcher = http.createServer((req, res) => { hits += 1; res.writeHead(200); res.end('{"data":{"status":"confirmed"}}'); });
+    await new Promise((r) => catcher.listen(catchPort, '127.0.0.1', r));
+    const child = await startKassaChild({ MOCK_BLOCK_PRIVATE_WEBHOOKS: '1' });
+    try {
+      const v4 = await requestOn(child.port, 'POST', '/mock/verify-merchant', { url: `http://127.0.0.1:${catchPort}/callback` });
+      check('#22: =1: private IPv4 в /mock/verify-merchant -> 403 + SSRF', v4.status === 403 && v4.text.includes('SSRF'));
+      const v6 = await requestOn(child.port, 'POST', '/mock/verify-merchant', { url: 'http://[::1]:3101/hook' });
+      check('#22: =1: private IPv6 -> 403', v6.status === 403);
+
+      const tk = (await requestOn(child.port, 'POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' })).json().token;
+      const body = validBody('ssrf-callback-1');
+      body.receipt.receipts = { service: { callback_url: `http://127.0.0.1:${catchPort}/callback` } };
+      await requestOn(child.port, 'POST', `/possystem/v1/Main/sell?token=${tk}`, body);
+      await sleep(2000);
+      const exported = (await requestOn(child.port, 'GET', '/mock/state')).json();
+      const stateSlice = (exported && exported.state) || exported || {};
+      const cb = Object.values(stateSlice.callbacks || {})[0];
+      check('#22: =1: callback на приватный адрес заблокирован (SSRF в lastStatus)',
+        hits === 0 && cb && String(cb.lastStatus).includes('SSRF'), `hits=${hits}, lastStatus=${cb && cb.lastStatus}`);
+    } finally {
+      child.stop();
+      catcher.close();
+    }
+  }
+
+  {
+    const child = await startKassaChild({ MOCK_BLOCK_PRIVATE_WEBHOOKS: 'true' });
+    try {
+      const r = await requestOn(child.port, 'POST', '/mock/verify-merchant', { url: 'http://127.0.0.1:3101/hook' });
+      check('#22: =true тоже включает SSRF-guard', r.status === 403);
+    } finally {
+      child.stop();
+    }
+  }
+
   await phaseRestart();
 
   console.log(`\nИТОГ: ${passed} passed, ${failed} failed\n`);
   return failed ? 1 : 0;
+}
+
+/** Дочерний стенд кассы на свободном порту с ожиданием healthz. */
+async function startKassaChild(env = {}) {
+  const { spawn } = require('child_process');
+  const port = await freePort();
+  const proc = spawn('node', [path.join(__dirname, 'server.js')], {
+    env: {
+      ...process.env,
+      MOCK_PORT: String(port),
+      MOCK_STATE_FILE: '',
+      MOCK_PROCESS_MS: '0',
+      MOCK_CALLBACK_RETRY_MS: '1000',
+      MOCK_ADMIN_TOKEN: '',
+      MOCK_OPERATOR_TOKEN: '',
+      MOCK_HOSTED: '',
+      MOCK_BLOCK_PRIVATE_WEBHOOKS: '',
+      ...env,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  proc.stderr.on('data', (d) => process.stderr.write(String(d)));
+  const deadline = Date.now() + 5000;
+  let up = false;
+  while (Date.now() < deadline && !up) {
+    try {
+      const r = await requestOn(port, 'GET', '/healthz');
+      up = r.status === 200;
+    } catch { /* стенд ещё поднимается */ }
+    if (!up) await sleep(100);
+  }
+  if (!up) {
+    try { proc.kill('SIGKILL'); } catch { /* ignore */ }
+    throw new Error(`дочерний стенд кассы на :${port} не поднялся за 5 с`);
+  }
+  return { proc, port, stop: () => { try { proc.kill('SIGKILL'); } catch { /* ignore */ } } };
 }
 
 /**
