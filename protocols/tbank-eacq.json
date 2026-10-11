@@ -1,0 +1,101 @@
+{
+  "id": "tbank-eacq-multisplit",
+  "title": "Т-Банк Интернет-эквайринг (EACQ), Мультирасчёты (E2C), СБП, Рекурренты и acqapi",
+  "version": "2026.10",
+  "upstreamDocs": [
+    "docs/reference/tbank/01-payment-api.md",
+    "docs/reference/tbank/02-notifications-signature.md",
+    "docs/reference/tbank/03-payouts-and-deals.md",
+    "docs/reference/tbank/04-test-cards.md",
+    "docs/reference/tbank/05-mock-stand.md",
+    "docs/reference/tbank/06-ecosystem.md"
+  ],
+  "v2Methods": [
+    "Init",
+    "GetState",
+    "Confirm",
+    "Cancel",
+    "CheckOrder",
+    "Chargeback",
+    "Dispute",
+    "createSpDeal",
+    "closeSpDeal",
+    "GetQr",
+    "Charge",
+    "SendClosingReceipt",
+    "AddCustomer",
+    "GetCustomer",
+    "RemoveCustomer",
+    "AddCard",
+    "GetCardList",
+    "RemoveCard"
+  ],
+  "e2cMethods": [
+    "/e2c/v2/Init",
+    "/e2c/v2/Payment",
+    "/e2c/v2/GetState",
+    "/e2c/v2/CancelPayment",
+    "/e2c/v2/GetSbpMembers"
+  ],
+  "partnerRoutes": [
+    "/oauth/token",
+    "/sm-register/register"
+  ],
+  "avRoutes": [
+    "/av/v1/payment",
+    "/av/v1/verification"
+  ],
+  "mockControlRoutes": [
+    "/mock/time",
+    "/mock/scenarios",
+    "/mock/sandboxes",
+    "/mock/reset",
+    "/mock/state",
+    "/mock/verify-merchant",
+    "/openapi.json"
+  ],
+  "paymentStatuses": [
+    "NEW",
+    "FORM_SHOWED",
+    "3DS_CHECKING",
+    "AUTHORIZED",
+    "CONFIRMED",
+    "CANCELED",
+    "REVERSED",
+    "PARTIAL_REFUNDED",
+    "REFUNDED",
+    "REJECTED",
+    "DEADLINE_EXPIRED",
+    "DISPUTED",
+    "REPRESENTMENT",
+    "ARBITRATION",
+    "CHARGEBACK",
+    "PARTIAL_CHARGEBACK"
+  ],
+  "limits": {
+    "dataMaxPairs": 20,
+    "dataKeyMaxLength": 20,
+    "dataValueMaxLength": 100,
+    "redirectDueDateMaxDays": 90,
+    "sbpMinAmountKopeks": 1000,
+    "billingDescriptorMaxLength": 14,
+    "holdAutoConfirmDays": 7,
+    "dealAutoCancelDays": 60,
+    "tdsTimeoutHours": 36
+  },
+  "testCards": [
+    "2201382000000013",
+    "2201382000000039",
+    "2201382000000047",
+    "2201382000000005",
+    "2201382000000021",
+    "2201382000000831",
+    "5586200071492158",
+    "5586200071499591",
+    "2200770239097761",
+    "4249170392197566",
+    "5586200071492075",
+    "5000000000000553"
+  ],
+  "errorCodes": ["0", "4", "7", "8", "13", "32", "86", "103", "501", "1051", "1054", "1057", "5000"]
+}

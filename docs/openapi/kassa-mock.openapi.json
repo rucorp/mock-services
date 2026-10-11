@@ -1,0 +1,142 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "kassa-mock — ОФД Ферма 54-ФЗ (ФФД 1.2) Облачная касса (Мок-стенд)",
+    "version": "0.5.0",
+    "description": "Полнофункциональный мок-стенд облачной кассы ОФД Ферма с поддержкой 6 операций 54-ФЗ (sell, sell_refund, sell_correction, buy, buy_refund, buy_correction), зачёта авансов, маркировки Честный ЗНАК, очереди ОФД, смен ККТ (24ч/Z-отчёты), ресурса ФН, dry-run валидации и мульти-песочниц."
+  },
+  "servers": [
+    { "url": "http://localhost:3101", "description": "Локальный стенд kassa-mock" }
+  ],
+  "components": {
+    "parameters": {
+      "XMockScenario": {
+        "name": "X-Mock-Scenario",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string" },
+        "description": "Сценарий управления поведением: fail, hang, mark-fail, ofd-queue, ofd-reject, shift-expired, fn-overflow, webhook-drop, webhook-duplicate, latency:<dur>, http-500, http-504."
+      },
+      "XMockSandbox": {
+        "name": "X-Mock-Sandbox",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string" },
+        "description": "Имя изолированной песочницы для параллельных CI-воркеров (по умолчанию default)."
+      },
+      "XMockLatency": {
+        "name": "X-Mock-Latency",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string" },
+        "description": "Искусственная задержка ответа (например, 500ms или 2s)."
+      }
+    }
+  },
+  "paths": {
+    "/possystem/v1/getToken": {
+      "post": {
+        "summary": "Получение авторизационного токена Ferma (TTL 12 часов)",
+        "responses": { "200": { "description": "Токен выдан" } }
+      }
+    },
+    "/possystem/v1/{group}/{operation}": {
+      "post": {
+        "summary": "Отправка чека на фискализацию (sell, sell_refund, sell_correction, buy, buy_refund, buy_correction)",
+        "parameters": [
+          { "name": "group", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "operation", "in": "path", "required": true, "schema": { "type": "string", "enum": ["sell", "sell_refund", "sell_correction", "buy", "buy_refund", "buy_correction"] } },
+          { "$ref": "#/components/parameters/XMockScenario" },
+          { "$ref": "#/components/parameters/XMockSandbox" },
+          { "$ref": "#/components/parameters/XMockLatency" }
+        ],
+        "responses": { "200": { "description": "Чек принят в очередь (status=wait) или возвращена ошибка 54-ФЗ (4/5/11/12/62/63)" } }
+      }
+    },
+    "/possystem/v1/{group}/report/{uuid}": {
+      "get": {
+        "summary": "Получение фискального отчёта по чеку (ФД, ФП, ФН, vat_amounts, ofd_status)",
+        "responses": { "200": { "description": "Отчёт о состоянии фискального документа" } }
+      }
+    },
+    "/possystem/v1/stats/cashboxes/extended": {
+      "get": {
+        "summary": "Мониторинг состояния ККТ, объёма ФН и очереди ОФД",
+        "responses": { "200": { "description": "Статус касс" } }
+      }
+    },
+    "/possystem/v1/ofd/queue": {
+      "get": {
+        "summary": "Очередь неотправленных фискальных документов в ОФД (pending/rejected)",
+        "responses": { "200": { "description": "Содержимое очереди ОФД" } }
+      }
+    },
+    "/possystem/v1/ofd/mode": {
+      "post": {
+        "summary": "Переключение режима связи с ОФД (online/offline/reject) и принудительная отправка очереди (flush:true)",
+        "responses": { "200": { "description": "Режим ОФД обновлён" } }
+      }
+    },
+    "/possystem/v1/shift/status": {
+      "get": {
+        "summary": "Статус текущей кассовой смены, длительность (≤24ч по ст. 4.3 54-ФЗ) и счётчики Z-отчётов",
+        "responses": { "200": { "description": "Состояние смены ККТ" } }
+      }
+    },
+    "/possystem/v1/shift/open": {
+      "post": {
+        "summary": "Открытие новой кассовой смены ККТ",
+        "responses": { "200": { "description": "Смена открыта" } }
+      }
+    },
+    "/possystem/v1/shift/close": {
+      "post": {
+        "summary": "Закрытие кассовой смены с формированием фискального Z-отчёта",
+        "responses": { "200": { "description": "Смена закрыта, Z-отчёт сформирован" } }
+      }
+    },
+    "/possystem/v1/fn/state": {
+      "get": {
+        "summary": "Состояние и остаток ресурса Фискального Накопителя (ФН)",
+        "responses": { "200": { "description": "Ресурс ФН" } }
+      },
+      "post": {
+        "summary": "Управление ресурсом ФН (симуляция переполнения или замена/сброс ФН reset:true)",
+        "responses": { "200": { "description": "Ресурс ФН обновлён" } }
+      }
+    },
+    "/possystem/v1/validate": {
+      "post": {
+        "summary": "Dry-run валидация структуры и сумм чека 54-ФЗ без фискализации и без расхода ФД/ФН",
+        "responses": { "200": { "description": "Результат проверки чека (valid: true|false)" } }
+      }
+    },
+    "/mock/time": {
+      "get": { "summary": "Чтение виртуальных часов стенда", "responses": { "200": { "description": "Снимок часов" } } },
+      "post": { "summary": "Сдвиг или установка виртуального времени ({advance:'13h'} / {reset:true})", "responses": { "200": { "description": "Обновлённый снимок часов" } } }
+    },
+    "/mock/scenarios": {
+      "get": { "summary": "Список активных сценарных правил и история срабатываний", "responses": { "200": { "description": "Правила и история" } } },
+      "post": { "summary": "Добавление одноразового или постоянного правила сценария", "responses": { "200": { "description": "Правило добавлено" } } },
+      "delete": { "summary": "Очистка правил и истории сценариев", "responses": { "200": { "description": "Очищено" } } }
+    },
+    "/mock/sandboxes": {
+      "get": { "summary": "Список изолированных песочниц", "responses": { "200": { "description": "Список песочниц" } } },
+      "post": { "summary": "Переключение или создание песочницы", "responses": { "200": { "description": "Активная песочница" } } },
+      "delete": { "summary": "Сброс песочницы", "responses": { "200": { "description": "Песочница сброшена" } } }
+    },
+    "/mock/reset": {
+      "post": { "summary": "Полный сброс состояния текущей песочницы, сценариев и журнала", "responses": { "200": { "description": "Сброшено" } } }
+    },
+    "/mock/state": {
+      "get": { "summary": "Экспорт полного снимка состояния песочницы", "responses": { "200": { "description": "JSON-снимок состояния" } } },
+      "post": { "summary": "Импорт снимка состояния песочницы", "responses": { "200": { "description": "Состояние загружено" } } }
+    },
+    "/mock/verify-merchant": {
+      "post": { "summary": "Активный экзаменатор callback-приёмника фискализации мерчанта", "responses": { "200": { "description": "Отчёт проверки обработчика callback" } } }
+    },
+    "/openapi.json": {
+      "get": { "summary": "Спецификация OpenAPI 3.1.0 сервиса kassa-mock", "responses": { "200": { "description": "OpenAPI JSON" } } }
+    }
+  }
+}

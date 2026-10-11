@@ -22,7 +22,10 @@ const http = require('http');
 const crypto = require('crypto');
 
 const core = require('../../packages/core');
-const { readBody, parseBody, send, sendJson, html, escapeHtml, checkAdminAuth } = core;
+const {
+  readBody, parseBody, send, sendJson, html, escapeHtml, checkAdminAuth,
+  parseScenarioSpec, applyRequestChaos, createSandboxManager, verifyMerchantWebhook,
+} = core;
 const log = core.createLog('tbank-mock');
 // Журнал входящих запросов: интегратору видно в /admin/journal, как мок понял
 // запрос и что ответил (спека §2 — «журнал запросов»).
@@ -83,6 +86,7 @@ Object.assign(state, {
     incomingId: 1,
     payoutId: 900000,
     disputeId: 30000,
+    shopCode: 700100,
   },
   payments: state.payments || {},             // paymentId -> payment
   deals: state.deals || {},                   // spAccumulationId -> deal
@@ -92,7 +96,40 @@ Object.assign(state, {
   externalRequests: state.externalRequests || {}, // ExternalRequestId -> {paymentId, status}
   payouts: state.payouts || {},               // payoutPaymentId -> выплата e2c
   disputes: state.disputes || {},             // disputeId -> {disputeId, paymentId, orderId, amount, status, reasonCode, ...}
+  customers: state.customers || {},           // customerKey -> {customerKey, email, phone, createdAt}
+  cards: state.cards || {},                   // cardId -> {cardId, customerKey, panMask, expDate, rebillId, status}
+  shops: state.shops || {},                   // shopCode -> acqapi partner shop registration
   clockOffsetMs: state.clockOffsetMs || 0,
+});
+
+const sandboxManager = core.createSandboxManager({
+  state,
+  persist,
+  initialStateFactory: () => ({
+    counters: {
+      paymentId: Date.now(),
+      dealId: 50000,
+      cardId: 80000,
+      notificationId: 1,
+      verificationId: 7000000,
+      incomingId: 1,
+      payoutId: 900000,
+      disputeId: 30000,
+      shopCode: 700100,
+    },
+    payments: {},
+    deals: {},
+    verifications: {},
+    incoming: {},
+    notifications: {},
+    externalRequests: {},
+    payouts: {},
+    disputes: {},
+    customers: {},
+    cards: {},
+    shops: {},
+    clockOffsetMs: 0,
+  }),
 });
 
 const clock = core.createVirtualClock({
@@ -300,9 +337,13 @@ function statusCamel(s) {
 }
 
 function dealBalance(deal) {
-  return Object.values(state.payments)
+  const incomingConfirmed = Object.values(state.payments)
     .filter((p) => p.dealId === deal.id && ['CONFIRMED', 'PARTIAL_REFUNDED', 'PARTIAL_CHARGEBACK'].includes(p.status))
     .reduce((acc, p) => acc + currentAmount(p), 0);
+  const outgoingPaid = Object.values(state.payouts || {})
+    .filter((po) => po.dealId === deal.id && ['CONFIRMED', 'COMPLETED'].includes(po.status))
+    .reduce((acc, po) => acc + (po.amount || 0), 0);
+  return Math.max(0, incomingConfirmed - outgoingPaid);
 }
 
 /** Применение сценарных директив (X-Mock-Scenario / DATA.mock_scenario / правила) к платежу. */
@@ -653,6 +694,41 @@ function handleInit(body, reqHeaders = {}) {
       return err(7, `OrderId «${body.OrderId}» уже использован (PaymentId=${existing.paymentId}, статус ${existing.status})`);
     }
   }
+
+  // Валидация ограничений блока DATA по официальной доке Init (≤ 20 пар, ключ ≤ 20, значение ≤ 100)
+  if (body.DATA && typeof body.DATA === 'object' && !Array.isArray(body.DATA)) {
+    const entries = Object.entries(body.DATA);
+    if (entries.length > 20) {
+      return err(7, `Блок DATA содержит ${entries.length} пар (максимум 20 пар по документации Init)`, null, { field: 'DATA', doc: '/api/init' });
+    }
+    for (const [k, v] of entries) {
+      if (String(k).length > 20) {
+        return err(7, `Ключ DATA «${k}» длиннее 20 символов`, null, { field: `DATA.${k}`, doc: '/api/init' });
+      }
+      if (v !== null && v !== undefined && String(v).length > 100) {
+        return err(7, `Значение DATA.${k} длиннее 100 символов`, null, { field: `DATA.${k}`, doc: '/api/init' });
+      }
+    }
+  }
+
+  // Валидация RedirectDueDate (1 минута ... 90 дней по доке Init)
+  if (body.RedirectDueDate !== undefined && body.RedirectDueDate !== null && body.RedirectDueDate !== '') {
+    const dueTs = Date.parse(String(body.RedirectDueDate));
+    if (!Number.isFinite(dueTs)) {
+      return err(7, `Некорректный формат RedirectDueDate «${body.RedirectDueDate}» (ожидается ISO 8601)`, null, { field: 'RedirectDueDate', doc: '/api/init' });
+    }
+    const maxDueTs = clock.now() + 90 * 24 * 60 * 60 * 1000;
+    if (dueTs > maxDueTs) {
+      return err(7, 'RedirectDueDate превышает максимальный срок жизни ссылки 90 дней', null, { field: 'RedirectDueDate', doc: '/api/init' });
+    }
+  }
+
+  // Для рекуррентного платежа (Recurrent=Y) обязателен CustomerKey (или телефон/email в DATA)
+  const isRecurrent = String(body.Recurrent || '').toUpperCase() === 'Y';
+  if (isRecurrent && !body.CustomerKey && !(body.DATA && (body.DATA.Phone || body.DATA.Email))) {
+    return err(7, 'Для рекуррентного платежа (Recurrent=Y) обязателен параметр CustomerKey (или DATA.Phone / DATA.Email)', null, { field: 'CustomerKey', doc: '/api/init' });
+  }
+
   let dealId = null;
   const createDeal = String(body.CreateDealWithType || '').toUpperCase() === 'NN';
   if (PROFILE === 'plain' && !body.DealId && !createDeal) {
@@ -683,6 +759,8 @@ function handleInit(body, reqHeaders = {}) {
     dealId,
     recipientId: body.PaymentRecipientId || null,
     customerKey: body.CustomerKey || null,
+    recurrent: isRecurrent,
+    rebillId: null,
     payType: String(body.PayType || 'T').toUpperCase() === 'O' ? 'O' : 'T',
     notificationUrl: body.NotificationURL || null,
     successUrl: body.SuccessURL || null,
@@ -704,6 +782,7 @@ function handleInit(body, reqHeaders = {}) {
     scheduledChargebackAt: null,
     customAutoConfirmMs: null,
     partialRefundSpec: null,
+    closingReceipt: null,
   };
 
   const spec = scenarios.resolve({
@@ -826,6 +905,21 @@ function handleCancel(body, reqHeaders = {}) {
   const payment = state.payments[String(body.PaymentId)];
   if (!payment) return err(8, 'PaymentId не найден');
 
+  // Правило Мультирасчетов (03-payouts-and-deals.md §Сделка): возврат покупателю
+  // после закрытия сделки запрещён банком.
+  if (payment.dealId && state.deals[payment.dealId] && state.deals[payment.dealId].status === 'closed') {
+    return {
+      ...err(
+        32,
+        `Возврат по платежу ${payment.paymentId} запрещён: сделка ${payment.dealId} уже закрыта`,
+        `DealId=${payment.dealId}`,
+        { field: 'PaymentId', hint: 'В Мультирасчетах после FinalPayout=true или closeSpDeal возврат покупателю по сделке невозможен.' },
+      ),
+      PaymentId: payment.paymentId,
+      OrderId: payment.orderId,
+    };
+  }
+
   const externalId = body.ExternalRequestId ? String(body.ExternalRequestId) : null;
   if (externalId && state.externalRequests[externalId]) {
     return { ...baseResponse(payment), OriginalAmount: currentAmount(payment), NewAmount: currentAmount(payment), ExternalRequestId: externalId };
@@ -889,6 +983,265 @@ function handleCancel(body, reqHeaders = {}) {
   });
   if (externalId) state.externalRequests[externalId] = { paymentId: payment.paymentId, status: payment.status };
   return { ...baseResponse(payment), OriginalAmount: originalAmount, NewAmount: currentAmount(payment), ExternalRequestId: externalId || undefined };
+}
+
+function handleCreateSpDeal(body) {
+  const badTerminal = checkTerminalKey(body);
+  if (badTerminal) return badTerminal;
+  const dealType = String(body.SpDealType || 'NN').toUpperCase();
+  if (dealType !== 'NN') {
+    return err(7, `Неподдерживаемый тип сделки SpDealType=«${body.SpDealType}» (ожидается NN)`, null, { field: 'SpDealType' });
+  }
+  const dealId = String(state.counters.dealId++);
+  state.deals[dealId] = {
+    id: dealId,
+    type: 'NN',
+    status: 'open',
+    createdAt: clock.iso(),
+    createdAtMs: clock.now(),
+  };
+  persist();
+  return {
+    Success: true,
+    ErrorCode: '0',
+    TerminalKey: TERMINAL_KEY,
+    SpAccumulationId: dealId,
+  };
+}
+
+function handleCloseSpDeal(body) {
+  const badTerminal = checkTerminalKey(body);
+  if (badTerminal) return badTerminal;
+  const dealId = String(body.SpAccumulationId || body.DealId || '');
+  const deal = findDeal(dealId);
+  if (!deal) return err(8, `Сделка «${dealId}» не найдена`, null, { field: 'SpAccumulationId' });
+  if (deal.status === 'closed') {
+    return err(32, `Сделка «${dealId}» уже закрыта (повторное закрытие запрещено банком)`, null, { field: 'SpAccumulationId' });
+  }
+  const reward = dealBalance(deal);
+  deal.status = 'closed';
+  deal.closedAt = clock.iso();
+  deal.platformReward = reward;
+  persist();
+  return {
+    Success: true,
+    ErrorCode: '0',
+    TerminalKey: TERMINAL_KEY,
+    SpAccumulationId: deal.id,
+    Status: 'CLOSED',
+    PlatformReward: reward,
+  };
+}
+
+function handleGetQr(body) {
+  const badTerminal = checkTerminalKey(body);
+  if (badTerminal) return badTerminal;
+  const payment = state.payments[String(body.PaymentId || '')];
+  if (!payment) return err(8, 'PaymentId не найден');
+  if (!['NEW', 'FORM_SHOWED'].includes(payment.status)) {
+    return err(32, `Генерация QR СБП доступна только в статусе NEW/FORM_SHOWED, сейчас ${payment.status}`);
+  }
+  // Дока Т-Банка (01-payment-api.md): минимальная сумма операции СБП — 10 ₽ (1000 коп.)
+  if (payment.amount < 1000) {
+    return err(
+      7,
+      `Сумма платежа ${payment.amount} коп. меньше минимальной суммы операции СБП (1000 коп. = 10,00 ₽)`,
+      `Amount=${payment.amount}`,
+      { field: 'Amount', doc: '/api/init' },
+    );
+  }
+  const dataType = String(body.DataType || 'PAYLOAD').toUpperCase();
+  if (!['PAYLOAD', 'IMAGE'].includes(dataType)) {
+    return err(7, `DataType «${body.DataType}» не поддерживается (ожидается PAYLOAD или IMAGE)`, null, { field: 'DataType' });
+  }
+  const qrPayload = `https://qr.nspk.ru/AD1000${payment.paymentId}?type=02&bank=100000000004&sum=${payment.amount}&cur=RUB&crc=AB12`;
+  const data = dataType === 'IMAGE'
+    ? `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120"><rect width="120" height="120" fill="#fff"/><text x="10" y="60" font-size="10">SBP:${payment.paymentId}</text></svg>`
+    : qrPayload;
+  payment.qrData = qrPayload;
+  persist();
+  return {
+    Success: true,
+    ErrorCode: '0',
+    Message: 'OK',
+    TerminalKey: TERMINAL_KEY,
+    OrderId: payment.orderId,
+    PaymentId: payment.paymentId,
+    Data: data,
+    RequestKey: `QR-${payment.paymentId}`,
+  };
+}
+
+function handleCharge(body, reqHeaders = {}) {
+  const badTerminal = checkTerminalKey(body);
+  if (badTerminal) return badTerminal;
+  const payment = state.payments[String(body.PaymentId || '')];
+  if (!payment) return err(8, 'PaymentId не найден');
+  if (payment.status !== 'NEW') {
+    return err(32, `Метод Charge доступен только для платежа в статусе NEW, сейчас ${payment.status}`);
+  }
+  const rebillId = String(body.RebillId || '');
+  if (!rebillId) return err(7, 'Передайте RebillId для рекуррентного списания', null, { field: 'RebillId' });
+  const card = Object.values(state.cards || {}).find((c) => c.rebillId === rebillId && c.status === 'A');
+  if (!card) {
+    return err(8, `Активная карта с RebillId=«${rebillId}» не найдена (привяжите карту через Init с Recurrent=Y или AddCard)`, null, { field: 'RebillId' });
+  }
+  payment.cardId = card.cardId;
+  payment.panMask = card.panMask;
+  payment.expDate = card.expDate;
+  payment.rebillId = rebillId;
+  payment.confirmedAmount = payment.amount;
+  payment.remaining = payment.amount;
+  setStatus(payment, 'CONFIRMED');
+  persist();
+  const spec = scenarios.resolve({
+    header: reqHeaders['x-mock-scenario'] || '',
+    target: 'charge',
+    context: { paymentId: payment.paymentId, orderId: payment.orderId },
+  });
+  scheduleNotification(payment, 'CONFIRMED', { RebillId: rebillId }, {
+    suppress: spec.has('webhook-drop') || spec.has('no-webhook'),
+    duplicate: spec.has('webhook-duplicate'),
+  });
+  return {
+    ...baseResponse(payment),
+    RebillId: rebillId,
+  };
+}
+
+function handleSendClosingReceipt(body) {
+  const badTerminal = checkTerminalKey(body);
+  if (badTerminal) return badTerminal;
+  const payment = state.payments[String(body.PaymentId || '')];
+  if (!payment) return err(8, 'PaymentId не найден');
+  if (!['CONFIRMED', 'PARTIAL_REFUNDED'].includes(payment.status)) {
+    return err(32, `Отправка закрывающего чека доступна только для подтверждённого платежа (CONFIRMED), сейчас ${payment.status}`);
+  }
+  if (!body.Receipt || typeof body.Receipt !== 'object' || !Array.isArray(body.Receipt.Items) || !body.Receipt.Items.length) {
+    return err(7, 'Передайте объект Receipt с непустым массивом Items (ФФД 1.2)', null, { field: 'Receipt.Items' });
+  }
+  payment.closingReceipt = body.Receipt;
+  persist();
+  return {
+    Success: true,
+    ErrorCode: '0',
+    Message: 'OK',
+    TerminalKey: TERMINAL_KEY,
+    PaymentId: payment.paymentId,
+  };
+}
+
+function handleAddCustomer(body) {
+  const badTerminal = checkTerminalKey(body);
+  if (badTerminal) return badTerminal;
+  const customerKey = String(body.CustomerKey || '').trim();
+  if (!customerKey) return err(7, 'Обязательный параметр CustomerKey не заполнен', null, { field: 'CustomerKey' });
+  state.customers[customerKey] = {
+    customerKey,
+    email: body.Email || null,
+    phone: body.Phone || null,
+    createdAt: clock.iso(),
+  };
+  persist();
+  return { Success: true, ErrorCode: '0', TerminalKey: TERMINAL_KEY, CustomerKey: customerKey };
+}
+
+function handleGetCustomer(body) {
+  const badTerminal = checkTerminalKey(body);
+  if (badTerminal) return badTerminal;
+  const customerKey = String(body.CustomerKey || '').trim();
+  const cust = state.customers[customerKey];
+  if (!cust) return err(8, `Покупатель CustomerKey=«${customerKey}» не найден`, null, { field: 'CustomerKey' });
+  return {
+    Success: true,
+    ErrorCode: '0',
+    TerminalKey: TERMINAL_KEY,
+    CustomerKey: cust.customerKey,
+    Email: cust.email || undefined,
+    Phone: cust.phone || undefined,
+  };
+}
+
+function handleRemoveCustomer(body) {
+  const badTerminal = checkTerminalKey(body);
+  if (badTerminal) return badTerminal;
+  const customerKey = String(body.CustomerKey || '').trim();
+  if (!state.customers[customerKey]) return err(8, `Покупатель CustomerKey=«${customerKey}» не найден`);
+  delete state.customers[customerKey];
+  for (const [cid, c] of Object.entries(state.cards || {})) {
+    if (c.customerKey === customerKey) delete state.cards[cid];
+  }
+  persist();
+  return { Success: true, ErrorCode: '0', TerminalKey: TERMINAL_KEY, CustomerKey: customerKey };
+}
+
+function handleAddCard(body) {
+  const badTerminal = checkTerminalKey(body);
+  if (badTerminal) return badTerminal;
+  const customerKey = String(body.CustomerKey || '').trim();
+  if (!customerKey) return err(7, 'Обязательный параметр CustomerKey не заполнен', null, { field: 'CustomerKey' });
+  if (!state.customers[customerKey]) {
+    state.customers[customerKey] = { customerKey, createdAt: clock.iso() };
+  }
+  const cardId = String(state.counters.cardId++);
+  const rebillId = `REB-${cardId}`;
+  state.cards[cardId] = {
+    cardId,
+    customerKey,
+    panMask: '220138**0013',
+    expDate: '1227',
+    rebillId,
+    status: 'A',
+    createdAt: clock.iso(),
+  };
+  persist();
+  return {
+    Success: true,
+    ErrorCode: '0',
+    TerminalKey: TERMINAL_KEY,
+    CustomerKey: customerKey,
+    RequestKey: `REQ-${cardId}`,
+    CardId: cardId,
+    RebillId: rebillId,
+    PaymentURL: `${MOCK_PUBLIC_BASE_URL.replace(/\/$/, '')}/add-card/${cardId}`,
+  };
+}
+
+function handleGetCardList(body) {
+  const badTerminal = checkTerminalKey(body);
+  if (badTerminal) return badTerminal;
+  const customerKey = String(body.CustomerKey || '').trim();
+  if (!customerKey) return err(7, 'Обязательный параметр CustomerKey не заполнен', null, { field: 'CustomerKey' });
+  const list = Object.values(state.cards || {})
+    .filter((c) => c.customerKey === customerKey && c.status !== 'D')
+    .map((c) => ({
+      CardId: c.cardId,
+      Pan: c.panMask,
+      ExpDate: c.expDate,
+      CardType: 0,
+      Status: c.status,
+      RebillId: c.rebillId,
+    }));
+  return list;
+}
+
+function handleRemoveCard(body) {
+  const badTerminal = checkTerminalKey(body);
+  if (badTerminal) return badTerminal;
+  const cardId = String(body.CardId || '');
+  const card = state.cards[cardId];
+  if (!card) return err(8, `Карта CardId=«${cardId}» не найдена`);
+  card.status = 'D';
+  persist();
+  return {
+    Success: true,
+    ErrorCode: '0',
+    TerminalKey: TERMINAL_KEY,
+    CustomerKey: card.customerKey,
+    CardId: card.cardId,
+    Status: 'D',
+    CardType: 0,
+  };
 }
 
 /* -------------------------------------------------------- payment form UI */
@@ -989,6 +1342,24 @@ function processPay(payment, pan, exp) {
 
 function authorize(payment) {
   payment.cardId = String(state.counters.cardId++);
+  let extra = {};
+  if (payment.recurrent) {
+    const rebillId = `REB-${payment.cardId}`;
+    payment.rebillId = rebillId;
+    extra = { RebillId: rebillId };
+    if (payment.customerKey && !state.customers[payment.customerKey]) {
+      state.customers[payment.customerKey] = { customerKey: payment.customerKey, createdAt: clock.iso() };
+    }
+    state.cards[payment.cardId] = {
+      cardId: payment.cardId,
+      customerKey: payment.customerKey || 'default',
+      panMask: payment.panMask || '220138**0013',
+      expDate: payment.expDate || '1227',
+      rebillId,
+      status: 'A',
+      createdAt: clock.iso(),
+    };
+  }
   setStatus(payment, payment.payType === 'O' ? 'CONFIRMED' : 'AUTHORIZED');
   if (payment.payType === 'O') {
     payment.confirmedAmount = payment.amount;
@@ -998,8 +1369,15 @@ function authorize(payment) {
     }
   }
   persist();
-  if (payment.payType === 'O') scheduleNotification(payment, 'CONFIRMED');
-  else scheduleNotification(payment, 'AUTHORIZED');
+  if (payment.payType === 'O') {
+    if (payment.recurrent) {
+      // По доке Рекуррентных платежей: RebillId возвращается в нотификации AUTHORIZED
+      scheduleNotification(payment, 'AUTHORIZED', extra);
+    }
+    scheduleNotification(payment, 'CONFIRMED', extra);
+  } else {
+    scheduleNotification(payment, 'AUTHORIZED', extra);
+  }
   return { status: payment.status };
 }
 
@@ -1148,8 +1526,8 @@ function adminPage() {
     .join('') || '<tr><td colspan="7">нотификаций нет</td></tr>';
 
   const journalRows = journal.list().slice(-15).reverse()
-    .map((e) => `<tr><td>${esc(e.at.slice(11, 19))}</td><td>${esc(e.method)}</td><td><code>${esc(e.path)}</code></td><td>${esc(Object.entries(e.body || {}).map(([k, v]) => `${k}=${v}`).join(' '))}</td><td>${e.status}</td><td>${e.ms} мс</td></tr>`)
-    .join('') || '<tr><td colspan="6">запросов ещё не было</td></tr>';
+    .map((e) => `<tr><td>${esc(e.at.slice(11, 19))}</td><td>${esc(e.method)}</td><td><code>${esc(e.path)}</code></td><td>${esc(Object.entries(e.body || {}).map(([k, v]) => `${k}=${v}`).join(' '))}</td><td>${e.status}</td><td>${e.ms} мс</td><td><code style="font-size:10px">${esc(String(e.curl || '').slice(0, 70))}…</code></td></tr>`)
+    .join('') || '<tr><td colspan="7">запросов ещё не было</td></tr>';
 
   return page(`
     <span class="logo">T · мок банка</span>
@@ -1262,31 +1640,117 @@ async function route(req, res) {
   const raw = await readBody(req);
   const body = parseBody(raw, req.headers['content-type']);
 
+  // Мульти-тенантная изоляция песочниц (X-Mock-Sandbox или ?sandbox=)
+  if (req.headers['x-mock-sandbox'] || url.searchParams.get('sandbox')) {
+    sandboxManager.fromRequest(req);
+  }
+
   // Опциональная защита /admin* по токену (A-20)
   if (p.startsWith('/admin') && !checkAdminAuth(req, MOCK_ADMIN_TOKEN)) {
     return sendJson(res, err(13, 'Доступ к /admin ограничен MOCK_ADMIN_TOKEN'), 401);
   }
 
   // Журналируем только API-вызовы (не страницы формы и не поллинг /admin).
-  if (/^\/(v2|e2c\/v2|av\/v1)\//.test(p)) {
+  if (/^\/(v2|e2c\/v2|av\/v1|oauth|sm-register)\//.test(p)) {
     const started = Date.now();
     const originalWriteHead = res.writeHead.bind(res);
     res.writeHead = (code, ...rest) => {
-      journal.record({ method: req.method, path: p, status: code, ms: Date.now() - started, body: bodySummary(body) });
+      journal.record({
+        method: req.method,
+        path: p,
+        status: code,
+        ms: Date.now() - started,
+        body: bodySummary(body),
+        headers: req.headers,
+        baseUrl: MOCK_PUBLIC_BASE_URL,
+      });
       return originalWriteHead(code, ...rest);
     };
+
+    // Инъекция задержек и сетевых сбоев (X-Mock-Latency, X-Mock-Scenario: latency:..., http-500, http-504)
+    const chaosSpec = parseScenarioSpec(req.headers['x-mock-scenario'] || '');
+    const chaosResult = await applyRequestChaos(req, chaosSpec);
+    if (chaosResult.fault) {
+      return sendJson(res, err(chaosResult.fault.status, chaosResult.fault.message), chaosResult.fault.status);
+    }
   }
 
   if (req.method === 'GET' && p === '/health') {
     return sendJson(res, {
       ok: true,
+      sandbox: sandboxManager.current(),
       payments: Object.keys(state.payments).length,
       deals: Object.keys(state.deals).length,
       payouts: Object.keys(state.payouts || {}).length,
       disputes: Object.keys(state.disputes || {}).length,
+      shops: Object.keys(state.shops || {}).length,
     });
   }
+  if (req.method === 'GET' && p === '/openapi.json') {
+    const specFile = require('path').join(__dirname, '..', '..', 'docs', 'openapi', 'tbank-mock.openapi.json');
+    const specObj = JSON.parse(require('fs').readFileSync(specFile, 'utf8'));
+    return sendJson(res, specObj);
+  }
   if (req.method === 'GET' && p === '/admin/journal') return sendJson(res, { entries: journal.list() });
+
+  // Управление песочницами, сбросом и снимками состояния (RFC-001)
+  if (p === '/mock/sandboxes') {
+    if (req.method === 'GET') {
+      return sendJson(res, { current: sandboxManager.current(), sandboxes: sandboxManager.list() });
+    }
+    if (req.method === 'POST') {
+      const name = sandboxManager.switchTo((body && body.sandbox) || 'default');
+      return sendJson(res, { ok: true, current: name, sandboxes: sandboxManager.list() });
+    }
+    if (req.method === 'DELETE') {
+      const name = sandboxManager.reset((body && body.sandbox) || url.searchParams.get('sandbox') || undefined);
+      return sendJson(res, { ok: true, reset: name, current: sandboxManager.current() });
+    }
+  }
+
+  if (p === '/mock/reset' && req.method === 'POST') {
+    const targetSandbox = (body && body.sandbox) || req.headers['x-mock-sandbox'] || undefined;
+    const resetName = sandboxManager.reset(targetSandbox);
+    scenarios.clearRules();
+    scenarios.clearHistory();
+    journal.clear();
+    return sendJson(res, { ok: true, sandbox: resetName });
+  }
+
+  if (p === '/mock/state') {
+    if (req.method === 'GET') {
+      const targetSandbox = url.searchParams.get('sandbox') || undefined;
+      return sendJson(res, {
+        sandbox: targetSandbox || sandboxManager.current(),
+        state: sandboxManager.exportState(targetSandbox),
+      });
+    }
+    if (req.method === 'POST' || req.method === 'PUT') {
+      const targetSandbox = (body && body.sandbox) || undefined;
+      const snapshot = (body && body.state) || body || {};
+      const imported = sandboxManager.importState(snapshot, targetSandbox);
+      return sendJson(res, { ok: true, sandbox: imported });
+    }
+  }
+
+  // Активный экзаменатор вебхук-приёмника мерчанта
+  if (p === '/mock/verify-merchant' && req.method === 'POST') {
+    const targetUrl = String((body && (body.url || body.NotificationURL)) || MOCK_DEFAULT_NOTIFICATION_URL || '').trim();
+    if (!targetUrl) {
+      return sendJson(res, err(7, 'Передайте url приёмника вебхуков для активной проверки', null, { field: 'url' }), 400);
+    }
+    try {
+      const report = await verifyMerchantWebhook({
+        url: targetUrl,
+        provider: 'tbank',
+        terminalKey: TERMINAL_KEY,
+        signPayload: (payload) => tokenOf(payload),
+      });
+      return sendJson(res, report);
+    } catch (e) {
+      return sendJson(res, err(500, `Ошибка проверки вебхук-приёмника: ${e.message}`), 500);
+    }
+  }
 
   // Виртуальные часы (этап 7, бриф §3.2)
   if (p === '/mock/time') {
@@ -1321,6 +1785,88 @@ async function route(req, res) {
       scenarios.clearHistory();
       return sendJson(res, { ok: true, rules: [], history: [] });
     }
+  }
+
+  // ── acqapi: OAuth 2.0 + Регистрация партнёров (/sm-register/register*)
+  if (p === '/oauth/token' && req.method === 'POST') {
+    const auth = String(req.headers.authorization || '');
+    if (!auth.startsWith('Basic ')) {
+      return sendJson(res, { error: 'invalid_client', error_description: 'Basic authorization header is required (Basic partner:password)' }, 401);
+    }
+    const token = 'mock-acqapi-bearer-' + Buffer.from(`${clock.now()}`).toString('base64').replace(/=/g, '');
+    return sendJson(res, {
+      access_token: token,
+      token_type: 'Bearer',
+      expires_in: 3600,
+      scope: 'sm-register',
+    });
+  }
+
+  if (p === '/sm-register/register' && req.method === 'POST') {
+    const auth = String(req.headers.authorization || '');
+    if (!auth.startsWith('Bearer ')) {
+      return sendJson(res, { error: 'unauthorized', message: 'Bearer token is required (получите токен в POST /oauth/token)' }, 401);
+    }
+    const descriptor = String(body.billingDescriptor || '').trim();
+    if (!descriptor || descriptor.length > 14 || !/^[A-Za-z0-9._ -]+$/.test(descriptor)) {
+      return sendJson(
+        res,
+        err(7, `billingDescriptor «${descriptor}» невалиден (до 14 символов: латиница, цифры, точка, пробел, дефис, подчёркивание)`, null, {
+          field: 'billingDescriptor',
+          doc: '03-payouts-and-deals.md',
+        }),
+        400,
+      );
+    }
+    const inn = String(body.inn || (body.requisites && body.requisites.inn) || '').trim();
+    if (!/^\d{10}(\d{2})?$/.test(inn)) {
+      return sendJson(res, err(7, `ИНН партнёра «${inn}» должен содержать 10 или 12 цифр`, null, { field: 'inn' }), 400);
+    }
+    const shopCode = String(body.shopCode || (700000 + Object.keys(state.shops || {}).length + 1));
+    const shop = {
+      code: shopCode,
+      shopCode,
+      name: body.name || body.fullName || descriptor,
+      inn,
+      billingDescriptor: descriptor,
+      email: body.email || null,
+      bankAccount: body.bankAccount || body.requisites || {},
+      status: 'ACTIVE',
+      terminals: [
+        { terminalKey: `${TERMINAL_KEY}`, type: 'ACQUIRING' },
+        { terminalKey: `${TERMINAL_KEY}E2C`, type: 'PAYOUT' },
+      ],
+      createdAt: clock.iso(),
+    };
+    state.shops[shopCode] = shop;
+    persist();
+    return sendJson(res, shop);
+  }
+
+  const smGetMatch = p.match(/^\/sm-register\/register\/shop\/([A-Za-z0-9_-]+)$/);
+  if (smGetMatch && req.method === 'GET') {
+    const shop = state.shops[smGetMatch[1]];
+    if (!shop) return sendJson(res, err(8, `Партнёр shopCode=«${smGetMatch[1]}» не найден`), 404);
+    return sendJson(res, shop);
+  }
+
+  const smPatchMatch = p.match(/^\/sm-register\/register\/([A-Za-z0-9_-]+)$/);
+  if ((smPatchMatch && req.method === 'PATCH') || (smPatchMatch && req.method === 'POST')) {
+    const shop = state.shops[smPatchMatch[1]];
+    if (!shop) return sendJson(res, err(8, `Партнёр shopCode=«${smPatchMatch[1]}» не найден`), 404);
+    if (body.billingDescriptor !== undefined) {
+      const descriptor = String(body.billingDescriptor).trim();
+      if (!descriptor || descriptor.length > 14 || !/^[A-Za-z0-9._ -]+$/.test(descriptor)) {
+        return sendJson(res, err(7, `billingDescriptor «${descriptor}» невалиден (до 14 символов латиницей)`, null, { field: 'billingDescriptor' }), 400);
+      }
+      shop.billingDescriptor = descriptor;
+    }
+    if (body.name) shop.name = body.name;
+    if (body.email) shop.email = body.email;
+    if (body.bankAccount) shop.bankAccount = { ...shop.bankAccount, ...body.bankAccount };
+    shop.updatedAt = clock.iso();
+    persist();
+    return sendJson(res, shop);
   }
 
   // GET /v2/Dispute/:id — быстрое чтение карточки спора
@@ -1381,19 +1927,48 @@ async function route(req, res) {
     });
   }
 
-  // ── E2C-выплаты (Init → Payment → GetState)
+  // ── E2C-выплаты (Init → Payment → GetState / CancelPayment / GetSbpMembers)
   if (p === '/e2c/v2/Init' && req.method === 'POST') {
     if (!verifyToken(body)) return sendJson(res, err(13, 'Неверный Token (подпись) запроса'));
     const amount = parseInt(body.Amount, 10);
     if (!Number.isFinite(amount) || amount <= 0) {
       return sendJson(res, err(7, 'Обязательные параметры не заполнены (Amount)'));
     }
+    const dealId = body.DealId !== undefined && body.DealId !== null && body.DealId !== '' ? String(body.DealId) : null;
+    if (dealId) {
+      const deal = findDeal(dealId);
+      if (!deal) {
+        return sendJson(res, err(8, `Сделка DealId=«${dealId}» не найдена`, null, { field: 'DealId' }));
+      }
+      if (deal.status !== 'open') {
+        return sendJson(res, err(32, `Выплата по сделке «${dealId}» невозможна: сделка закрыта (status=${deal.status})`, null, { field: 'DealId' }));
+      }
+      const available = dealBalance(deal);
+      if (amount > available) {
+        return sendJson(
+          res,
+          err(
+            32,
+            `Сумма выплаты ${amount} коп. превышает доступный остаток по сделке ${dealId} (${available} коп.)`,
+            `Amount=${amount}, DealBalance=${available}`,
+            { field: 'Amount', hint: 'Баланс сделки = сумма подтверждённых приходов минус возвраты, чарджбэки и ранее проведённые выплаты.' },
+          ),
+        );
+      }
+    }
     const payoutPaymentId = 'P-' + String(state.counters.payoutId++);
+    const finalPayout = body.FinalPayout === true || body.FinalPayout === 'true';
     state.payouts[payoutPaymentId] = {
       paymentId: payoutPaymentId,
       amount,
       orderId: String(body.OrderId || ''),
       customerKey: String(body.CustomerKey || ''),
+      dealId,
+      finalPayout,
+      cardId: body.CardId ? String(body.CardId) : null,
+      pan: body.Pan ? String(body.Pan) : null,
+      phone: body.Phone ? String(body.Phone) : null,
+      bankMemberId: body.BankMemberId ? String(body.BankMemberId) : null,
       recipient: {
         account: String(body.Account || ''),
         bank: String(body.Bank || ''),
@@ -1405,20 +1980,76 @@ async function route(req, res) {
       createdAt: clock.iso(),
     };
     persist();
-    console.log(`[mock] e2c Init ${payoutPaymentId}: ${amount}коп, order=${body.OrderId || ''}`);
-    return sendJson(res, { Success: true, ErrorCode: '0', PaymentId: payoutPaymentId, Status: 'NEW' });
+    console.log(`[mock] e2c Init ${payoutPaymentId}: ${amount}коп, order=${body.OrderId || ''}${dealId ? `, deal=${dealId}` : ''}`);
+    return sendJson(res, {
+      Success: true,
+      ErrorCode: '0',
+      TerminalKey: body.TerminalKey || TERMINAL_KEY,
+      PaymentId: payoutPaymentId,
+      OrderId: String(body.OrderId || ''),
+      Amount: amount,
+      DealId: dealId || undefined,
+      Status: 'NEW',
+    });
   }
 
   if (p === '/e2c/v2/Payment' && req.method === 'POST') {
     if (!verifyToken(body)) return sendJson(res, err(13, 'Неверный Token (подпись) запроса'));
     const payout = state.payouts[String(body.PaymentId || '')];
     if (!payout) return sendJson(res, err(4, 'Выплата не найдена'));
-    if (payout.status !== 'NEW') return sendJson(res, err(32, 'Неверный статус выплаты: ' + payout.status));
+    if (payout.status !== 'NEW' && payout.status !== 'CHECKED') {
+      return sendJson(res, err(32, 'Неверный статус выплаты: ' + payout.status));
+    }
+    // Официальный тестовый кейс выплаты с ошибкой: карта 5000000000000553 -> REJECTED 1057
+    if (payout.pan === '5000000000000553' || payout.cardId === '5000000000000553') {
+      payout.status = 'REJECTED';
+      payout.errorCode = '1057';
+      payout.statusHistory.push({ status: 'REJECTED', at: clock.iso() });
+      persist();
+      return sendJson(res, {
+        Success: false,
+        ErrorCode: '1057',
+        Message: 'Ваша карта не может быть использована для выплат',
+        Details: 'Используйте другую карту',
+        PaymentId: payout.paymentId,
+        Status: 'REJECTED',
+      });
+    }
+    // Повторная проверка баланса сделки перед проведением выплаты
+    if (payout.dealId) {
+      const deal = findDeal(payout.dealId);
+      if (!deal || deal.status !== 'open') {
+        return sendJson(res, err(32, `Сделка ${payout.dealId} уже закрыта или не существует`));
+      }
+      const available = dealBalance(deal);
+      if (payout.amount > available) {
+        return sendJson(res, err(32, `Недостаточно средств в сделке ${payout.dealId}: доступно ${available} коп., запрошено ${payout.amount} коп.`));
+      }
+    }
     payout.status = 'CONFIRMED';
     payout.statusHistory.push({ status: 'CONFIRMED', at: clock.iso() });
+    // Если FinalPayout=true — сделка автоматически переходит в closed, остаток становится вознаграждением площадки
+    let dealClosed = false;
+    let platformReward;
+    if (payout.finalPayout && payout.dealId && state.deals[payout.dealId]) {
+      const deal = state.deals[payout.dealId];
+      platformReward = dealBalance(deal);
+      deal.status = 'closed';
+      deal.closedAt = clock.iso();
+      deal.platformReward = platformReward;
+      dealClosed = true;
+    }
     persist();
-    console.log(`[mock] e2c Payment ${payout.paymentId}: CONFIRMED ${payout.amount}коп`);
-    return sendJson(res, { Success: true, ErrorCode: '0', PaymentId: payout.paymentId, Status: 'CONFIRMED' });
+    console.log(`[mock] e2c Payment ${payout.paymentId}: CONFIRMED ${payout.amount}коп${dealClosed ? ` (deal ${payout.dealId} closed)` : ''}`);
+    return sendJson(res, {
+      Success: true,
+      ErrorCode: '0',
+      PaymentId: payout.paymentId,
+      Status: 'CONFIRMED',
+      DealId: payout.dealId || undefined,
+      DealClosed: dealClosed || undefined,
+      PlatformReward: platformReward,
+    });
   }
 
   if (p === '/e2c/v2/GetState' && req.method === 'POST') {
@@ -1427,11 +2058,45 @@ async function route(req, res) {
     if (!payout) return sendJson(res, err(4, 'Выплата не найдена'));
     return sendJson(res, {
       Success: true,
-      ErrorCode: '0',
+      ErrorCode: payout.errorCode || '0',
       PaymentId: payout.paymentId,
       Status: payout.status,
       Amount: payout.amount,
       OrderId: payout.orderId,
+      DealId: payout.dealId || undefined,
+    });
+  }
+
+  if (p === '/e2c/v2/CancelPayment' && req.method === 'POST') {
+    if (!verifyToken(body)) return sendJson(res, err(13, 'Неверный Token (подпись) запроса'));
+    const payout = state.payouts[String(body.PaymentId || '')];
+    if (!payout) return sendJson(res, err(4, 'Выплата не найдена'));
+    if (payout.status === 'REJECTED' || payout.status === 'CANCELED') {
+      return sendJson(res, err(32, `Выплата уже в статусе ${payout.status}`));
+    }
+    payout.status = 'CANCELED';
+    payout.statusHistory.push({ status: 'CANCELED', at: clock.iso() });
+    persist();
+    return sendJson(res, {
+      Success: true,
+      ErrorCode: '0',
+      PaymentId: payout.paymentId,
+      Status: 'CANCELED',
+      DealId: payout.dealId || undefined,
+    });
+  }
+
+  if (p === '/e2c/v2/GetSbpMembers' && req.method === 'POST') {
+    if (!verifyToken(body)) return sendJson(res, err(13, 'Неверный Token (подпись) запроса'));
+    return sendJson(res, {
+      Success: true,
+      ErrorCode: '0',
+      Members: [
+        { MemberId: '100000000004', MemberName: 'Т-Банк', MemberNameRus: 'АО «Т-Банк»' },
+        { MemberId: '100000000111', MemberName: 'Sberbank', MemberNameRus: 'ПАО Сбербанк' },
+        { MemberId: '100000000008', MemberName: 'Alfa-Bank', MemberNameRus: 'АО «Альфа-Банк»' },
+        { MemberId: '100000000005', MemberName: 'VTB', MemberNameRus: 'Банк ВТБ (ПАО)' },
+      ],
     });
   }
 
@@ -1484,6 +2149,19 @@ async function route(req, res) {
       CheckOrder: handleCheckOrder,
       Chargeback: handleChargeback,
       Dispute: handleChargeback,
+      createSpDeal: handleCreateSpDeal,
+      CreateSpDeal: handleCreateSpDeal,
+      closeSpDeal: handleCloseSpDeal,
+      CloseSpDeal: handleCloseSpDeal,
+      GetQr: handleGetQr,
+      Charge: handleCharge,
+      SendClosingReceipt: handleSendClosingReceipt,
+      AddCustomer: handleAddCustomer,
+      GetCustomer: handleGetCustomer,
+      RemoveCustomer: handleRemoveCustomer,
+      AddCard: handleAddCard,
+      GetCardList: handleGetCardList,
+      RemoveCard: handleRemoveCard,
     };
     const handler = handlers[method];
     if (!handler) return sendJson(res, err(501, `Метод ${method} мок-стендом пока не поддерживается`));
@@ -1492,6 +2170,29 @@ async function route(req, res) {
       return sendJson(res, err(13, 'Неверный Token (подпись) запроса'));
     }
     return sendJson(res, handler(body, req.headers));
+  }
+
+  // POST /payment/:id/sbp-pay — симуляция оплаты по QR-коду СБП в приложении банка
+  const sbpPayMatch = p.match(/^\/payment\/(\d+)\/sbp-pay$/);
+  if (sbpPayMatch && req.method === 'POST') {
+    const payment = state.payments[sbpPayMatch[1]];
+    if (!payment || !['NEW', 'FORM_SHOWED'].includes(payment.status)) {
+      return sendJson(res, err(8, 'Платёжная сессия СБП не найдена или уже завершена'), 404);
+    }
+    payment.panMask = 'SBP**0004';
+    payment.confirmedAmount = payment.amount;
+    payment.remaining = payment.amount;
+    setStatus(payment, 'CONFIRMED');
+    persist();
+    scheduleNotification(payment, 'CONFIRMED', { PaymentMethod: 'SBP' });
+    return sendJson(res, {
+      Success: true,
+      ErrorCode: '0',
+      PaymentId: payment.paymentId,
+      OrderId: payment.orderId,
+      Amount: payment.amount,
+      Status: 'CONFIRMED',
+    });
   }
 
   const formMatch = p.match(/^\/payment\/(\d+)$/);

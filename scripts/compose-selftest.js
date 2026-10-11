@@ -93,12 +93,18 @@ async function main() {
 
   const runId = `cmp-${Date.now()}`;
 
-  // 1. Healthchecks
+  // 1. Healthchecks + OpenAPI 3.1.0
   const hBank = await httpReq(TBANK_BASE, 'GET', '/health');
   check('tbank-mock /health === 200 ok', hBank.status === 200 && hBank.json() && hBank.json().ok === true);
 
   const hKassa = await httpReq(KASSA_BASE, 'GET', '/healthz');
   check('kassa-mock /healthz === 200 ok', hKassa.status === 200 && hKassa.json() && hKassa.json().ok === true);
+
+  const oaBank = (await httpReq(TBANK_BASE, 'GET', '/openapi.json')).json();
+  check('tbank-mock /openapi.json отдаёт OpenAPI 3.1.0', Boolean(oaBank && oaBank.openapi === '3.1.0' && oaBank.paths['/v2/Init']));
+
+  const oaKassa = (await httpReq(KASSA_BASE, 'GET', '/openapi.json')).json();
+  check('kassa-mock /openapi.json отдаёт OpenAPI 3.1.0', Boolean(oaKassa && oaKassa.openapi === '3.1.0' && oaKassa.paths['/possystem/v1/validate']));
 
   // 2. Т-Банк: сквозной платёж + чарджбэк e2e
   const orderId = `${runId}-ord-1`;

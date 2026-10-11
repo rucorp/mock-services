@@ -193,6 +193,58 @@ async function main() {
     assert.strictEqual(core.checkAdminAuth({ headers: {}, url: '/admin?admin_token=sec-1' }, 'sec-1'), true);
   });
 
+  check('createJournal формирует готовый curl-сниппет для каждого запроса', () => {
+    const j = core.createJournal({ baseUrl: 'http://localhost:3100' });
+    j.record({ method: 'POST', path: '/v2/Init', status: 200, ms: 5, body: { OrderId: 'o-1', Amount: '1000' }, headers: { 'x-mock-scenario': 'webhook-drop' } });
+    const entry = j.list()[0];
+    assert.ok(entry.curl.includes("curl -sS -X POST 'http://localhost:3100/v2/Init'"));
+    assert.ok(entry.curl.includes('x-mock-scenario: webhook-drop'));
+  });
+
+  check('createSandboxManager изолирует песочницы по X-Mock-Sandbox и сохраняет ссылки state', () => {
+    const st = { payments: {}, notifications: {} };
+    const notifRef = st.notifications;
+    const sb = core.createSandboxManager({
+      state: st,
+      initialStateFactory: () => ({ payments: {}, notifications: {} }),
+    });
+    st.payments.p1 = { id: 'p1' };
+    sb.switchTo('ci-run-2');
+    assert.strictEqual(st.notifications, notifRef, 'идентичность ссылок должна сохраняться при переключении песочницы');
+    assert.strictEqual(Object.keys(st.payments).length, 0, 'новая песочница чистая');
+    st.payments.p2 = { id: 'p2' };
+    sb.switchTo('default');
+    assert.ok(st.payments.p1 && !st.payments.p2, 'песочница default сохранила p1');
+  });
+
+  // Проверка активного экзаменатора вебхуков мерчанта (verifyMerchantWebhook)
+  const merchSrv = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      const payload = JSON.parse(raw || '{}');
+      if (payload.Token === 'f'.repeat(64)) {
+        res.writeHead(403);
+        res.end('BAD_SIGN');
+        return;
+      }
+      res.writeHead(200);
+      res.end('OK');
+    });
+  });
+  const merchPort = await listen(merchSrv);
+  const examReport = await core.verifyMerchantWebhook({
+    url: `http://127.0.0.1:${merchPort}/webhook`,
+    provider: 'tbank-eacq',
+    signPayload: () => 'a'.repeat(64),
+  });
+  check('verifyMerchantWebhook проверяет валидный вебхук, дубль и отклонение поддельного Token', () => {
+    assert.strictEqual(examReport.readyForProd, true);
+    assert.strictEqual(examReport.passed, 3);
+    assert.strictEqual(examReport.total, 3);
+  });
+  merchSrv.close();
+
   hook.close();
   fs.rmSync(dir, { recursive: true, force: true });
   console.log(`\nИТОГ: ${passed} passed, ${failed} failed\n`);

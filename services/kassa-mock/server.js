@@ -22,7 +22,10 @@ const http = require('http');
 const crypto = require('crypto');
 
 const core = require('../../packages/core');
-const { createLog, readBody, send, sendJson, escapeHtml, checkAdminAuth } = core;
+const {
+  createLog, readBody, send, sendJson, escapeHtml, checkAdminAuth,
+  parseScenarioSpec, applyRequestChaos, createSandboxManager, verifyMerchantWebhook,
+} = core;
 // Журнал входящих запросов: интегратору видно в /admin/journal (спека §2).
 const journal = core.createJournal({ size: 200 });
 
@@ -72,26 +75,72 @@ const store = core.createStore({ stateFile: MOCK_STATE_FILE, log: console.error 
 const { state } = store;
 const persist = store.persist;
 
+const DEFAULT_FN_CAPACITY = Math.max(1, parseInt(process.env.MOCK_FN_CAPACITY || '250000', 10) || 250000);
+const SHIFT_MAX_DURATION_MS = 24 * 60 * 60 * 1000;
+
+function createInitialKassaState() {
+  const defaultMode = ['online', 'offline', 'reject'].includes(String(MOCK_OFD_MODE).toLowerCase())
+    ? String(MOCK_OFD_MODE).toLowerCase()
+    : 'online';
+  return {
+    counters: { deviceId: 1001, uuid: Date.now(), fd: 50000, notification: 1 },
+    tokens: {},
+    receipts: {},
+    externalIds: {},
+    callbacks: {},
+    ofdQueue: {},
+    clockOffsetMs: 0,
+    cashbox: {
+      deviceId: 0,
+      name: 'KASSA-MOCK-1',
+      kktState: 'Готова к работе',
+      tariffType: 'Безлимитный (mock)',
+      checksCnt: 0,
+      fnVolumePercent: 3,
+      downUntil: 0,
+      ofdMode: defaultMode,
+    },
+    shift: {
+      status: 'open',
+      shiftNumber: 77,
+      openedAt: new Date().toISOString(),
+      openedAtMs: 0,
+      closedAt: null,
+      receiptsCount: 0,
+      sellTotal: 0,
+      sellRefundTotal: 0,
+      buyTotal: 0,
+      buyRefundTotal: 0,
+    },
+    zReports: [],
+    fn: {
+      fnNumber: process.env.MOCK_FN_NUMBER || '9999078902001294',
+      capacity: DEFAULT_FN_CAPACITY,
+      used: 0,
+      expiresAt: '2027-12-31T23:59:59.000Z',
+    },
+  };
+}
+
+const initDefaults = createInitialKassaState();
 Object.assign(state, {
-  counters: state.counters || { deviceId: 1001, uuid: Date.now(), fd: 50000, notification: 1 },
+  counters: state.counters || initDefaults.counters,
   tokens: state.tokens || {},
   receipts: state.receipts || {},
   externalIds: state.externalIds || {},
   callbacks: state.callbacks || {},
   ofdQueue: state.ofdQueue || {}, // uuid -> { uuid, externalId, queuedAt, status: 'pending'|'rejected', error }
   clockOffsetMs: state.clockOffsetMs || 0,
-  cashbox: state.cashbox || {
-    deviceId: 0,
-    name: 'KASSA-MOCK-1',
-    kktState: 'Готова к работе',
-    tariffType: 'Безлимитный (mock)',
-    checksCnt: 0,
-    fnVolumePercent: 3,
-    downUntil: 0,
-    ofdMode: ['online', 'offline', 'reject'].includes(String(MOCK_OFD_MODE).toLowerCase())
-      ? String(MOCK_OFD_MODE).toLowerCase()
-      : 'online',
-  },
+  cashbox: state.cashbox || initDefaults.cashbox,
+  shift: state.shift || initDefaults.shift,
+  zReports: state.zReports || [],
+  fn: state.fn || initDefaults.fn,
+});
+
+const sandboxManager = createSandboxManager({
+  state,
+  persist,
+  initialStateFactory: createInitialKassaState,
 });
 
 const clock = core.createVirtualClock({
@@ -124,6 +173,8 @@ const derr = core.createErrorCatalog({
     14: { message: 'Неверный логин или пароль', field: 'login, pass', hint: 'Креды стенда задаются env MOCK_FERMA_LOGIN / MOCK_FERMA_PASSWORD (или FERMA_LOGIN / FERMA_PASSWORD, по умолчанию loviitest / mockpass123).', doc: '#auth' },
     57: { message: 'Отказ печати по сценарию', field: 'external_id', hint: 'ExternalId с префиксом «fail-» или заголовок X-Mock-Scenario: fail — управляемый отказ ККТ. Уберите сценарий для нормального флоу.', doc: '#scenarios' },
     58: { message: 'Отказ проверки кода маркировки (Честный ЗНАК)', field: 'marking_code', hint: 'Код маркировки не прошёл проверку в ГИС МТ (сценарий X-Mock-Scenario: mark-fail или префикс FAIL- в коде). Проверьте КМ и статус товара.', doc: '#marking' },
+    62: { message: 'Смена ККТ закрыта или превысила 24 часа (ст. 4.3 54-ФЗ)', field: 'shift', hint: 'По 54-ФЗ длительность кассовой смены не может превышать 24 часа. Закройте смену (POST /possystem/v1/shift/close) и откройте новую (POST /possystem/v1/shift/open).', doc: '#shifts' },
+    63: { message: 'Исчерпан ресурс фискального накопителя (ФН переполнен)', field: 'fn', hint: 'Лимит фискальных документов в ФН исчерпан (POST /possystem/v1/fn/state для замены/сброса ФН или уберите сценарий fn-overflow).', doc: '#fn' },
     404: { message: 'Неизвестный маршрут', hint: 'Список маршрутов — /admin и README сервиса.', doc: '' },
     500: { message: 'Внутренняя ошибка мок-стенда', hint: 'Смотрите лог сервиса; воспроизводится — это дефект мока, заводите issue.', doc: '' },
   },
@@ -383,7 +434,7 @@ function validateReceipt(receipt, operation = 'sell', body = {}) {
     }
   }
 
-  // Проверка связки чека возврата (origin_external_id)
+  // Проверка связки чека возврата (origin_external_id): общая сумма + позиционный контроль количества
   const originExtId = body.origin_external_id || receipt.origin_external_id;
   if (originExtId) {
     const originUuid = state.externalIds[String(originExtId)];
@@ -397,6 +448,22 @@ function validateReceipt(receipt, operation = 'sell', body = {}) {
       : (originDoc.receipt?.total || 0);
     if (receipt.total > availableRefund) {
       return bad('receipt.total', `Сумма возврата ${receipt.total} больше доступного остатка ${availableRefund} по чеку «${originExtId}».`, '#refund');
+    }
+    if (originDoc.refundableItems && typeof originDoc.refundableItems === 'object') {
+      const reqQtyByName = {};
+      for (let i = 0; i < items.length; i += 1) {
+        const it = items[i] || {};
+        const key = String(it.name || '').trim();
+        if (!key) continue;
+        reqQtyByName[key] = (reqQtyByName[key] || 0) + Number(it.quantity || 0);
+        if (originDoc.refundableItems[key] !== undefined && reqQtyByName[key] > originDoc.refundableItems[key] + 1e-9) {
+          return bad(
+            `receipt.items[${i}].quantity`,
+            `Количество возврата по позиции «${key}» (${reqQtyByName[key]}) превышает доступный остаток к возврату (${originDoc.refundableItems[key]}) по чеку «${originExtId}».`,
+            '#refund',
+          );
+        }
+      }
     }
   }
 
@@ -494,9 +561,9 @@ function fiscalSnapshot(doc) {
     operation: doc.operation,
     ofd_inn: OFD_INN,
     fns_site: FNS_SITE,
-    fn_number: FN_NUMBER,
+    fn_number: (state.fn && state.fn.fnNumber) || FN_NUMBER,
     ecr_registration_number: ECR_RN,
-    shift_number: 77,
+    shift_number: doc.shiftNumber || (state.shift && state.shift.shiftNumber) || 77,
     receipt_datetime: new Date(doc.processedAt).toISOString().slice(0, 19),
     fiscal_receipt_number: doc.fiscalReceiptNumber,
     fiscal_document_number: doc.fiscalDocumentNumber,
@@ -702,9 +769,21 @@ function tickKassa() {
       state.cashbox.checksCnt += 1;
       doc.fiscalReceiptNumber = state.cashbox.checksCnt;
       doc.status = 'done';
+      if (state.shift) {
+        state.shift.receiptsCount = (state.shift.receiptsCount || 0) + 1;
+        const tot = doc.receipt?.total || 0;
+        if (doc.operation === 'sell' || doc.operation === 'sell_correction') state.shift.sellTotal = (state.shift.sellTotal || 0) + tot;
+        else if (doc.operation === 'sell_refund') state.shift.sellRefundTotal = (state.shift.sellRefundTotal || 0) + tot;
+        else if (doc.operation === 'buy' || doc.operation === 'buy_correction') state.shift.buyTotal = (state.shift.buyTotal || 0) + tot;
+        else if (doc.operation === 'buy_refund') state.shift.buyRefundTotal = (state.shift.buyRefundTotal || 0) + tot;
+      }
+      if (state.fn) {
+        state.fn.used = (state.fn.used || 0) + 1;
+        state.cashbox.fnVolumePercent = Math.min(100, Math.max(1, Math.round((state.fn.used / Math.max(1, state.fn.capacity)) * 100)));
+      }
       processOfdDelivery(doc);
       doc.payload = fiscalSnapshot(doc);
-      log(`\n[kassa-mock] ===== ЧЕК НАПЕЧАТАН (${doc.operation}) =====\n${customerReceiptText(doc)}\n============================================`);
+      log(`\n[kassa-mock] ===== ЧЕК НАПЕЧАТАТАН (${doc.operation}) =====\n${customerReceiptText(doc)}\n============================================`);
     }
     doc.callbackBody = JSON.stringify({
       uuid: doc.uuid,
@@ -736,10 +815,10 @@ setInterval(() => {
 
 /* ------------------------------------------------------------- request API */
 
-function createDocument(operation, group, body, scenarioHeader = '') {
+function createDocument(operation, group, body, scenarioHeader = '', preResolvedSpec = null) {
   const uuid = crypto.randomUUID();
   const externalId = String(body.external_id || '');
-  const spec = scenarios.resolve({
+  const spec = preResolvedSpec || scenarios.resolve({
     header: scenarioHeader,
     bodyScenario: body.mock_scenario || body.receipt?.mock_scenario || '',
     target: operation,
@@ -762,6 +841,15 @@ function createDocument(operation, group, body, scenarioHeader = '') {
   else if (spec.has('ofd-sent') || spec.has('ofd-online')) ofdScenarioMode = 'online';
 
   const supplierObj = items.find((it) => it && it.supplier_info)?.supplier_info || null;
+
+  let refundableItems = null;
+  if (['sell', 'buy'].includes(operation)) {
+    refundableItems = {};
+    for (const it of items) {
+      const k = String(it?.name || '').trim();
+      if (k) refundableItems[k] = (refundableItems[k] || 0) + Number(it.quantity || 0);
+    }
+  }
 
   const doc = {
     uuid,
@@ -788,6 +876,8 @@ function createDocument(operation, group, body, scenarioHeader = '') {
     originExternalId: originExtId ? String(originExtId) : null,
     prepaymentRemaining: isPrepaymentDoc ? (body.receipt?.total || 0) : null,
     refundableRemaining: ['sell', 'buy'].includes(operation) ? (body.receipt?.total || 0) : null,
+    refundableItems,
+    shiftNumber: (state.shift && state.shift.shiftNumber) || 77,
     fiscalReceiptNumber: null, // присваивается при печати
     fiscalDocumentNumber: ++state.counters.fd,
     callbackBody: null,
@@ -808,12 +898,20 @@ function createDocument(operation, group, body, scenarioHeader = '') {
     }
   }
 
-  // Списываем сумму возврата у исходного чека прихода/расхода
+  // Списываем сумму и попозиционное количество возврата у исходного чека прихода/расхода
   if (originExtId && !doc.forceFail && !doc.forceMarkFail) {
     const originUuid = state.externalIds[String(originExtId)];
     const originDoc = originUuid ? state.receipts[originUuid] : null;
     if (originDoc) {
       originDoc.refundableRemaining = Math.max(0, (originDoc.refundableRemaining ?? originDoc.receipt.total) - (body.receipt?.total || 0));
+      if (originDoc.refundableItems && typeof originDoc.refundableItems === 'object') {
+        for (const it of items) {
+          const k = String(it?.name || '').trim();
+          if (k && originDoc.refundableItems[k] !== undefined) {
+            originDoc.refundableItems[k] = Math.max(0, originDoc.refundableItems[k] - Number(it.quantity || 0));
+          }
+        }
+      }
     }
   }
 
@@ -843,22 +941,49 @@ function bodySummary(body) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const url = req.url.split('?')[0];
+  const parsedUrl = new URL(req.url, 'http://x');
+  const url = parsedUrl.pathname;
+
+  if (req.headers['x-mock-sandbox'] || parsedUrl.searchParams.get('sandbox')) {
+    sandboxManager.fromRequest(req);
+  }
 
   if (url.startsWith('/possystem/')) {
     const started = Date.now();
     const originalWriteHead = res.writeHead.bind(res);
     res.writeHead = (code, ...rest) => {
       const parsed = (() => { try { return JSON.parse(res.__mockBody || '{}'); } catch { return {}; } })();
-      journal.record({ method: req.method, path: url, status: code, ms: Date.now() - started, body: bodySummary(parsed) });
+      journal.record({
+        method: req.method,
+        path: url,
+        status: code,
+        ms: Date.now() - started,
+        body: bodySummary(parsed),
+        rawBody: res.__mockBody || '',
+        headers: req.headers,
+        baseUrl: MOCK_PUBLIC_BASE_URL,
+      });
       return originalWriteHead(code, ...rest);
     };
+
+    // Инъекция задержек и сетевых сбоев (X-Mock-Latency, X-Mock-Scenario: latency:..., http-500, http-504)
+    const chaosSpec = parseScenarioSpec(req.headers['x-mock-scenario'] || '');
+    const chaosResult = await applyRequestChaos(req, chaosSpec);
+    if (chaosResult.fault) {
+      return jsonRaw(res, chaosResult.fault.status, errBody(chaosResult.fault.status, chaosResult.fault.message));
+    }
   }
 
   try {
     // Опциональная защита /admin* по токену (A-20)
     if (url.startsWith('/admin') && !checkAdminAuth(req, MOCK_ADMIN_TOKEN)) {
       return jsonRaw(res, 401, errBody(11, 'Доступ к /admin ограничен MOCK_ADMIN_TOKEN'));
+    }
+
+    if (req.method === 'GET' && url === '/openapi.json') {
+      const specFile = require('path').join(__dirname, '..', '..', 'docs', 'openapi', 'kassa-mock.openapi.json');
+      const specObj = JSON.parse(require('fs').readFileSync(specFile, 'utf8'));
+      return sendJson(res, specObj);
     }
 
     if (req.method === 'GET' && url === '/admin/journal') {
@@ -868,10 +993,79 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url === '/healthz') {
       return sendJson(res, {
         ok: !isDown(),
+        sandbox: sandboxManager.current(),
         checks: state.cashbox.checksCnt,
         ofdMode: state.cashbox.ofdMode || 'online',
         ofdQueueCount: Object.keys(state.ofdQueue || {}).length,
+        shiftStatus: state.shift ? state.shift.status : 'open',
+        fnUsed: state.fn ? state.fn.used : 0,
+        fnCapacity: state.fn ? state.fn.capacity : DEFAULT_FN_CAPACITY,
       });
+    }
+
+    // Управление песочницами, сбросом и снимками состояния (RFC-001)
+    if (url === '/mock/sandboxes') {
+      if (req.method === 'GET') {
+        return sendJson(res, { current: sandboxManager.current(), sandboxes: sandboxManager.list() });
+      }
+      if (req.method === 'POST') {
+        const raw = await readBody(req);
+        let body = {};
+        try { body = JSON.parse(raw || '{}'); } catch { /* ignore */ }
+        const name = sandboxManager.switchTo(body.sandbox || 'default');
+        return sendJson(res, { ok: true, current: name, sandboxes: sandboxManager.list() });
+      }
+      if (req.method === 'DELETE') {
+        const raw = await readBody(req);
+        let body = {};
+        try { body = JSON.parse(raw || '{}'); } catch { /* ignore */ }
+        const resReset = sandboxManager.reset(body.sandbox || parsedUrl.searchParams.get('sandbox') || undefined);
+        return sendJson(res, { ...resReset, current: sandboxManager.current() });
+      }
+    }
+
+    if (url === '/mock/reset' && req.method === 'POST') {
+      const raw = await readBody(req);
+      let body = {};
+      try { body = JSON.parse(raw || '{}'); } catch { /* ignore */ }
+      const targetSandbox = body.sandbox || req.headers['x-mock-sandbox'] || undefined;
+      const resReset = sandboxManager.reset(targetSandbox);
+      scenarios.clearRules();
+      scenarios.clearHistory();
+      journal.clear();
+      return sendJson(res, resReset);
+    }
+
+    if (url === '/mock/state') {
+      if (req.method === 'GET') {
+        return sendJson(res, sandboxManager.exportState());
+      }
+      if (req.method === 'POST' || req.method === 'PUT') {
+        const raw = await readBody(req);
+        let body = {};
+        try { body = JSON.parse(raw || '{}'); } catch { return jsonRaw(res, 400, errBody(4, 'Некорректный JSON')); }
+        return sendJson(res, sandboxManager.importState(body));
+      }
+    }
+
+    if (url === '/mock/verify-merchant' && req.method === 'POST') {
+      const raw = await readBody(req);
+      let body = {};
+      try { body = JSON.parse(raw || '{}'); } catch { return jsonRaw(res, 400, errBody(4, 'Некорректный JSON')); }
+      const targetUrl = String(body.url || body.callback_url || '').trim();
+      if (!targetUrl) {
+        return jsonRaw(res, 400, errBody(4, 'Передайте url обработчика callback фискализации', { field: 'url' }));
+      }
+      try {
+        const report = await verifyMerchantWebhook({
+          url: targetUrl,
+          provider: 'ferma-ofd',
+          blockPrivateHosts: BLOCK_PRIVATE_WEBHOOKS,
+        });
+        return sendJson(res, report);
+      } catch (e) {
+        return jsonRaw(res, 500, errBody(500, e.message));
+      }
     }
 
     // Виртуальные часы (этап 7, бриф §3.2)
@@ -883,6 +1077,9 @@ const server = http.createServer(async (req, res) => {
         try { spec = JSON.parse(raw || '{}'); } catch { return jsonRaw(res, 400, errBody(4, 'Некорректный JSON для /mock/time')); }
         try {
           const snap = clock.set(spec);
+          if (spec.reset && state.shift && state.shift.openedAtMs) {
+            state.shift.openedAtMs = 0;
+          }
           tickKassa();
           return sendJson(res, snap);
         } catch (e) {
@@ -914,7 +1111,171 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // Очередь ОФД и управление связью с ОФД (этап 6, бриф §3.1)
+    // Смены ККТ и Z-отчёты (ст. 4.3 54-ФЗ: длительность смены ≤ 24 часа)
+    if (req.method === 'GET' && url === '/possystem/v1/shift/status') {
+      const sh = state.shift || initDefaults.shift;
+      const durationMs = sh.status === 'open' && sh.openedAtMs > 0
+        ? Math.max(0, clock.now() - sh.openedAtMs)
+        : 0;
+      const expired = sh.status === 'open' && durationMs > SHIFT_MAX_DURATION_MS;
+      return sendJson(res, {
+        status: sh.status,
+        shiftNumber: sh.shiftNumber,
+        openedAt: sh.openedAt,
+        closedAt: sh.closedAt || null,
+        durationMs,
+        maxDurationMs: SHIFT_MAX_DURATION_MS,
+        expired,
+        receiptsCount: sh.receiptsCount || 0,
+        totals: {
+          sell: sh.sellTotal || 0,
+          sell_refund: sh.sellRefundTotal || 0,
+          buy: sh.buyTotal || 0,
+          buy_refund: sh.buyRefundTotal || 0,
+        },
+        zReportsCount: (state.zReports || []).length,
+        lastZReport: (state.zReports && state.zReports.length) ? state.zReports[state.zReports.length - 1] : null,
+      });
+    }
+
+    if (req.method === 'POST' && url === '/possystem/v1/shift/open') {
+      const raw = await readBody(req);
+      res.__mockBody = raw;
+      if (!state.shift) state.shift = { ...initDefaults.shift };
+      if (state.shift.status === 'open' && state.shift.openedAtMs > 0) {
+        return jsonRaw(res, 200, errBody(62, `Смена ККТ №${state.shift.shiftNumber} уже открыта`, {
+          field: 'shift',
+          hint: 'Закройте текущую смену через POST /possystem/v1/shift/close перед открытием новой.',
+        }));
+      }
+      if (state.shift.status === 'closed') {
+        state.shift.shiftNumber = (state.shift.shiftNumber || 77) + 1;
+      }
+      state.shift.status = 'open';
+      state.shift.openedAt = clock.iso();
+      state.shift.openedAtMs = clock.now();
+      state.shift.closedAt = null;
+      state.shift.receiptsCount = 0;
+      state.shift.sellTotal = 0;
+      state.shift.sellRefundTotal = 0;
+      state.shift.buyTotal = 0;
+      state.shift.buyRefundTotal = 0;
+      persist();
+      return sendJson(res, {
+        ok: true,
+        status: state.shift.status,
+        shiftNumber: state.shift.shiftNumber,
+        openedAt: state.shift.openedAt,
+        fdNumber: ++state.counters.fd,
+      });
+    }
+
+    if (req.method === 'POST' && url === '/possystem/v1/shift/close') {
+      const raw = await readBody(req);
+      res.__mockBody = raw;
+      if (!state.shift || state.shift.status === 'closed') {
+        return jsonRaw(res, 200, errBody(62, 'Смена ККТ уже закрыта', {
+          field: 'shift',
+          hint: 'Откройте новую смену через POST /possystem/v1/shift/open.',
+        }));
+      }
+      const fdNumber = ++state.counters.fd;
+      if (state.fn) state.fn.used = (state.fn.used || 0) + 1;
+      const closedAt = clock.iso();
+      const zReport = {
+        shiftNumber: state.shift.shiftNumber,
+        fdNumber,
+        fpd: String(1000000000 + (fdNumber * 7919) % 8999999999),
+        fnNumber: (state.fn && state.fn.fnNumber) || FN_NUMBER,
+        openedAt: state.shift.openedAt,
+        closedAt,
+        receiptsCount: state.shift.receiptsCount || 0,
+        totals: {
+          sell: state.shift.sellTotal || 0,
+          sell_refund: state.shift.sellRefundTotal || 0,
+          buy: state.shift.buyTotal || 0,
+          buy_refund: state.shift.buyRefundTotal || 0,
+        },
+        ofdQueueCount: Object.keys(state.ofdQueue || {}).length,
+      };
+      state.shift.status = 'closed';
+      state.shift.closedAt = closedAt;
+      if (!Array.isArray(state.zReports)) state.zReports = [];
+      state.zReports.push(zReport);
+      persist();
+      return sendJson(res, { ok: true, status: 'closed', zReport });
+    }
+
+    // Ресурс Фискального Накопителя (ФН)
+    if (url === '/possystem/v1/fn/state') {
+      if (!state.fn) state.fn = { ...initDefaults.fn };
+      if (req.method === 'GET') {
+        const used = state.fn.used || 0;
+        const capacity = Math.max(1, state.fn.capacity || DEFAULT_FN_CAPACITY);
+        return sendJson(res, {
+          fnNumber: state.fn.fnNumber,
+          used,
+          capacity,
+          remaining: Math.max(0, capacity - used),
+          volumePercent: Math.min(100, Math.round((used / capacity) * 100)),
+          overflow: used >= capacity,
+          expiresAt: state.fn.expiresAt,
+        });
+      }
+      if (req.method === 'POST' || req.method === 'PUT') {
+        const raw = await readBody(req);
+        res.__mockBody = raw;
+        let body = {};
+        try { body = JSON.parse(raw || '{}'); } catch { return jsonRaw(res, 400, errBody(4, 'Некорректный JSON')); }
+        if (body.reset) {
+          state.fn.used = 0;
+          if (body.fnNumber) state.fn.fnNumber = String(body.fnNumber);
+          if (body.capacity !== undefined) state.fn.capacity = Math.max(1, parseInt(body.capacity, 10) || DEFAULT_FN_CAPACITY);
+        } else {
+          if (body.capacity !== undefined) state.fn.capacity = Math.max(1, parseInt(body.capacity, 10) || DEFAULT_FN_CAPACITY);
+          if (body.used !== undefined) state.fn.used = Math.max(0, parseInt(body.used, 10) || 0);
+          if (body.fnNumber) state.fn.fnNumber = String(body.fnNumber);
+        }
+        state.cashbox.fnVolumePercent = Math.min(100, Math.round(((state.fn.used || 0) / Math.max(1, state.fn.capacity)) * 100));
+        persist();
+        return sendJson(res, {
+          ok: true,
+          fnNumber: state.fn.fnNumber,
+          used: state.fn.used,
+          capacity: state.fn.capacity,
+          remaining: Math.max(0, state.fn.capacity - state.fn.used),
+          volumePercent: state.cashbox.fnVolumePercent,
+          overflow: state.fn.used >= state.fn.capacity,
+        });
+      }
+    }
+
+    // Dry-run валидация чека без фискализации и без создания документа (POST /possystem/v1/validate)
+    const validateMatch = /^\/possystem\/v1\/(?:([^/]+)\/)?validate$/.exec(url);
+    if (req.method === 'POST' && validateMatch) {
+      const raw = await readBody(req);
+      res.__mockBody = raw;
+      let body;
+      try { body = JSON.parse(raw || '{}'); } catch { return jsonRaw(res, 200, errBody(4, 'Неверный формат запроса')); }
+      const operation = String(body.operation || body.type || 'sell');
+      const receipt = body.receipt || body;
+      const problem = validateReceipt(receipt, operation, body);
+      if (problem) {
+        return sendJson(res, {
+          valid: false,
+          operation,
+          ...err(4, `Чек не прошёл проверку кассы: ${problem.field}`, problem),
+        });
+      }
+      return sendJson(res, {
+        valid: true,
+        error: null,
+        operation,
+        total: receipt.total,
+        itemsCount: (receipt.items || []).length,
+        vatBreakdown: computeVatBreakdown(receipt.items || []),
+      });
+    }
     if (req.method === 'GET' && url === '/possystem/v1/ofd/queue') {
       const items = Object.values(state.ofdQueue || {});
       return sendJson(res, {
@@ -961,8 +1322,8 @@ const server = http.createServer(async (req, res) => {
         <td>${((d.receipt?.total || 0) / 100).toFixed(2)} р</td>
         <td>${d.callbackBody ? `<form method="POST" action="/admin/action" style="display:inline"><input type="hidden" name="action" value="resend-callback"><input type="hidden" name="uuid" value="${escapeHtml(d.uuid)}"><button style="width:auto;padding:2px 6px;font-size:11px">callback</button></form>` : '—'}</td></tr>`).join('');
       const journalRows = journal.list().slice(-15).reverse()
-        .map((e) => `<tr><td>${escapeHtml(e.at.slice(11, 19))}</td><td>${escapeHtml(e.method)}</td><td><code>${escapeHtml(e.path)}</code></td><td>${escapeHtml(Object.entries(e.body || {}).map(([k, v]) => `${k}=${v}`).join(' '))}</td><td>${e.status}</td><td>${e.ms} мс</td></tr>`)
-        .join('') || '<tr><td colspan="6">запросов ещё не было</td></tr>';
+        .map((e) => `<tr><td>${escapeHtml(e.at.slice(11, 19))}</td><td>${escapeHtml(e.method)}</td><td><code>${escapeHtml(e.path)}</code></td><td>${escapeHtml(Object.entries(e.body || {}).map(([k, v]) => `${k}=${v}`).join(' '))}</td><td>${e.status}</td><td>${e.ms} мс</td><td><code style="font-size:10px">${escapeHtml(String(e.curl || '').slice(0, 70))}…</code></td></tr>`)
+        .join('') || '<tr><td colspan="7">запросов ещё не было</td></tr>';
       return send(res, 200, `<html><head><meta charset="utf-8"><title>kassa-mock</title><style>
 body{font-family:monospace;background:#111;color:#ddd;margin:20px}table{border-collapse:collapse;width:100%}
 td,th{border:1px solid #444;padding:4px 8px;font-size:13px}th{background:#222}
@@ -1041,6 +1402,27 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
       if (state.externalIds[externalId]) {
         return jsonRaw(res, 200, errBody(12, `Идентификатор счёта (external_id) «${externalId}» уже существует`));
       }
+
+      const opSpec = scenarios.resolve({
+        header: req.headers['x-mock-scenario'] || '',
+        bodyScenario: body.mock_scenario || body.receipt?.mock_scenario || '',
+        target: operation,
+        context: { externalId, group: groupCode, operation },
+      });
+
+      // Проверка ресурса Фискального Накопителя (ФН) — код 63
+      if (opSpec.has('fn-overflow') || (state.fn && state.fn.used >= state.fn.capacity)) {
+        return jsonRaw(res, 200, errBody(63, `Исчерпан ресурс фискального накопителя ФН №${(state.fn && state.fn.fnNumber) || FN_NUMBER} (${state.fn ? state.fn.used : 0}/${state.fn ? state.fn.capacity : DEFAULT_FN_CAPACITY})`));
+      }
+
+      // Проверка смены ККТ (ст. 4.3 54-ФЗ: не более 24 часов и смена должна быть открыта) — код 62
+      if (state.shift && state.shift.status === 'closed') {
+        return jsonRaw(res, 200, errBody(62, 'Смена ККТ закрыта — откройте новую смену (POST /possystem/v1/shift/open) перед фискализацией чека'));
+      }
+      if (opSpec.has('shift-expired') || (state.shift && state.shift.openedAtMs > 0 && clock.now() - state.shift.openedAtMs > SHIFT_MAX_DURATION_MS)) {
+        return jsonRaw(res, 200, errBody(62, `Превышена максимальная продолжительность кассовой смены 24 часа (ст. 4.3 54-ФЗ, смена №${state.shift ? state.shift.shiftNumber : 77}) — закройте смену Z-отчётом (POST /possystem/v1/shift/close)`));
+      }
+
       if (VALIDATE_RECEIPTS) {
         const problem = validateReceipt(body.receipt, operation, body);
         if (problem) {
@@ -1049,7 +1431,7 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
         }
       }
 
-      const doc = createDocument(operation, groupCode, body, req.headers['x-mock-scenario']);
+      const doc = createDocument(operation, groupCode, body, req.headers['x-mock-scenario'], opSpec);
       if (doc.hang) {
         state.receipts[doc.uuid] = doc;
         state.externalIds[externalId] = doc.uuid;

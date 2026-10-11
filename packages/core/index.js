@@ -138,15 +138,45 @@ function escapeHtml(value) {
 /* ---------------------------------------------------------------- journal */
 
 /**
- * Журнал входящих запросов (спека §2: «журнал запросов»): последние N
- * обращений к API с методом, путём, ключевыми полями, кодом ответа и
- * длительностью. Отдаётся в /admin/journal — интегратору видно, как мок
- * понял его запрос, без чтения логов контейнера.
+ * Генерация готовой команды curl для воспроизведения запроса из журнала (/admin).
  */
-function createJournal({ size = 200 } = {}) {
+function buildCurlCommand({ baseUrl = 'http://localhost:3100', method = 'POST', path: reqPath = '/', headers = {}, rawBody = '', body = null }) {
+  const fullUrl = `${String(baseUrl).replace(/\/$/, '')}${reqPath}`;
+  const parts = [`curl -sS -X ${method} '${fullUrl}'`];
+  parts.push("-H 'Content-Type: application/json'");
+  for (const [k, v] of Object.entries(headers || {})) {
+    if (!v) continue;
+    const low = k.toLowerCase();
+    if (low === 'x-mock-scenario' || low === 'x-mock-sandbox' || low === 'x-mock-latency') {
+      parts.push(`-H '${k}: ${String(v).replace(/'/g, "'\\''")}'`);
+    }
+  }
+  const payloadStr = rawBody
+    ? String(rawBody)
+    : (body && Object.keys(body).length ? JSON.stringify(body) : '');
+  if (payloadStr) {
+    parts.push(`-d '${payloadStr.replace(/'/g, "'\\''")}'`);
+  }
+  return parts.join(' ');
+}
+
+/**
+ * Журнал входящих запросов (спека §2: «журнал запросов»): последние N
+ * обращений к API с методом, путём, ключевыми полями, кодом ответа,
+ * длительностью и готовой командой curl для воспроизведения.
+ */
+function createJournal({ size = 200, baseUrl = '' } = {}) {
   const entries = [];
   function record(entry) {
-    entries.push({ at: new Date().toISOString(), ...entry });
+    const curl = entry.curl || buildCurlCommand({
+      baseUrl: entry.baseUrl || baseUrl || 'http://localhost:3100',
+      method: entry.method || 'POST',
+      path: entry.path || '/',
+      headers: entry.headers || {},
+      rawBody: entry.rawBody || '',
+      body: entry.body || null,
+    });
+    entries.push({ at: new Date().toISOString(), ...entry, curl });
     if (entries.length > size) entries.splice(0, entries.length - size);
   }
   return { record, list: () => entries.slice(), clear: () => { entries.length = 0; } };
@@ -654,6 +684,329 @@ function checkAdminAuth(req, adminToken = process.env.MOCK_ADMIN_TOKEN || '') {
   return false;
 }
 
+/* ------------------------------------------- chaos / latency / sandboxes */
+
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Извлечение управляемой задержки и сетевых сбоев из заголовков/сценариев:
+ *   X-Mock-Latency: 250 (или X-Mock-Scenario: latency:250ms) -> ждёт 250 мс
+ *   X-Mock-Scenario: http-500 / timeout-504 -> возвращает код сбоя шлюза
+ */
+async function applyRequestChaos(req, scenarioSpec = null) {
+  const spec = scenarioSpec || parseScenarioSpec(req.headers && req.headers['x-mock-scenario']);
+  const headerLat = req.headers && req.headers['x-mock-latency'];
+  const scLat = spec.get('latency') || spec.get('delay');
+  const delayMs = parseDuration(headerLat || (scLat && scLat !== true ? scLat : null));
+  if (delayMs && delayMs > 0) {
+    await sleepMs(Math.min(delayMs, 30000));
+  }
+  if (spec.has('http-500') || spec.has('gateway-500')) {
+    return { abortStatus: 500, abortMessage: 'Simulated gateway 500 error (X-Mock-Scenario: http-500)' };
+  }
+  if (spec.has('http-504') || spec.has('gateway-timeout')) {
+    return { abortStatus: 504, abortMessage: 'Simulated gateway 504 timeout (X-Mock-Scenario: http-504)' };
+  }
+  return { abortStatus: null, delayMs: delayMs || 0 };
+}
+
+/**
+ * Управление состоянием и изолированными песочницами (RFC-001):
+ *   - сохраняет идентичность ссылок вложенных коллекций state (чтобы очередь
+ *     вебхуков не теряла ссылку при reset/import/переключении песочницы);
+ *   - поддерживает X-Mock-Sandbox (или ?sandbox=): у каждой песочницы свой
+ *     изолированный срез состояния, при этом без заголовка используется
+ *     дефолтная песочница ('default') — 100% обратная совместимость.
+ */
+function createSandboxManager({ state, persist = () => {}, initialStateFactory }) {
+  const sandboxes = new Map();
+  let activeId = 'default';
+
+  const clone = (obj) => JSON.parse(JSON.stringify(obj));
+
+  function clearAndMergeInPlace(target, source) {
+    for (const k of Object.keys(target)) {
+      if (isPlainObject(target[k]) && isPlainObject(source[k])) {
+        for (const subKey of Object.keys(target[k])) {
+          if (!(subKey in source[k])) delete target[k][subKey];
+        }
+        mergeInto(target[k], clone(source[k]));
+      } else if (!(k in source)) {
+        delete target[k];
+      } else {
+        target[k] = clone(source[k]);
+      }
+    }
+    for (const [k, v] of Object.entries(source)) {
+      if (!(k in target)) target[k] = clone(v);
+    }
+  }
+
+  function resolveSandboxId(req) {
+    if (!req || !req.headers) return 'default';
+    const hdr = String(req.headers['x-mock-sandbox'] || '').trim();
+    if (hdr) return hdr.replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 64) || 'default';
+    try {
+      const u = new URL(req.url || '/', 'http://localhost');
+      const q = u.searchParams.get('sandbox');
+      if (q) return String(q).replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 64) || 'default';
+    } catch { /* ignore */ }
+    return 'default';
+  }
+
+  function switchTo(sandboxId = 'default') {
+    const id = String(sandboxId || 'default');
+    if (id === activeId) {
+      if (!sandboxes.has(id)) {
+        sandboxes.set(id, { id, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), snapshot: clone(state) });
+      }
+      return id;
+    }
+    // Сохраняем текущую активную песочницу
+    sandboxes.set(activeId, {
+      id: activeId,
+      createdAt: (sandboxes.get(activeId) && sandboxes.get(activeId).createdAt) || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      snapshot: clone(state),
+    });
+    // Загружаем целевую или создаём чистую
+    if (!sandboxes.has(id)) {
+      const fresh = typeof initialStateFactory === 'function' ? initialStateFactory() : {};
+      sandboxes.set(id, { id, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), snapshot: clone(fresh) });
+    }
+    const targetSnap = sandboxes.get(id).snapshot;
+    clearAndMergeInPlace(state, targetSnap);
+    activeId = id;
+    return activeId;
+  }
+
+  function reset(sandboxId = activeId) {
+    const id = String(sandboxId || activeId || 'default');
+    const fresh = typeof initialStateFactory === 'function' ? initialStateFactory() : {};
+    if (id === activeId) {
+      clearAndMergeInPlace(state, fresh);
+      persist();
+    }
+    sandboxes.set(id, {
+      id,
+      createdAt: (sandboxes.get(id) && sandboxes.get(id).createdAt) || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      snapshot: clone(fresh),
+    });
+    return { ok: true, sandbox: id };
+  }
+
+  function exportState() {
+    return {
+      sandbox: activeId,
+      exportedAt: new Date().toISOString(),
+      state: clone(state),
+    };
+  }
+
+  function importState(payload = {}) {
+    const nextState = payload && payload.state && isPlainObject(payload.state) ? payload.state : payload;
+    if (!isPlainObject(nextState)) throw new Error('Ожидается JSON-объект состояния');
+    clearAndMergeInPlace(state, nextState);
+    persist();
+    return { ok: true, sandbox: activeId };
+  }
+
+  function list() {
+    sandboxes.set(activeId, {
+      id: activeId,
+      createdAt: (sandboxes.get(activeId) && sandboxes.get(activeId).createdAt) || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      snapshot: clone(state),
+    });
+    return Array.from(sandboxes.values()).map((s) => ({
+      id: s.id,
+      active: s.id === activeId,
+      createdAt: s.createdAt,
+      updatedAt: s.updatedAt,
+    }));
+  }
+
+  return {
+    resolveSandboxId,
+    fromRequest: (req) => switchTo(resolveSandboxId(req)),
+    switchTo,
+    reset,
+    exportState,
+    importState,
+    list,
+    getActiveId: () => activeId,
+    current: () => activeId,
+    getCurrent: () => activeId,
+  };
+}
+
+/**
+ * Активный экзаменатор вебхуков интегратора (спека §1.4 «Контракт-тесты как продукт»):
+ * прогоняет серию проб против webhook-эндпоинта мерчанта и выдаёт отчёт о
+ * готовности обработчика вебхуков к боевому контуру.
+ */
+async function verifyMerchantWebhook({
+  url,
+  provider = 'tbank-eacq',
+  terminalKey = 'TBANKMOCKTEST',
+  signPayload = null,
+  blockPrivateHosts = false,
+} = {}) {
+  if (!url || typeof url !== 'string') {
+    throw new Error('Передайте url вебхука мерчанта для проверки (например, {"url":"http://localhost:8000/webhook"})');
+  }
+  if (blockPrivateHosts && isPrivateHost(url)) {
+    throw new Error(`Адрес ${url} заблокирован политикой MOCK_BLOCK_PRIVATE_WEBHOOKS`);
+  }
+
+  const checks = [];
+  const probeOrderId = `mock-verify-${Date.now()}`;
+  const probePaymentId = String(990000000 + Math.floor(Math.random() * 9000000));
+
+  if (provider === 'tbank-eacq' || provider === 'tbank') {
+    const basePayload = {
+      TerminalKey: terminalKey,
+      OrderId: probeOrderId,
+      Success: true,
+      Status: 'AUTHORIZED',
+      PaymentId: probePaymentId,
+      ErrorCode: '0',
+      Amount: 10000,
+      Pan: '220138**0013',
+      ExpDate: '1227',
+    };
+    const validToken = typeof signPayload === 'function' ? signPayload(basePayload) : '0'.repeat(64);
+    const validEvent = { ...basePayload, Token: validToken };
+
+    // 1. Валидная подписанная нотификация -> ожидаем 200 и тело "OK"
+    try {
+      const r1 = await postJson(url, validEvent, 5000);
+      const isOk = r1.statusCode === 200 && String(r1.body || '').trim() === 'OK';
+      checks.push({
+        id: 'valid_signed_webhook',
+        title: 'Приём валидной подписанной нотификации и ответ ровно "OK"',
+        passed: isOk,
+        statusCode: r1.statusCode,
+        responseBody: String(r1.body || '').slice(0, 120),
+        hint: isOk ? null : 'Обработчик нотификаций Т-Банка обязан вернуть HTTP 200 с телом ровно "OK" (без JSON-обёрток), иначе банк уйдёт в 24-часовые ретраи.',
+      });
+    } catch (e) {
+      checks.push({
+        id: 'valid_signed_webhook',
+        title: 'Приём валидной подписанной нотификации и ответ ровно "OK"',
+        passed: false,
+        error: e.message,
+        hint: 'Эндпоинт недоступен или превысил таймаут 5 с.',
+      });
+    }
+
+    // 2. Дубль той же самой нотификации (проверка идемпотентности) -> ожидаем 200 "OK" без 500
+    try {
+      const r2 = await postJson(url, validEvent, 5000);
+      const isOk = r2.statusCode === 200 && String(r2.body || '').trim() === 'OK';
+      checks.push({
+        id: 'duplicate_idempotency',
+        title: 'Идемпотентная обработка повторной нотификации (дубль вебхука)',
+        passed: isOk,
+        statusCode: r2.statusCode,
+        responseBody: String(r2.body || '').slice(0, 120),
+        hint: isOk ? null : 'Повторная доставка уже обработанного события должна идемпотентно возвращать 200 "OK", не вызывая 500 и не дублируя проводку.',
+      });
+    } catch (e) {
+      checks.push({
+        id: 'duplicate_idempotency',
+        title: 'Идемпотентная обработка повторной нотификации (дубль вебхука)',
+        passed: false,
+        error: e.message,
+      });
+    }
+
+    // 3. Поддельная подпись Token -> мерчант ОБЯЗАН отклонить (не 200 "OK")
+    try {
+      const badEvent = { ...basePayload, Amount: 99999900, Token: 'f'.repeat(64) };
+      const r3 = await postJson(url, badEvent, 5000);
+      const rejected = r3.statusCode >= 400 || String(r3.body || '').trim() !== 'OK';
+      checks.push({
+        id: 'invalid_signature_rejected',
+        title: 'Отклонение вебхука с поддельным Token (защита от подделки оплаты)',
+        passed: rejected,
+        statusCode: r3.statusCode,
+        responseBody: String(r3.body || '').slice(0, 120),
+        hint: rejected ? null : 'КРИТИЧНО: ваш обработчик ответил 200 "OK" на вебхук с неверным Token! Проверяйте sha256-подпись до изменения статуса заказа.',
+      });
+    } catch (e) {
+      checks.push({
+        id: 'invalid_signature_rejected',
+        title: 'Отклонение вебхука с поддельным Token',
+        passed: false,
+        error: e.message,
+      });
+    }
+  } else {
+    // Ferma OFD callback verification
+    const probeUuid = `00000000-0000-4000-8000-${String(Date.now()).slice(-12).padStart(12, '0')}`;
+    const callbackPayload = {
+      uuid: probeUuid,
+      external_id: probeOrderId,
+      group_code: 'Main',
+      type: 'sell',
+      status: 'done',
+      ofd_status: 'sent',
+      timestamp: new Date().toISOString(),
+      error: null,
+      payload: {
+        total: 10000,
+        fiscal_document_number: 59999,
+        fiscal_document_attribute: '1234567890',
+        fn_number: '9999078902001294',
+        receipt_datetime: new Date().toISOString().slice(0, 19),
+      },
+    };
+    try {
+      const r1 = await postJson(url, callbackPayload, 5000);
+      const r2 = await postJson(url, callbackPayload, 5000);
+      const ok1 = r1.statusCode >= 200 && r1.statusCode < 300;
+      const ok2 = r2.statusCode >= 200 && r2.statusCode < 300;
+      checks.push({
+        id: 'valid_fiscal_callback',
+        title: 'Приём callback фискализации Ferma (HTTP 2xx)',
+        passed: ok1,
+        statusCode: r1.statusCode,
+        responseBody: String(r1.body || '').slice(0, 120),
+        hint: ok1 ? null : 'Обработчик фискального callback должен возвращать 2xx.',
+      });
+      checks.push({
+        id: 'duplicate_fiscal_callback',
+        title: 'Идемпотентный приём повторного callback того же чека',
+        passed: ok2,
+        statusCode: r2.statusCode,
+        responseBody: String(r2.body || '').slice(0, 120),
+        hint: ok2 ? null : 'Повторная доставка callback того же uuid/external_id не должна приводить к ошибке 500.',
+      });
+    } catch (e) {
+      checks.push({
+        id: 'valid_fiscal_callback',
+        title: 'Приём callback фискализации Ferma',
+        passed: false,
+        error: e.message,
+      });
+    }
+  }
+
+  const passedCount = checks.filter((c) => c.passed).length;
+  return {
+    ok: true,
+    provider,
+    targetUrl: url,
+    passed: passedCount,
+    total: checks.length,
+    readyForProd: passedCount === checks.length && checks.length > 0,
+    checks,
+    steps: checks,
+  };
+}
+
 module.exports = {
   createStore,
   createLog,
@@ -665,6 +1018,7 @@ module.exports = {
   html,
   escapeHtml,
   isPrivateHost,
+  buildCurlCommand,
   createJournal,
   postJson,
   createDeliveryQueue,
@@ -674,4 +1028,7 @@ module.exports = {
   parseScenarioSpec,
   createScenarioRegistry,
   checkAdminAuth,
+  applyRequestChaos,
+  createSandboxManager,
+  verifyMerchantWebhook,
 };

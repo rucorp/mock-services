@@ -471,6 +471,225 @@ process.env.MOCK_RETRY_MS = '1000';
     await waitNotification((h) => h.json.Type === 'INCOMING' && h.json.VerificationCode === 'VER-777');
   }
 
+  // 29. Wave 2 Мультирасчётов: createSpDeal / closeSpDeal, строгий баланс сделки при e2c, FinalPayout, запрет возврата после закрытия, CancelPayment, GetSbpMembers и карта 5000000000000553 -> 1057
+  {
+    const dealResp = JSON.parse((await api(mockPort, 'createSpDeal', { SpDealType: 'NN' })).body);
+    assert.strictEqual(dealResp.Success, true);
+    const spDealId = dealResp.SpAccumulationId;
+    assert.ok(spDealId, 'createSpDeal должен вернуть SpAccumulationId');
+
+    // Пополняем сделку платежом на 1000 ₽ (100000 коп.)
+    const dealPayInit = JSON.parse((await api(mockPort, 'Init', {
+      Amount: '100000', OrderId: 'order-spdeal-1', DealId: spDealId, PayType: 'O',
+      NotificationURL: notificationUrl,
+    })).body);
+    await request(mockPort, 'POST', `/payment/${dealPayInit.PaymentId}/pay`, 'pan=2201382000000013&exp=1227&cvv=123', { 'Content-Type': 'application/x-www-form-urlencoded' });
+    assert.strictEqual(state.payments[dealPayInit.PaymentId].status, 'CONFIRMED');
+
+    // Попытка выплаты больше баланса сделки (150000 > 100000) -> ErrorCode 32
+    const overPayoutPayload = { TerminalKey: TERMINAL, Amount: '150000', OrderId: 'payout-over', DealId: spDealId };
+    const overPayout = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Init', { ...overPayoutPayload, Token: tokenOf(overPayoutPayload) })).body);
+    assert.strictEqual(overPayout.Success, false);
+    assert.strictEqual(overPayout.ErrorCode, '32');
+
+    // Тестовая карта ошибки выплаты 5000000000000553 -> ErrorCode 1057
+    const badCardInitPayload = { TerminalKey: TERMINAL, Amount: '20000', OrderId: 'payout-badcard', DealId: spDealId, Pan: '5000000000000553' };
+    const badCardInit = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Init', { ...badCardInitPayload, Token: tokenOf(badCardInitPayload) })).body);
+    const badCardPayPayload = { TerminalKey: TERMINAL, PaymentId: badCardInit.PaymentId };
+    const badCardPay = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Payment', { ...badCardPayPayload, Token: tokenOf(badCardPayPayload) })).body);
+    assert.strictEqual(badCardPay.Success, false);
+    assert.strictEqual(badCardPay.ErrorCode, '1057');
+    assert.strictEqual(badCardPay.Status, 'REJECTED');
+
+    // Выплата 40000 коп. и её отмена через CancelPayment -> баланс сделки снова 100000
+    const p1InitPayload = { TerminalKey: TERMINAL, Amount: '40000', OrderId: 'payout-cancelable', DealId: spDealId };
+    const p1Init = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Init', { ...p1InitPayload, Token: tokenOf(p1InitPayload) })).body);
+    const p1PayPayload = { TerminalKey: TERMINAL, PaymentId: p1Init.PaymentId };
+    await request(mockPort, 'POST', '/e2c/v2/Payment', { ...p1PayPayload, Token: tokenOf(p1PayPayload) });
+    const p1Cancel = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/CancelPayment', { ...p1PayPayload, Token: tokenOf(p1PayPayload) })).body);
+    assert.strictEqual(p1Cancel.Success, true);
+    assert.strictEqual(p1Cancel.Status, 'CANCELED');
+
+    // Финальная выплата 70000 коп. с FinalPayout=true -> закрывает сделку, остаток 30000 коп. уходит в вознаграждение площадки
+    const finalInitPayload = { TerminalKey: TERMINAL, Amount: '70000', OrderId: 'payout-final', DealId: spDealId, FinalPayout: true };
+    const finalInit = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Init', { ...finalInitPayload, Token: tokenOf(finalInitPayload) })).body);
+    const finalPayPayload = { TerminalKey: TERMINAL, PaymentId: finalInit.PaymentId };
+    const finalPay = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Payment', { ...finalPayPayload, Token: tokenOf(finalPayPayload) })).body);
+    assert.strictEqual(finalPay.Success, true);
+    assert.strictEqual(finalPay.DealClosed, true);
+    assert.strictEqual(finalPay.PlatformReward, 30000);
+    assert.strictEqual(state.deals[spDealId].status, 'closed');
+
+    // Попытка возврата покупателю по закрытой сделке -> ErrorCode 32
+    const closedCancel = JSON.parse((await api(mockPort, 'Cancel', { PaymentId: dealPayInit.PaymentId })).body);
+    assert.strictEqual(closedCancel.Success, false);
+    assert.strictEqual(closedCancel.ErrorCode, '32');
+
+    // Список банков СБП
+    const sbpMembersPayload = { TerminalKey: TERMINAL };
+    const sbpMembers = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/GetSbpMembers', { ...sbpMembersPayload, Token: tokenOf(sbpMembersPayload) })).body);
+    assert.strictEqual(sbpMembers.Success, true);
+    assert.ok(Array.isArray(sbpMembers.Members) && sbpMembers.Members.length >= 4);
+  }
+
+  // 30. СБП QR (GetQr + sbp-pay) и закрывающий чек SendClosingReceipt
+  {
+    // СБП меньше 10 ₽ (1000 коп.) -> ErrorCode 7
+    const tinyInit = JSON.parse((await api(mockPort, 'Init', { Amount: '500', OrderId: 'order-sbp-tiny' })).body);
+    const tinyQr = JSON.parse((await api(mockPort, 'GetQr', { PaymentId: tinyInit.PaymentId, DataType: 'PAYLOAD' })).body);
+    assert.strictEqual(tinyQr.Success, false);
+    assert.strictEqual(tinyQr.ErrorCode, '7');
+
+    // СБП нормальный платёж + оплата по QR + SendClosingReceipt
+    const sbpInit = JSON.parse((await api(mockPort, 'Init', {
+      Amount: '25000', OrderId: 'order-sbp-ok', NotificationURL: notificationUrl,
+    })).body);
+    const qrPayloadResp = JSON.parse((await api(mockPort, 'GetQr', { PaymentId: sbpInit.PaymentId, DataType: 'PAYLOAD' })).body);
+    assert.strictEqual(qrPayloadResp.Success, true);
+    assert.ok(qrPayloadResp.Data.startsWith('https://qr.nspk.ru/'));
+
+    const qrSvgResp = JSON.parse((await api(mockPort, 'GetQr', { PaymentId: sbpInit.PaymentId, DataType: 'IMAGE' })).body);
+    assert.strictEqual(qrSvgResp.Success, true);
+    assert.ok(qrSvgResp.Data.includes('<svg'));
+
+    const sbpPayResp = JSON.parse((await request(mockPort, 'POST', `/payment/${sbpInit.PaymentId}/sbp-pay`, {})).body);
+    assert.strictEqual(sbpPayResp.Success, true);
+    assert.strictEqual(sbpPayResp.Status, 'CONFIRMED');
+    await waitNotification((h) => h.json.PaymentId === sbpInit.PaymentId && h.json.Status === 'CONFIRMED');
+
+    const closingResp = JSON.parse((await api(mockPort, 'SendClosingReceipt', {
+      PaymentId: sbpInit.PaymentId,
+      Receipt: {
+        Email: 'buyer@example.com',
+        Taxation: 'usn_income',
+        Items: [{ Name: 'Услуга', Price: 25000, Quantity: 1, Amount: 25000, Tax: 'none' }],
+      },
+    })).body);
+    assert.strictEqual(closingResp.Success, true);
+  }
+
+  // 31. Рекуррентные платежи (Recurrent=Y, RebillId, Charge), управление картами и валидация DATA / RedirectDueDate
+  {
+    // DATA > 100 символов -> ErrorCode 7
+    const badData = JSON.parse((await api(mockPort, 'Init', {
+      Amount: '10000', OrderId: 'order-baddata', DATA: { longKey: 'x'.repeat(105) },
+    })).body);
+    assert.strictEqual(badData.Success, false);
+    assert.strictEqual(badData.ErrorCode, '7');
+
+    // RedirectDueDate > 90 дней -> ErrorCode 7
+    const farFuture = new Date(Date.now() + 100 * 86400000).toISOString();
+    const badDue = JSON.parse((await api(mockPort, 'Init', {
+      Amount: '10000', OrderId: 'order-baddue', RedirectDueDate: farFuture,
+    })).body);
+    assert.strictEqual(badDue.Success, false);
+    assert.strictEqual(badDue.ErrorCode, '7');
+
+    // Recurrent=Y без CustomerKey -> ErrorCode 7
+    const noCust = JSON.parse((await api(mockPort, 'Init', {
+      Amount: '10000', OrderId: 'order-rec-nocust', Recurrent: 'Y',
+    })).body);
+    assert.strictEqual(noCust.Success, false);
+
+    // AddCustomer -> Init(Recurrent=Y) -> Pay -> получаем RebillId в нотификации AUTHORIZED -> Charge следующего платежа
+    const addCust = JSON.parse((await api(mockPort, 'AddCustomer', { CustomerKey: 'cust-rec-1', Email: 'rec@example.com' })).body);
+    assert.strictEqual(addCust.Success, true);
+
+    const recInit = JSON.parse((await api(mockPort, 'Init', {
+      Amount: '30000', OrderId: 'order-rec-parent', Recurrent: 'Y', CustomerKey: 'cust-rec-1', PayType: 'O',
+      NotificationURL: notificationUrl,
+    })).body);
+    assert.strictEqual(recInit.Success, true);
+    await request(mockPort, 'POST', `/payment/${recInit.PaymentId}/pay`, 'pan=2201382000000013&exp=1227&cvv=123', { 'Content-Type': 'application/x-www-form-urlencoded' });
+    const authHit = await waitNotification((h) => h.json.PaymentId === recInit.PaymentId && h.json.Status === 'AUTHORIZED' && h.json.RebillId);
+    const rebillId = authHit.json.RebillId;
+    assert.ok(rebillId, 'AUTHORIZED нотификация рекуррентного платежа должна содержать RebillId');
+
+    // Проверяем список карт покупателя
+    const cardList = JSON.parse((await api(mockPort, 'GetCardList', { CustomerKey: 'cust-rec-1' })).body);
+    assert.ok(Array.isArray(cardList) && cardList.some((c) => c.RebillId === rebillId));
+
+    // Автосписание по RebillId через Charge
+    const childInit = JSON.parse((await api(mockPort, 'Init', {
+      Amount: '15000', OrderId: 'order-rec-child', CustomerKey: 'cust-rec-1', NotificationURL: notificationUrl,
+    })).body);
+    const chargeResp = JSON.parse((await api(mockPort, 'Charge', {
+      PaymentId: childInit.PaymentId, RebillId: rebillId,
+    })).body);
+    assert.strictEqual(chargeResp.Success, true);
+    assert.strictEqual(chargeResp.Status, 'CONFIRMED');
+    assert.strictEqual(chargeResp.RebillId, rebillId);
+  }
+
+  // 32. Регистрация партнёров acqapi (POST /oauth/token + /sm-register/register*)
+  {
+    const tokResp = JSON.parse((await request(
+      mockPort,
+      'POST',
+      '/oauth/token',
+      'grant_type=client_credentials',
+      {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: 'Basic ' + Buffer.from('partner:secret').toString('base64'),
+      },
+    )).body);
+    assert.ok(tokResp.access_token, 'OAuth /oauth/token должен выдать access_token');
+
+    // Невалидный billingDescriptor (>14 символов или кириллица) -> ошибка 7
+    const badShop = JSON.parse((await request(
+      mockPort,
+      'POST',
+      '/sm-register/register',
+      { billingDescriptor: 'КИРИЛЛИЦА_СЛИШКОМ_ДЛИННО', inn: '7701234567' },
+      { Authorization: `Bearer ${tokResp.access_token}` },
+    )).body);
+    assert.strictEqual(badShop.Success, false);
+
+    // Валидная регистрация партнёра
+    const goodShop = JSON.parse((await request(
+      mockPort,
+      'POST',
+      '/sm-register/register',
+      { billingDescriptor: 'LOVII MARKET', inn: '7701234567', name: 'ООО Ловии Партнёр', email: 'shop@lovii.ru' },
+      { Authorization: `Bearer ${tokResp.access_token}` },
+    )).body);
+    assert.ok(goodShop.shopCode);
+    assert.strictEqual(goodShop.billingDescriptor, 'LOVII MARKET');
+
+    const getShop = JSON.parse((await request(mockPort, 'GET', `/sm-register/register/shop/${goodShop.shopCode}`)).body);
+    assert.strictEqual(getShop.inn, '7701234567');
+
+    const patchShop = JSON.parse((await request(
+      mockPort,
+      'PATCH',
+      `/sm-register/register/${goodShop.shopCode}`,
+      { billingDescriptor: 'LOVII PRO' },
+      { Authorization: `Bearer ${tokResp.access_token}` },
+    )).body);
+    assert.strictEqual(patchShop.billingDescriptor, 'LOVII PRO');
+  }
+
+  // 33. Мульти-песочницы (X-Mock-Sandbox), экспорт состояния, активный экзаменатор вебхуков и curl в журнале
+  {
+    // В изолированной песочнице worker-2 платежей изначально 0
+    const sbHealth = JSON.parse((await request(mockPort, 'GET', '/health', null, { 'X-Mock-Sandbox': 'worker-2' })).body);
+    assert.strictEqual(sbHealth.sandbox, 'worker-2');
+    assert.strictEqual(sbHealth.payments, 0);
+
+    // Возвращаемся в default песочницу
+    await request(mockPort, 'POST', '/mock/sandboxes', { sandbox: 'default' });
+
+    // Активный экзаменатор вебхук-приёмника
+    const verifyReport = JSON.parse((await request(mockPort, 'POST', '/mock/verify-merchant', { url: notificationUrl })).body);
+    assert.strictEqual(verifyReport.steps.length, 3);
+    assert.strictEqual(verifyReport.steps[0].passed, true, 'шаг 1 (валидный вебхук) должен пройти на тестовом приёмнике');
+    assert.strictEqual(verifyReport.steps[1].passed, true, 'шаг 2 (дубль вебхука) должен пройти на тестовом приёмнике');
+
+    // Проверяем наличие готового curl в /admin/journal
+    const journalResp = JSON.parse((await request(mockPort, 'GET', '/admin/journal')).body);
+    assert.ok(journalResp.entries.length > 0 && journalResp.entries[journalResp.entries.length - 1].curl.startsWith('curl '));
+  }
+
   console.log(`selftest: ${WEBHOOK_HITS.length} webhook deliveries, ${Object.keys(state.payments).length} payment sessions`);
   console.log('SELFTEST PASSED ✅');
   process.exit(0);

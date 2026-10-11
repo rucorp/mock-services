@@ -1,6 +1,3 @@
-# © 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0
-# SPDX-License-Identifier: Apache-2.0
-#
 # Внешний compose-файл мок-контура (банк + касса) для подключения в приложение-потребитель
 # (например, lovii-core на dev-стенде и staging).
 #
@@ -20,7 +17,7 @@
 
 services:
   tbank-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.4.0}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.5.0}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/tbank-mock/server.js"]
@@ -30,7 +27,7 @@ services:
       MOCK_HOST: "0.0.0.0"
       MOCK_PORT: "3100"
       MOCK_HEALTH_PATH: "/health"
-      MOCK_PROFILE: "${MOCK_TBANK_PROFILE:-plain}"
+      MOCK_PROFILE: "${MOCK_TBANK_PROFILE:-multisplit}"
       MOCK_TERMINAL_KEY: "${MOCK_TERMINAL_KEY:-${TBANK_TERMINAL_KEY:-TBANKMOCKTEST}}"
       MOCK_TERMINAL_PASSWORD: "${MOCK_TERMINAL_PASSWORD:-${TBANK_TERMINAL_PASSWORD:-mockpass123}}"
       MOCK_PUBLIC_BASE_URL: "${MOCK_TBANK_PUBLIC_BASE_URL:-${MOCK_PUBLIC_BASE_URL:-http://localhost:3100}}"
@@ -59,7 +56,7 @@ services:
     restart: unless-stopped
 
   kassa-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.4.0}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.5.0}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/kassa-mock/server.js"]
