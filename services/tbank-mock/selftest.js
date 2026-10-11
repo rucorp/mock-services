@@ -60,11 +60,59 @@ function request(port, method, p, body, headers = {}) {
 }
 
 // Как настоящий клиент: TerminalKey стенда подставляется всегда (его можно
-// переопределить в body для негативных проверок).
+// переопределить в body для негативных проверок). В профиле multisplit Init
+// требует PaymentRecipientId (F-16), поэтому helper добавляет его так же, как
+// это делает клиент Мультирасчётов; негативные кейсы шлются через request()
+// или с явным `PaymentRecipientId: undefined`/`''`.
+const DEFAULT_RECIPIENT = 'recipient-77';
+
 const api = (port, method, body, sign = true) => {
   const payload = { TerminalKey: TERMINAL, ...body };
+  if (method === 'Init' && payload.PaymentRecipientId === undefined) payload.PaymentRecipientId = DEFAULT_RECIPIENT;
   return request(port, 'POST', `/v2/${method}`, sign ? { ...payload, Token: tokenOf(payload) } : payload);
 };
+
+/**
+ * Клиент выплат `/e2c/v2/*`: подпись обязательна, TerminalKey стенда — по
+ * умолчанию, PaymentRecipientId добавляется только к Init (F-17). Поля можно
+ * переопределить/убрать через body (например `TerminalKey: undefined`).
+ */
+const e2c = (port, method, body = {}) => {
+  const payload = { TerminalKey: TERMINAL, ...(method === 'Init' ? { PaymentRecipientId: DEFAULT_RECIPIENT } : {}), ...body };
+  return request(port, 'POST', `/e2c/v2/${method}`, { ...payload, Token: tokenOf(payload) });
+};
+
+/**
+ * Сделка с подтверждённым приходом: выплаты идут только по сделке с балансом
+ * (03-payouts-and-deals.md §Сделка), поэтому каждая payout-сцена тест-плана
+ * сначала заводит и пополняет свою сделку.
+ */
+async function fundedDeal(port, amountKopeks = 100000, orderPrefix = 'fund') {
+  const dealId = JSON.parse((await api(port, 'createSpDeal', { SpDealType: 'NN' })).body).SpAccumulationId;
+  const init = JSON.parse((await api(port, 'Init', {
+    Amount: String(amountKopeks), OrderId: `${orderPrefix}-${dealId}`, DealId: dealId, PayType: 'O',
+  })).body);
+  await request(port, 'POST', `/payment/${init.PaymentId}/pay`, 'pan=2201382000000013&exp=1227&cvv=123', { 'Content-Type': 'application/x-www-form-urlencoded' });
+  assert.strictEqual(state.payments[init.PaymentId].status, 'CONFIRMED', `фонд сделки ${dealId} должен подтвердиться`);
+  return dealId;
+}
+
+/**
+ * Партнёрская точка через acqapi (OAuth + sm-register): её shopCode используется
+ * как PartnerId в выплатах `/e2c/v2/Init` (F-20).
+ */
+async function registerPartner(port, descriptor, inn = '7701234567') {
+  const oauth = await request(port, 'POST', '/oauth/token', 'grant_type=client_credentials', {
+    'Content-Type': 'application/x-www-form-urlencoded',
+    Authorization: 'Basic ' + Buffer.from('partner:partner').toString('base64'),
+  });
+  const token = JSON.parse(oauth.body).access_token;
+  const shop = JSON.parse((await request(port, 'POST', '/sm-register/register', {
+    billingDescriptor: descriptor, inn, name: `ООО «${descriptor}»`,
+  }, { Authorization: `Bearer ${token}` })).body);
+  if (!shop.shopCode) throw new Error(`не удалось зарегистрировать партнёра: ${JSON.stringify(shop).slice(0, 200)}`);
+  return shop.shopCode;
+}
 
 /**
  * Дочерний стенд на свободном порту (MOCK_PORT=0): родитель узнаёт реальный
@@ -372,6 +420,9 @@ process.env.MOCK_RETRY_MS = '1000';
     const plainInit = await plainApi('Init', { TerminalKey: TERMINAL_KEY, OrderId: 'plain-1', Amount: '250000', PaymentRecipientId: 'acc-1', NotificationURL: `http://127.0.0.1:${port}/hook` });
     const plainParsed = JSON.parse(plainInit.body);
     assert.strictEqual(plainParsed.Success, true, 'plain Init с PaymentRecipientId должен проходить (профиль plain)');
+    // F-16 регрессия: plain без сделочных полей и без PaymentRecipientId — успех (не меняем)
+    const plainBare = JSON.parse((await plainApi('Init', { TerminalKey: TERMINAL_KEY, OrderId: 'plain-bare', Amount: '1000' })).body);
+    assert.strictEqual(plainBare.Success, true, 'plain Init без сделки и без PaymentRecipientId должен проходить');
     const plainPay = await request(3198, 'POST', `/payment/${plainParsed.PaymentId}/pay`, 'pan=2201382000000013&exp=1227', { 'Content-Type': 'application/x-www-form-urlencoded' });
     assert.ok([200, 302].includes(plainPay.statusCode), `оплата по тестовой карте должна проходить (статус ${plainPay.statusCode}: ${String(plainPay.body).slice(0, 80)})`);
     await sleep(1500);
@@ -388,6 +439,7 @@ process.env.MOCK_RETRY_MS = '1000';
   // Helper to call /v2/* with custom headers
   const apiWithHeaders = (p, method, body, headers = {}) => {
     const payload = { TerminalKey: TERMINAL, ...body };
+    if (method === 'Init' && payload.PaymentRecipientId === undefined) payload.PaymentRecipientId = DEFAULT_RECIPIENT;
     return request(p, 'POST', `/v2/${method}`, { ...payload, Token: tokenOf(payload) }, headers);
   };
 
@@ -515,16 +567,21 @@ process.env.MOCK_RETRY_MS = '1000';
 
   // 28. Покрытие /e2c/v2/* и /av/v1/* (рекомендация аудита A-22)
   {
-    const e2cInitPayload = { TerminalKey: TERMINAL, Amount: '45000', OrderId: 'payout-1', CustomerKey: 'merch-1' };
-    const e2cInit = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Init', { ...e2cInitPayload, Token: tokenOf(e2cInitPayload) })).body);
+    // Выплата идёт по сделке с балансом (F-17): заводим и пополняем её
+    const covDealId = await fundedDeal(mockPort, 60000, 'order-e2c-fund');
+
+    const e2cInit = JSON.parse((await e2c(mockPort, 'Init', {
+      Amount: '45000', OrderId: 'payout-1', CustomerKey: 'merch-1', DealId: covDealId, CardId: 'card-coverage-1',
+    })).body);
     assert.strictEqual(e2cInit.Success, true);
     assert.strictEqual(e2cInit.Status, 'NEW');
+    assert.strictEqual(e2cInit.DealId, covDealId, 'ответ Init называет сделку выплаты');
+    assert.strictEqual(state.payouts[e2cInit.PaymentId].recipientType, 'card', 'нормализованный канал сохраняется (F-20)');
 
-    const e2cPayPayload = { TerminalKey: TERMINAL, PaymentId: e2cInit.PaymentId };
-    const e2cPay = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Payment', { ...e2cPayPayload, Token: tokenOf(e2cPayPayload) })).body);
+    const e2cPay = JSON.parse((await e2c(mockPort, 'Payment', { PaymentId: e2cInit.PaymentId })).body);
     assert.strictEqual(e2cPay.Status, 'CONFIRMED');
 
-    const e2cState = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/GetState', { ...e2cPayPayload, Token: tokenOf(e2cPayPayload) })).body);
+    const e2cState = JSON.parse((await e2c(mockPort, 'GetState', { PaymentId: e2cInit.PaymentId })).body);
     assert.strictEqual(e2cState.Status, 'CONFIRMED');
     assert.strictEqual(e2cState.Amount, 45000);
 
@@ -556,34 +613,47 @@ process.env.MOCK_RETRY_MS = '1000';
     assert.strictEqual(state.payments[dealPayInit.PaymentId].status, 'CONFIRMED');
 
     // Попытка выплаты больше баланса сделки (150000 > 100000) -> ErrorCode 32
-    const overPayoutPayload = { TerminalKey: TERMINAL, Amount: '150000', OrderId: 'payout-over', DealId: spDealId };
-    const overPayout = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Init', { ...overPayoutPayload, Token: tokenOf(overPayoutPayload) })).body);
+    const overPayout = JSON.parse((await e2c(mockPort, 'Init', {
+      Amount: '150000', OrderId: 'payout-over', DealId: spDealId, CardId: 'card-over-1',
+    })).body);
     assert.strictEqual(overPayout.Success, false);
     assert.strictEqual(overPayout.ErrorCode, '32');
 
-    // Тестовая карта ошибки выплаты 5000000000000553 -> ErrorCode 1057
-    const badCardInitPayload = { TerminalKey: TERMINAL, Amount: '20000', OrderId: 'payout-badcard', DealId: spDealId, Pan: '5000000000000553' };
-    const badCardInit = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Init', { ...badCardInitPayload, Token: tokenOf(badCardInitPayload) })).body);
-    const badCardPayPayload = { TerminalKey: TERMINAL, PaymentId: badCardInit.PaymentId };
-    const badCardPay = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Payment', { ...badCardPayPayload, Token: tokenOf(badCardPayPayload) })).body);
+    // Тестовая карта ошибки выплаты 5000000000000553 -> ErrorCode 1057 (канал «карта по данным»)
+    const badCardInit = JSON.parse((await e2c(mockPort, 'Init', {
+      Amount: '20000', OrderId: 'payout-badcard', DealId: spDealId, Pan: '5000000000000553',
+    })).body);
+    const badCardPay = JSON.parse((await e2c(mockPort, 'Payment', { PaymentId: badCardInit.PaymentId })).body);
     assert.strictEqual(badCardPay.Success, false);
     assert.strictEqual(badCardPay.ErrorCode, '1057');
     assert.strictEqual(badCardPay.Status, 'REJECTED');
 
-    // Выплата 40000 коп. и её отмена через CancelPayment -> баланс сделки снова 100000
-    const p1InitPayload = { TerminalKey: TERMINAL, Amount: '40000', OrderId: 'payout-cancelable', DealId: spDealId };
-    const p1Init = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Init', { ...p1InitPayload, Token: tokenOf(p1InitPayload) })).body);
-    const p1PayPayload = { TerminalKey: TERMINAL, PaymentId: p1Init.PaymentId };
-    await request(mockPort, 'POST', '/e2c/v2/Payment', { ...p1PayPayload, Token: tokenOf(p1PayPayload) });
-    const p1Cancel = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/CancelPayment', { ...p1PayPayload, Token: tokenOf(p1PayPayload) })).body);
-    assert.strictEqual(p1Cancel.Success, true);
-    assert.strictEqual(p1Cancel.Status, 'CANCELED');
+    // Партнёрская точка (acqapi): shopCode = PartnerId для отменяемой выплаты (F-20)
+    const cancelPartner = await registerPartner(mockPort, 'LOVII CANCEL');
+
+    // Выплата 40000 коп. партнёру: успех, отмена CancelPayment -> CREDIT_CANCELED,
+    // баланс сделки снова 100000 (сумма возвращается в сделку)
+    const p1Init = JSON.parse((await e2c(mockPort, 'Init', {
+      Amount: '40000', OrderId: 'payout-cancelable', DealId: spDealId, PartnerId: cancelPartner,
+    })).body);
+    assert.strictEqual(p1Init.Success, true, JSON.stringify(p1Init));
+    assert.strictEqual(state.payouts[p1Init.PaymentId].recipientType, 'partner');
+    const p1Pay = JSON.parse((await e2c(mockPort, 'Payment', { PaymentId: p1Init.PaymentId })).body);
+    assert.strictEqual(p1Pay.Status, 'CONFIRMED');
+    const p1Cancel = JSON.parse((await e2c(mockPort, 'CancelPayment', { PaymentId: p1Init.PaymentId, DealId: spDealId })).body);
+    assert.strictEqual(p1Cancel.Success, true, JSON.stringify(p1Cancel));
+    assert.strictEqual(p1Cancel.Status, 'CREDIT_CANCELED', 'отмена выплаты отдаёт CREDIT_CANCELED (F-23)');
+    assert.deepStrictEqual(
+      state.payouts[p1Init.PaymentId].statusHistory.map((h) => h.status),
+      ['NEW', 'CONFIRMED', 'CREDIT_CANCELING', 'CREDIT_CANCELED'],
+      'история отмены — CREDIT_CANCELING → CREDIT_CANCELED (F-23)',
+    );
 
     // Финальная выплата 70000 коп. с FinalPayout=true -> закрывает сделку, остаток 30000 коп. уходит в вознаграждение площадки
-    const finalInitPayload = { TerminalKey: TERMINAL, Amount: '70000', OrderId: 'payout-final', DealId: spDealId, FinalPayout: true };
-    const finalInit = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Init', { ...finalInitPayload, Token: tokenOf(finalInitPayload) })).body);
-    const finalPayPayload = { TerminalKey: TERMINAL, PaymentId: finalInit.PaymentId };
-    const finalPay = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Payment', { ...finalPayPayload, Token: tokenOf(finalPayPayload) })).body);
+    const finalInit = JSON.parse((await e2c(mockPort, 'Init', {
+      Amount: '70000', OrderId: 'payout-final', DealId: spDealId, FinalPayout: true, CardId: 'card-final-1',
+    })).body);
+    const finalPay = JSON.parse((await e2c(mockPort, 'Payment', { PaymentId: finalInit.PaymentId })).body);
     assert.strictEqual(finalPay.Success, true);
     assert.strictEqual(finalPay.DealClosed, true);
     assert.strictEqual(finalPay.PlatformReward, 30000);
@@ -595,8 +665,7 @@ process.env.MOCK_RETRY_MS = '1000';
     assert.strictEqual(closedCancel.ErrorCode, '32');
 
     // Список банков СБП
-    const sbpMembersPayload = { TerminalKey: TERMINAL };
-    const sbpMembers = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/GetSbpMembers', { ...sbpMembersPayload, Token: tokenOf(sbpMembersPayload) })).body);
+    const sbpMembers = JSON.parse((await e2c(mockPort, 'GetSbpMembers', {})).body);
     assert.strictEqual(sbpMembers.Success, true);
     assert.ok(Array.isArray(sbpMembers.Members) && sbpMembers.Members.length >= 4);
   }
@@ -604,14 +673,14 @@ process.env.MOCK_RETRY_MS = '1000';
   // 30. СБП QR (GetQr + sbp-pay) и закрывающий чек SendClosingReceipt
   {
     // СБП меньше 10 ₽ (1000 коп.) -> ErrorCode 7
-    const tinyInit = JSON.parse((await api(mockPort, 'Init', { Amount: '500', OrderId: 'order-sbp-tiny' })).body);
+    const tinyInit = JSON.parse((await api(mockPort, 'Init', { Amount: '500', OrderId: 'order-sbp-tiny', CreateDealWithType: 'NN' })).body);
     const tinyQr = JSON.parse((await api(mockPort, 'GetQr', { PaymentId: tinyInit.PaymentId, DataType: 'PAYLOAD' })).body);
     assert.strictEqual(tinyQr.Success, false);
     assert.strictEqual(tinyQr.ErrorCode, '7');
 
     // СБП нормальный платёж + оплата по QR + SendClosingReceipt
     const sbpInit = JSON.parse((await api(mockPort, 'Init', {
-      Amount: '25000', OrderId: 'order-sbp-ok', NotificationURL: notificationUrl,
+      Amount: '25000', OrderId: 'order-sbp-ok', CreateDealWithType: 'NN', NotificationURL: notificationUrl,
     })).body);
     const qrPayloadResp = JSON.parse((await api(mockPort, 'GetQr', { PaymentId: sbpInit.PaymentId, DataType: 'PAYLOAD' })).body);
     assert.strictEqual(qrPayloadResp.Success, true);
@@ -641,7 +710,7 @@ process.env.MOCK_RETRY_MS = '1000';
   {
     // DATA > 100 символов -> ErrorCode 7
     const badData = JSON.parse((await api(mockPort, 'Init', {
-      Amount: '10000', OrderId: 'order-baddata', DATA: { longKey: 'x'.repeat(105) },
+      Amount: '10000', OrderId: 'order-baddata', CreateDealWithType: 'NN', DATA: { longKey: 'x'.repeat(105) },
     })).body);
     assert.strictEqual(badData.Success, false);
     assert.strictEqual(badData.ErrorCode, '7');
@@ -649,14 +718,14 @@ process.env.MOCK_RETRY_MS = '1000';
     // RedirectDueDate > 90 дней -> ErrorCode 7
     const farFuture = new Date(Date.now() + 100 * 86400000).toISOString();
     const badDue = JSON.parse((await api(mockPort, 'Init', {
-      Amount: '10000', OrderId: 'order-baddue', RedirectDueDate: farFuture,
+      Amount: '10000', OrderId: 'order-baddue', CreateDealWithType: 'NN', RedirectDueDate: farFuture,
     })).body);
     assert.strictEqual(badDue.Success, false);
     assert.strictEqual(badDue.ErrorCode, '7');
 
     // Recurrent=Y без CustomerKey -> ErrorCode 7
     const noCust = JSON.parse((await api(mockPort, 'Init', {
-      Amount: '10000', OrderId: 'order-rec-nocust', Recurrent: 'Y',
+      Amount: '10000', OrderId: 'order-rec-nocust', CreateDealWithType: 'NN', Recurrent: 'Y',
     })).body);
     assert.strictEqual(noCust.Success, false);
 
@@ -665,7 +734,7 @@ process.env.MOCK_RETRY_MS = '1000';
     assert.strictEqual(addCust.Success, true);
 
     const recInit = JSON.parse((await api(mockPort, 'Init', {
-      Amount: '30000', OrderId: 'order-rec-parent', Recurrent: 'Y', CustomerKey: 'cust-rec-1', PayType: 'O',
+      Amount: '30000', OrderId: 'order-rec-parent', CreateDealWithType: 'NN', Recurrent: 'Y', CustomerKey: 'cust-rec-1', PayType: 'O',
       NotificationURL: notificationUrl,
     })).body);
     assert.strictEqual(recInit.Success, true);
@@ -680,7 +749,7 @@ process.env.MOCK_RETRY_MS = '1000';
 
     // Автосписание по RebillId через Charge
     const childInit = JSON.parse((await api(mockPort, 'Init', {
-      Amount: '15000', OrderId: 'order-rec-child', CustomerKey: 'cust-rec-1', NotificationURL: notificationUrl,
+      Amount: '15000', OrderId: 'order-rec-child', CreateDealWithType: 'NN', CustomerKey: 'cust-rec-1', NotificationURL: notificationUrl,
     })).body);
     const chargeResp = JSON.parse((await api(mockPort, 'Charge', {
       PaymentId: childInit.PaymentId, RebillId: rebillId,
@@ -875,6 +944,10 @@ process.env.MOCK_RETRY_MS = '1000';
     const sentinelSecret = `sentinel-secret-${process.pid}`;
     const basicHeader = Buffer.from(`partner:${sentinelSecret}`).toString('base64');
 
+    // Выплаты идут по сделке (F-17) — заводим и пополняем её до захвата console,
+    // чтобы проверки логов относились только к sentinel-запросам.
+    const sentinelDealId = await fundedDeal(mockPort, 100000, 'order-sentinel-fund');
+
     let bearerToken = '';
     const logged = [];
     const originalLog = console.log;
@@ -882,8 +955,9 @@ process.env.MOCK_RETRY_MS = '1000';
     try {
       // Выплата с PAN: в state остаются только маска и сценарий
       const panInitPayload = {
-        TerminalKey: TERMINAL, Amount: '15000', OrderId: 'payout-sentinel-pan',
-        Pan: sentinelPan, RecipientName: 'Иван Петров', Phone: '+79211234567',
+        TerminalKey: TERMINAL, Amount: '15000', OrderId: 'payout-sentinel-pan', DealId: sentinelDealId,
+        PaymentRecipientId: 'recipient-sntl', Pan: sentinelPan,
+        RecipientName: 'Иван Петров', RecipientInn: '7801111111',
       };
       const panInit = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Init', { ...panInitPayload, Token: tokenOf(panInitPayload) })).body);
       assert.strictEqual(panInit.Success, true, 'e2c Init с PAN должен проходить');
@@ -891,16 +965,17 @@ process.env.MOCK_RETRY_MS = '1000';
       assert.strictEqual(panPayout.pan, undefined, 'полный PAN не должен храниться в state (F-10)');
       assert.strictEqual(panPayout.panMask, '220077**5676', 'в state остаётся маска BIN + последние 4');
       assert.strictEqual(panPayout.cardScenario, null, 'PAN вне тестового списка сценария не выбирает');
+      assert.strictEqual(panPayout.recipientType, 'card', 'PAN-выплата идёт по карточному каналу (F-17)');
 
       // Официальный тестовый кейс 5000000000000553 -> 1057 продолжает работать без PAN в state
-      const badInitPayload = { TerminalKey: TERMINAL, Amount: '10000', OrderId: 'payout-sentinel-1057', Pan: '5000000000000553' };
-      const badInit = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Init', { ...badInitPayload, Token: tokenOf(badInitPayload) })).body);
+      const badInit = JSON.parse((await e2c(mockPort, 'Init', {
+        Amount: '10000', OrderId: 'payout-sentinel-1057', DealId: sentinelDealId, Pan: '5000000000000553',
+      })).body);
       const badPayout = state.payouts[badInit.PaymentId];
       assert.strictEqual(badPayout.pan, undefined, 'полный PAN тестовой карты тоже не хранится');
       assert.strictEqual(badPayout.panMask, '500000**0553');
       assert.strictEqual(badPayout.cardScenario, 'reject-1057', 'сценарий выбирается в Init');
-      const badPayPayload = { TerminalKey: TERMINAL, PaymentId: badInit.PaymentId };
-      const badPay = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Payment', { ...badPayPayload, Token: tokenOf(badPayPayload) })).body);
+      const badPay = JSON.parse((await e2c(mockPort, 'Payment', { PaymentId: badInit.PaymentId })).body);
       assert.strictEqual(badPay.Success, false);
       assert.strictEqual(badPay.ErrorCode, '1057');
       assert.strictEqual(badPay.Status, 'REJECTED');
@@ -941,7 +1016,7 @@ process.env.MOCK_RETRY_MS = '1000';
     assert.ok(initEntry, 'запись e2c Init должна быть в журнале');
     assert.strictEqual(initEntry.body.Pan, '[REDACTED]', 'PAN в журнале — только [REDACTED]');
     assert.strictEqual(initEntry.body.RecipientName, 'Ив***', 'ФИО в журнале маскируется');
-    assert.strictEqual(initEntry.body.Phone, '***4567', 'телефон в журнале маскируется');
+    assert.strictEqual(initEntry.body.RecipientInn, '7801******', 'ИНН получателя в журнале маскируется');
     assert.ok(!initEntry.curl.includes(sentinelPan), 'PAN не должен попадать в curl-сниппет');
     for (const entry of journal.entries) {
       assert.strictEqual(entry.headers && entry.headers.authorization, undefined, 'Authorization не должен храниться в журнале');
@@ -995,6 +1070,190 @@ process.env.MOCK_RETRY_MS = '1000';
       child.stop();
       try { fs.unlinkSync(legacyFile); } catch { /* уже удалён */ }
     }
+  }
+
+  /* --- #25 (F-16—F-23): точность Init recipient и CancelPayment ------------- */
+
+  // Подписанный Init без клиентских значений по умолчанию (для негативных кейсов)
+  const signedInit = (body) => {
+    const p = { TerminalKey: TERMINAL, ...body };
+    return request(mockPort, 'POST', '/v2/Init', { ...p, Token: tokenOf(p) });
+  };
+
+  // 40. F-16: multisplit Init без валидного PaymentRecipientId отклоняется ДО создания state
+  {
+    const paymentsBefore = Object.keys(state.payments).length;
+    const missing = JSON.parse((await signedInit({ Amount: '1000', OrderId: 'f16-missing', CreateDealWithType: 'NN' })).body);
+    assert.strictEqual(missing.ErrorCode, '7', 'Init без PaymentRecipientId в multisplit — код 7');
+    assert.ok(String(missing.Message).includes('PaymentRecipientId'), 'сообщение называет поле');
+    const empty = JSON.parse((await signedInit({ Amount: '1000', OrderId: 'f16-empty', CreateDealWithType: 'NN', PaymentRecipientId: '   ' })).body);
+    assert.strictEqual(empty.ErrorCode, '7', 'пустой PaymentRecipientId — код 7');
+    const tooLong = JSON.parse((await signedInit({ Amount: '1000', OrderId: 'f16-long', CreateDealWithType: 'NN', PaymentRecipientId: 'r'.repeat(17) })).body);
+    assert.strictEqual(tooLong.ErrorCode, '7', 'PaymentRecipientId > 16 символов — код 7');
+    assert.strictEqual(Object.keys(state.payments).length, paymentsBefore, 'отказы F-16 не создают платёж');
+    assert.ok(!Object.values(state.payments).some((p) => ['f16-missing', 'f16-empty', 'f16-long'].includes(p.orderId)), 'state не содержит отклонённых заказов');
+
+    const boundary = JSON.parse((await signedInit({ Amount: '1000', OrderId: 'f16-boundary', CreateDealWithType: 'NN', PaymentRecipientId: 'r'.repeat(16) })).body);
+    assert.strictEqual(boundary.Success, true, 'PaymentRecipientId ровно 16 символов — допустим');
+  }
+
+  // 41. F-17: E2C Init валидирует общие поля и канал; неполная выплата не сохраняется
+  {
+    const dealId = await fundedDeal(mockPort, 300000, 'order-f17-fund');
+    const payoutCount = () => Object.keys(state.payouts).length;
+    const expectRejected = async (label, body, code = '7') => {
+      const before = payoutCount();
+      const r = JSON.parse((await e2c(mockPort, 'Init', body)).body);
+      assert.strictEqual(r.Success, false, `${label}: должен отклоняться`);
+      assert.strictEqual(r.ErrorCode, code, `${label}: код ${code} (получено ${r.ErrorCode}: ${r.Message})`);
+      assert.ok(r.Details && r.Details.Field, `${label}: provider-shaped ошибка с полем`);
+      assert.strictEqual(payoutCount(), before, `${label}: неполная выплата не сохраняется`);
+      return r;
+    };
+    await expectRejected('без DealId', { Amount: '1000', OrderId: 'f17-nodeal', CardId: 'c-1', DealId: undefined });
+    await expectRejected('без OrderId', { Amount: '1000', DealId: dealId, CardId: 'c-1', OrderId: undefined });
+    await expectRejected('без PaymentRecipientId', { Amount: '1000', OrderId: 'f17-norec', DealId: dealId, CardId: 'c-1', PaymentRecipientId: undefined });
+    await expectRejected('пустой PaymentRecipientId', { Amount: '1000', OrderId: 'f17-emptyrec', DealId: dealId, CardId: 'c-1', PaymentRecipientId: '' });
+    await expectRejected('без Amount', { OrderId: 'f17-noamount', DealId: dealId, CardId: 'c-1', Amount: undefined });
+    await expectRejected('без канала выплаты', { Amount: '1000', OrderId: 'f17-nochannel', DealId: dealId });
+    await expectRejected('два канала (CardId + PartnerId)', { Amount: '1000', OrderId: 'f17-two', DealId: dealId, CardId: 'c-1', PartnerId: '700001' });
+    await expectRejected('СБП без SbpMemberId', { Amount: '1000', OrderId: 'f17-sbp-nomem', DealId: dealId, Phone: '+79211234567' });
+    await expectRejected('СБП без Phone', { Amount: '1000', OrderId: 'f17-sbp-nophone', DealId: dealId, SbpMemberId: '100000000004' });
+    await expectRejected('СБП некорректный Phone', { Amount: '1000', OrderId: 'f17-sbp-badphone', DealId: dealId, Phone: '+7921', SbpMemberId: '100000000004' });
+    await expectRejected('СБП меньше 10 ₽', { Amount: '500', OrderId: 'f17-sbp-tiny', DealId: dealId, Phone: '+79211234567', SbpMemberId: '100000000004' });
+    await expectRejected('партнёр не зарегистрирован', { Amount: '1000', OrderId: 'f17-nopartner', DealId: dealId, PartnerId: 'NO-SUCH-SHOP' }, '8');
+    await expectRejected('TerminalKey чужой', { Amount: '1000', OrderId: 'f17-term', DealId: dealId, CardId: 'c-1', TerminalKey: 'OTHER-TERMINAL' });
+
+    // Позитивные по каждому реализованному каналу
+    const card = JSON.parse((await e2c(mockPort, 'Init', { Amount: '1000', OrderId: 'f17-card', DealId: dealId, CardId: 'card-f17' })).body);
+    assert.strictEqual(card.Success, true, 'канал «привязанная карта» проходит');
+    assert.strictEqual(state.payouts[card.PaymentId].recipientType, 'card');
+
+    const cardData = JSON.parse((await e2c(mockPort, 'Init', { Amount: '1000', OrderId: 'f17-carddata', DealId: dealId, Pan: '2200770012345676' })).body);
+    assert.strictEqual(cardData.Success, true, 'канал «карта по данным» проходит');
+    assert.strictEqual(state.payouts[cardData.PaymentId].panMask, '220077**5676', 'для карты по данным хранится только маска (F-10)');
+
+    const sbp = JSON.parse((await e2c(mockPort, 'Init', { Amount: '1000', OrderId: 'f17-sbp', DealId: dealId, Phone: '+7 921 123-45-67', SbpMemberId: '100000000004' })).body);
+    assert.strictEqual(sbp.Success, true, 'канал СБП проходит');
+    assert.strictEqual(state.payouts[sbp.PaymentId].recipientType, 'sbp');
+    assert.strictEqual(state.payouts[sbp.PaymentId].sbpMemberId, '100000000004', 'SbpMemberId сохраняется');
+    assert.strictEqual(state.payouts[sbp.PaymentId].phone, '79211234567', 'телефон нормализуется до 11 цифр');
+
+    const partner = await registerPartner(mockPort, 'LOVII F17 PART');
+    const partnerInit = JSON.parse((await e2c(mockPort, 'Init', { Amount: '1000', OrderId: 'f17-partner', DealId: dealId, PartnerId: partner })).body);
+    assert.strictEqual(partnerInit.Success, true, 'канал «партнёр» проходит');
+    assert.strictEqual(state.payouts[partnerInit.PaymentId].recipientType, 'partner');
+    assert.strictEqual(state.payouts[partnerInit.PaymentId].partnerId, partner, 'PartnerId (shopCode) сохраняется (F-20)');
+  }
+
+  // 42. F-18…F-23: CancelPayment — только успешная партнёрская выплата в открытой сделке
+  {
+    const dealId = await fundedDeal(mockPort, 500000, 'order-cxl-fund');
+    const partner = await registerPartner(mockPort, 'LOVII CXL 42');
+    const snapshot = (id, deal = dealId) => JSON.stringify({
+      status: state.payouts[id].status,
+      history: state.payouts[id].statusHistory.length,
+      deal: state.deals[deal] && state.deals[deal].status,
+    });
+    const cancel = (body) => e2c(mockPort, 'CancelPayment', body);
+    const partnerInit = (orderId, amount = '10000', deal = dealId) => e2c(mockPort, 'Init', {
+      Amount: amount, OrderId: orderId, DealId: deal, PartnerId: partner,
+    }).then((r) => JSON.parse(r.body));
+
+    // F-18: NEW → отказ, состояние не меняется
+    const pNew = await partnerInit('f18-new');
+    assert.strictEqual(pNew.Success, true);
+    const beforeNew = snapshot(pNew.PaymentId);
+    const cNew = JSON.parse((await cancel({ PaymentId: pNew.PaymentId, DealId: dealId })).body);
+    assert.strictEqual(cNew.Success, false, 'NEW не отменяется');
+    assert.strictEqual(cNew.ErrorCode, '32');
+    assert.strictEqual(snapshot(pNew.PaymentId), beforeNew, 'отказ NEW не меняет выплату');
+
+    // F-18: REJECTED (тестовая карта 5000000000000553) → отказ
+    const pRej = JSON.parse((await e2c(mockPort, 'Init', { Amount: '10000', OrderId: 'f18-rej', DealId: dealId, Pan: '5000000000000553' })).body);
+    await e2c(mockPort, 'Payment', { PaymentId: pRej.PaymentId });
+    assert.strictEqual(state.payouts[pRej.PaymentId].status, 'REJECTED');
+    const beforeRej = snapshot(pRej.PaymentId);
+    const cRej = JSON.parse((await cancel({ PaymentId: pRej.PaymentId, DealId: dealId })).body);
+    assert.strictEqual(cRej.ErrorCode, '32', 'REJECTED не отменяется');
+    assert.strictEqual(snapshot(pRej.PaymentId), beforeRej);
+
+    // F-18/F-23: CONFIRMED партнёрская → успех, история CREDIT_CANCELING → CREDIT_CANCELED
+    const pOk = await partnerInit('f18-ok');
+    await e2c(mockPort, 'Payment', { PaymentId: pOk.PaymentId });
+    assert.strictEqual(state.payouts[pOk.PaymentId].status, 'CONFIRMED');
+    const cOk = JSON.parse((await cancel({ PaymentId: pOk.PaymentId, DealId: dealId })).body);
+    assert.strictEqual(cOk.Success, true, 'CONFIRMED партнёрская — отмена проходит');
+    assert.strictEqual(cOk.Status, 'CREDIT_CANCELED');
+    const okHistory = state.payouts[pOk.PaymentId].statusHistory.map((h) => h.status);
+    assert.deepStrictEqual(okHistory.slice(-2), ['CREDIT_CANCELING', 'CREDIT_CANCELED'], 'F-23: оба промежуточных статуса в истории');
+
+    // F-18: уже отменённая (CREDIT_CANCELED) и legacy CANCELED → отказ
+    const cAgain = JSON.parse((await cancel({ PaymentId: pOk.PaymentId, DealId: dealId })).body);
+    assert.strictEqual(cAgain.ErrorCode, '32', 'повторная отмена отказывает');
+    const pLegacy = await partnerInit('f18-legacy-canceled');
+    await e2c(mockPort, 'Payment', { PaymentId: pLegacy.PaymentId });
+    state.payouts[pLegacy.PaymentId].status = 'CANCELED';
+    const cLegacy = JSON.parse((await cancel({ PaymentId: pLegacy.PaymentId, DealId: dealId })).body);
+    assert.strictEqual(cLegacy.ErrorCode, '32', 'CANCELED не отменяется повторно');
+    assert.strictEqual(state.payouts[pLegacy.PaymentId].status, 'CANCELED', 'отказ не меняет статус');
+
+    // F-19: закрытая сделка → отказ без side effect
+    const closedDeal = await fundedDeal(mockPort, 100000, 'order-cxl-closed');
+    const pClosed = await partnerInit('f19-closed', '10000', closedDeal);
+    await e2c(mockPort, 'Payment', { PaymentId: pClosed.PaymentId });
+    await api(mockPort, 'closeSpDeal', { SpAccumulationId: closedDeal });
+    assert.strictEqual(state.deals[closedDeal].status, 'closed');
+    const beforeClosed = snapshot(pClosed.PaymentId, closedDeal);
+    const cClosed = JSON.parse((await cancel({ PaymentId: pClosed.PaymentId, DealId: closedDeal })).body);
+    assert.strictEqual(cClosed.Success, false, 'отмена в закрытой сделке отказывает');
+    assert.strictEqual(snapshot(pClosed.PaymentId, closedDeal), beforeClosed, 'F-19: закрытая сделка — без side effect');
+
+    // F-19: отсутствующая сделка → отказ без side effect
+    const goneDeal = await fundedDeal(mockPort, 100000, 'order-cxl-gone');
+    const pGone = await partnerInit('f19-gone', '10000', goneDeal);
+    await e2c(mockPort, 'Payment', { PaymentId: pGone.PaymentId });
+    delete state.deals[goneDeal];
+    const cGone = JSON.parse((await cancel({ PaymentId: pGone.PaymentId, DealId: goneDeal })).body);
+    assert.strictEqual(cGone.Success, false, 'отсутствующая сделка — отказ');
+    assert.strictEqual(state.payouts[pGone.PaymentId].status, 'CONFIRMED', 'F-19: выплата остаётся CONFIRMED');
+
+    // F-20: не-партнёрский канал (карта, СБП) → отказ, статус не меняется
+    const cardPay = JSON.parse((await e2c(mockPort, 'Init', { Amount: '10000', OrderId: 'f20-card', DealId: dealId, CardId: 'card-f20' })).body);
+    await e2c(mockPort, 'Payment', { PaymentId: cardPay.PaymentId });
+    const beforeCard = snapshot(cardPay.PaymentId);
+    const cCard = JSON.parse((await cancel({ PaymentId: cardPay.PaymentId, DealId: dealId })).body);
+    assert.strictEqual(cCard.Success, false, 'F-20: карточная выплата не отменяется');
+    assert.strictEqual(snapshot(cardPay.PaymentId), beforeCard);
+
+    const sbpPay = JSON.parse((await e2c(mockPort, 'Init', { Amount: '10000', OrderId: 'f20-sbp', DealId: dealId, Phone: '+79211234567', SbpMemberId: '100000000004' })).body);
+    await e2c(mockPort, 'Payment', { PaymentId: sbpPay.PaymentId });
+    const cSbp = JSON.parse((await cancel({ PaymentId: sbpPay.PaymentId, DealId: dealId })).body);
+    assert.strictEqual(cSbp.Success, false, 'F-20: выплата по СБП не отменяется');
+
+    // F-21: DealId обязателен и сверяется с выплатой
+    const pDeal = await partnerInit('f21-deal');
+    await e2c(mockPort, 'Payment', { PaymentId: pDeal.PaymentId });
+    const beforeDeal = snapshot(pDeal.PaymentId);
+    const cNoDeal = JSON.parse((await cancel({ PaymentId: pDeal.PaymentId, DealId: undefined })).body);
+    assert.strictEqual(cNoDeal.ErrorCode, '7', 'F-21: без DealId — код 7');
+    const otherDeal = await fundedDeal(mockPort, 100000, 'order-cxl-other');
+    const cMismatch = JSON.parse((await cancel({ PaymentId: pDeal.PaymentId, DealId: otherDeal })).body);
+    assert.strictEqual(cMismatch.ErrorCode, '7', 'F-21: чужой DealId — код 7');
+    assert.strictEqual(snapshot(pDeal.PaymentId), beforeDeal, 'F-21: отказы не меняют выплату');
+
+    // F-22: TerminalKey проверяется до поиска выплаты
+    const cNoTerm = JSON.parse((await cancel({ TerminalKey: undefined, PaymentId: pDeal.PaymentId, DealId: dealId })).body);
+    assert.strictEqual(cNoTerm.ErrorCode, '7', 'F-22: без TerminalKey — код 7');
+    const cBadTerm = JSON.parse((await cancel({ TerminalKey: 'OTHER-TERMINAL', PaymentId: 'P-NOPE', DealId: dealId })).body);
+    assert.strictEqual(cBadTerm.ErrorCode, '7', 'F-22: чужой TerminalKey отвечает 7 раньше поиска (не 4)');
+    assert.strictEqual(snapshot(pDeal.PaymentId), beforeDeal, 'F-22: отказ по терминалу без мутации');
+    const cValid = JSON.parse((await cancel({ TerminalKey: TERMINAL_KEY, PaymentId: pDeal.PaymentId, DealId: dealId })).body);
+    assert.strictEqual(cValid.Success, true, 'F-22: подписанный запрос с валидным терминалом — успех');
+    const cValidE2c = await partnerInit('f22-e2c-terminal');
+    await e2c(mockPort, 'Payment', { PaymentId: cValidE2c.PaymentId });
+    const cE2cKey = JSON.parse((await cancel({ TerminalKey: `${TERMINAL_KEY}E2C`, PaymentId: cValidE2c.PaymentId, DealId: dealId })).body);
+    assert.strictEqual(cE2cKey.Success, true, 'F-22: PAYOUT-терминал точки тоже допустим');
   }
 
   console.log(`selftest: ${WEBHOOK_HITS.length} webhook deliveries, ${Object.keys(state.payments).length} payment sessions`);

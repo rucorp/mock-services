@@ -204,8 +204,8 @@
     },
     "/e2c/v2/CancelPayment": {
       "post": {
-        "summary": "Отмена выплаты e2c с возвратом суммы в баланс сделки",
-        "responses": { "200": { "description": "Выплата отменена (Status=CANCELED)" } }
+        "summary": "Отмена успешной (CONFIRMED) выплаты партнёру (PartnerId) в открытой сделке; запрос обязан содержать DealId, совпадающий со сделкой выплаты. Статусы CREDIT_CANCELING → CREDIT_CANCELED; при отказе выплата остаётся в исходном статусе",
+        "responses": { "200": { "description": "Выплата отменена (Status=CREDIT_CANCELED). Ошибка 7 — нет DealId/не совпадает, 32 — статус не CONFIRMED, канал не партнёрский или сделка закрыта, 8 — сделка не найдена" } }
       }
     },
     "/e2c/v2/GetSbpMembers": {

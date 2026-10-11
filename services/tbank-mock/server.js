@@ -58,6 +58,9 @@ const {
 
 const TERMINAL_KEY = MOCK_TERMINAL_KEY || TBANK_TERMINAL_KEY || 'TBANKMOCKTEST';
 const TERMINAL_PASSWORD = MOCK_TERMINAL_PASSWORD || TBANK_TERMINAL_PASSWORD || 'mockpass123';
+// PAYOUT-терминал зарегистрированной через acqapi точки (`/sm-register/register`
+// отдаёт его в `terminals`); `/e2c/v2/Init` и `/e2c/v2/CancelPayment` принимают оба ключа (F-17/F-22).
+const E2C_TERMINAL_KEY = `${TERMINAL_KEY}E2C`;
 const RETRY_MS = Math.max(1000, parseInt(MOCK_RETRY_MS, 10) || 60000);
 const MAX_ATTEMPTS = Math.max(1, parseInt(MOCK_MAX_ATTEMPTS, 10) || 24);
 const STRICT_TOKEN = String(MOCK_STRICT_TOKEN).toLowerCase() !== 'false';
@@ -207,8 +210,8 @@ const PAYOUT_CARD_SCENARIOS = new Map([
  * ни в state, ни в снимке `/mock/state`, ни в журнале. Возвращаем только
  * маску (BIN + последние 4) и выбранный тестовый сценарий.
  */
-function resolvePayoutCard(pan, cardId) {
-  const candidates = [pan, cardId].map((value) => String(value ?? '').trim()).filter(Boolean);
+function resolvePayoutCard(...values) {
+  const candidates = values.map((value) => String(value ?? '').trim()).filter(Boolean);
   const cardNumber = candidates.find((value) => core.looksLikePan(value)) || '';
   const scenarioSource = candidates.find((value) => PAYOUT_CARD_SCENARIOS.has(value));
   return {
@@ -236,6 +239,153 @@ function scrubLegacyPan(targetState) {
     scrubbed += 1;
   }
   return scrubbed;
+}
+
+/* ---------------------------------------- e2c payout validation (F-17…F-23) */
+
+const PAYOUT_REF_DOC = '/e2c'; // путь в developer.tbank.ru/eacq (03-payouts-and-deals.md)
+
+/** Непустая строка без внешних пробелов или null. */
+function textOrNull(value) {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  return text === '' ? null : text;
+}
+
+/** Запись перехода статуса выплаты (в legacy-снимках истории может не быть). */
+function pushPayoutStatus(payout, status) {
+  const at = clock.iso();
+  if (!Array.isArray(payout.statusHistory)) payout.statusHistory = [];
+  payout.status = status;
+  payout.statusHistory.push({ status, at });
+  return at;
+}
+
+/**
+ * Общие обязательные поля `/e2c/v2/Init` по reference 03-payouts-and-deals.md:
+ * TerminalKey (проверяется отдельно), OrderId, Amount, DealId, PaymentRecipientId
+ * (≤16 символов). Возвращает нормализованные значения или provider-shaped ошибку —
+ * до выделения PaymentId и записи в state (F-17).
+ */
+function validatePayoutInitFields(body) {
+  const amount = parseInt(body.Amount, 10);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return {
+      error: err(7, 'Обязательные параметры не заполнены или невалидны: Amount — целое число копеек больше нуля', null, {
+        field: 'Amount',
+        doc: PAYOUT_REF_DOC,
+      }),
+    };
+  }
+  const orderId = textOrNull(body.OrderId);
+  const dealId = textOrNull(body.DealId);
+  const recipientId = textOrNull(body.PaymentRecipientId);
+  const missing = [];
+  if (!orderId) missing.push('OrderId');
+  if (!dealId) missing.push('DealId');
+  if (!recipientId) missing.push('PaymentRecipientId');
+  if (missing.length) {
+    return {
+      error: err(7, `Обязательные параметры не заполнены: ${missing.join(', ')}`, null, {
+        field: missing.join(', '),
+        doc: PAYOUT_REF_DOC,
+        hint: 'Init выплаты требует TerminalKey, OrderId, Amount, DealId, PaymentRecipientId, подпись и ровно один канал выплаты (CardId/CardData, Phone+SbpMemberId или PartnerId).',
+      }),
+    };
+  }
+  if (recipientId.length > 16) {
+    return {
+      error: err(7, `PaymentRecipientId «${recipientId}» длиннее 16 символов`, null, {
+        field: 'PaymentRecipientId',
+        doc: PAYOUT_REF_DOC,
+      }),
+    };
+  }
+  return { amount, orderId, dealId, recipientId };
+}
+
+/**
+ * Канал выплаты (F-17; reference 03-payouts-and-deals.md): у Init ровно один
+ * из наборов —
+ *   card    — `CardId` (карта из AddCard/Init) или `CardData`/`Pan` (карта по данным;
+ *             в моке `Pan` — открытый shortcut вместо X509-блока, хранится только маска);
+ *   sbp     — `Phone` (11 цифр) + `SbpMemberId` (банк-получатель из GetSbpMembers);
+ *   partner — `PartnerId` = shopCode точки, зарегистрированной через acqapi.
+ * Возвращает нормализованный канал (`recipientType`/`recipientId`) или ошибку.
+ */
+function resolvePayoutChannel(body, amount) {
+  const partnerId = textOrNull(body.PartnerId);
+  const phone = textOrNull(body.Phone);
+  const sbpMemberId = textOrNull(body.SbpMemberId);
+  const cardId = textOrNull(body.CardId);
+  const cardData = textOrNull(body.CardData) || textOrNull(body.Pan);
+  const used = [];
+  if (partnerId) used.push('PartnerId');
+  if (phone || sbpMemberId) used.push('Phone/SbpMemberId');
+  if (cardId || cardData) used.push('CardId/CardData');
+
+  if (used.length === 0) {
+    return {
+      error: err(7, 'Не передан канал выплаты: укажите ровно один набор — CardId|CardData (карта), Phone+SbpMemberId (СБП) или PartnerId (партнёр)', null, {
+        field: 'PartnerId | Phone | CardId',
+        doc: PAYOUT_REF_DOC,
+      }),
+    };
+  }
+  if (used.length > 1) {
+    return {
+      error: err(7, `Канал выплаты определён неоднозначно: переданы ${used.join(' и ')} (у Init выплаты ровно один канал)`, null, {
+        field: used.join(', '),
+        doc: PAYOUT_REF_DOC,
+      }),
+    };
+  }
+
+  if (partnerId) {
+    const shop = state.shops[partnerId];
+    if (!shop) {
+      return {
+        error: err(8, `Партнёр PartnerId=«${partnerId}» не найден: выплата партнёру идёт на shopCode зарегистрированной точки`, null, {
+          field: 'PartnerId',
+          doc: PAYOUT_REF_DOC,
+          hint: 'Зарегистрируйте точку: POST /oauth/token → POST /sm-register/register; shopCode из ответа передаётся как PartnerId.',
+        }),
+      };
+    }
+    return { channel: { recipientType: 'partner', recipientId: partnerId, partnerId } };
+  }
+
+  if (phone || sbpMemberId) {
+    if (!phone || !sbpMemberId) {
+      return {
+        error: err(7, `Канал СБП требует оба параметра: Phone (11 цифр) и SbpMemberId — не передан ${phone ? 'SbpMemberId' : 'Phone'}`, null, {
+          field: phone ? 'SbpMemberId' : 'Phone',
+          doc: PAYOUT_REF_DOC,
+          hint: 'Список банков-получателей и их MemberId — POST /e2c/v2/GetSbpMembers.',
+        }),
+      };
+    }
+    const phoneDigits = phone.replace(/\D/g, '');
+    if (!/^[+\d\s()-]+$/.test(phone) || !/^\d{11}$/.test(phoneDigits)) {
+      return {
+        error: err(7, `Phone «${phone}» должен содержать 11 цифр (например +79211234567)`, null, {
+          field: 'Phone',
+          doc: PAYOUT_REF_DOC,
+        }),
+      };
+    }
+    if (amount < 1000) {
+      return {
+        error: err(7, `Минимальная сумма выплаты по СБП — 10 ₽ (1000 коп.), передано ${amount} коп.`, null, {
+          field: 'Amount',
+          doc: PAYOUT_REF_DOC,
+        }),
+      };
+    }
+    return { channel: { recipientType: 'sbp', recipientId: phoneDigits, phone: phoneDigits, sbpMemberId } };
+  }
+
+  return { channel: { recipientType: 'card', recipientId: cardId } };
 }
 
 /* ------------------------------------------------------------ notifications */
@@ -737,6 +887,21 @@ function checkTerminalKey(body) {
     : err(7, `TerminalKey «${body && body.TerminalKey}» не соответствует стенду (ожидается «${TERMINAL_KEY}»)`);
 }
 
+/**
+ * Терминал выплат (F-17/F-22): точное совпадение с ключом стенда или с
+ * PAYOUT-терминалом зарегистрированной точки (`sm-register` отдаёт `${TERMINAL_KEY}E2C`).
+ * Проверяется до поиска и мутации выплаты, чтобы подписанный запрос с чужим
+ * TerminalKey не проходил по чужому телу.
+ */
+function checkE2cTerminalKey(body) {
+  const given = body && body.TerminalKey;
+  if (given === TERMINAL_KEY || given === E2C_TERMINAL_KEY) return null;
+  return err(7, `TerminalKey «${given}» не соответствует стенду (ожидается «${TERMINAL_KEY}» или PAYOUT-терминал «${E2C_TERMINAL_KEY}»)`, null, {
+    field: 'TerminalKey',
+    doc: PAYOUT_REF_DOC,
+  });
+}
+
 function handleInit(body, reqHeaders = {}) {
   const badTerminal = checkTerminalKey(body);
   if (badTerminal) return badTerminal;
@@ -785,6 +950,26 @@ function handleInit(body, reqHeaders = {}) {
     return err(7, 'Для рекуррентного платежа (Recurrent=Y) обязателен параметр CustomerKey (или DATA.Phone / DATA.Email)', null, { field: 'CustomerKey', doc: '/api/init' });
   }
 
+  // F-16: в профиле Мультирасчетов PaymentRecipientId обязателен — «идентификатор
+  // будущего получателя выплаты», ≤16 символов (01-payment-api.md). Проверка идёт
+  // до создания платежа/сделки; plain-профиль требования не знает и не меняется.
+  const recipientRaw = textOrNull(body.PaymentRecipientId);
+  if (PROFILE === 'multisplit') {
+    if (!recipientRaw) {
+      return err(7, 'Для профиля Мультирасчетов обязателен PaymentRecipientId — идентификатор будущего получателя выплаты (телефон/email/иной, до 16 символов)', null, {
+        field: 'PaymentRecipientId',
+        doc: '/api/init',
+        hint: 'PaymentRecipientId передаётся в Init и связывает платёж с будущей выплатой получателю; без него банк отклоняет Init.',
+      });
+    }
+    if (recipientRaw.length > 16) {
+      return err(7, `PaymentRecipientId «${recipientRaw}» длиннее 16 символов`, null, {
+        field: 'PaymentRecipientId',
+        doc: '/api/init',
+      });
+    }
+  }
+
   let dealId = null;
   const createDeal = String(body.CreateDealWithType || '').toUpperCase() === 'NN';
   if (PROFILE === 'plain' && !body.DealId && !createDeal) {
@@ -813,7 +998,7 @@ function handleInit(body, reqHeaders = {}) {
     createdAt: nowIso,
     createdAtMs: clock.now(),
     dealId,
-    recipientId: body.PaymentRecipientId || null,
+    recipientId: recipientRaw,
     customerKey: body.CustomerKey || null,
     recurrent: isRecurrent,
     rebillId: null,
@@ -1926,7 +2111,7 @@ async function route(req, res) {
         res,
         err(7, `billingDescriptor «${descriptor}» невалиден (до 14 символов: латиница, цифры, точка, пробел, дефис, подчёркивание)`, null, {
           field: 'billingDescriptor',
-          doc: '03-payouts-and-deals.md',
+          doc: '/e2c',
         }),
         400,
       );
@@ -1947,7 +2132,7 @@ async function route(req, res) {
       status: 'ACTIVE',
       terminals: [
         { terminalKey: `${TERMINAL_KEY}`, type: 'ACQUIRING' },
-        { terminalKey: `${TERMINAL_KEY}E2C`, type: 'PAYOUT' },
+        { terminalKey: E2C_TERMINAL_KEY, type: 'PAYOUT' },
       ],
       createdAt: clock.iso(),
     };
@@ -2043,49 +2228,58 @@ async function route(req, res) {
   // ── E2C-выплаты (Init → Payment → GetState / CancelPayment / GetSbpMembers)
   if (p === '/e2c/v2/Init' && req.method === 'POST') {
     if (!verifyToken(body)) return sendJson(res, err(13, 'Неверный Token (подпись) запроса'));
-    const amount = parseInt(body.Amount, 10);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      return sendJson(res, err(7, 'Обязательные параметры не заполнены (Amount)'));
+    // F-17: общие обязательные поля, ровно один канал выплаты и сделка — до
+    // выделения PaymentId; неполная выплата в state не попадает.
+    const badTerminal = checkE2cTerminalKey(body);
+    if (badTerminal) return sendJson(res, badTerminal);
+    const fields = validatePayoutInitFields(body);
+    if (fields.error) return sendJson(res, fields.error);
+    const { amount, orderId, dealId, recipientId } = fields;
+    const resolvedChannel = resolvePayoutChannel(body, amount);
+    if (resolvedChannel.error) return sendJson(res, resolvedChannel.error);
+    const channel = resolvedChannel.channel;
+
+    const deal = findDeal(dealId);
+    if (!deal) {
+      return sendJson(res, err(8, `Сделка DealId=«${dealId}» не найдена`, null, { field: 'DealId', doc: PAYOUT_REF_DOC }));
     }
-    const dealId = body.DealId !== undefined && body.DealId !== null && body.DealId !== '' ? String(body.DealId) : null;
-    if (dealId) {
-      const deal = findDeal(dealId);
-      if (!deal) {
-        return sendJson(res, err(8, `Сделка DealId=«${dealId}» не найдена`, null, { field: 'DealId' }));
-      }
-      if (deal.status !== 'open') {
-        return sendJson(res, err(32, `Выплата по сделке «${dealId}» невозможна: сделка закрыта (status=${deal.status})`, null, { field: 'DealId' }));
-      }
-      const available = dealBalance(deal);
-      if (amount > available) {
-        return sendJson(
-          res,
-          err(
-            32,
-            `Сумма выплаты ${amount} коп. превышает доступный остаток по сделке ${dealId} (${available} коп.)`,
-            `Amount=${amount}, DealBalance=${available}`,
-            { field: 'Amount', hint: 'Баланс сделки = сумма подтверждённых приходов минус возвраты, чарджбэки и ранее проведённые выплаты.' },
-          ),
-        );
-      }
+    if (deal.status !== 'open') {
+      return sendJson(res, err(32, `Выплата по сделке «${dealId}» невозможна: сделка закрыта (status=${deal.status})`, null, { field: 'DealId', doc: PAYOUT_REF_DOC }));
+    }
+    const available = dealBalance(deal);
+    if (amount > available) {
+      return sendJson(
+        res,
+        err(
+          32,
+          `Сумма выплаты ${amount} коп. превышает доступный остаток по сделке ${dealId} (${available} коп.)`,
+          `Amount=${amount}, DealBalance=${available}`,
+          { field: 'Amount', hint: 'Баланс сделки = сумма подтверждённых приходов минус возвраты, чарджбэки и ранее проведённые выплаты.' },
+        ),
+      );
     }
     const payoutPaymentId = 'P-' + String(state.counters.payoutId++);
     const finalPayout = body.FinalPayout === true || body.FinalPayout === 'true';
     // F-10: полный PAN не сохраняем — только маска и выбранный тестовый сценарий.
-    const card = resolvePayoutCard(body.Pan, body.CardId);
-    const rawCardId = body.CardId ? String(body.CardId) : null;
+    const card = resolvePayoutCard(body.Pan, body.CardId, body.CardData);
+    const rawCardId = textOrNull(body.CardId);
     state.payouts[payoutPaymentId] = {
       paymentId: payoutPaymentId,
       amount,
-      orderId: String(body.OrderId || ''),
+      orderId,
       customerKey: String(body.CustomerKey || ''),
       dealId,
       finalPayout,
+      // F-20: нормализованный канал/получатель — по нему CancelPayment решает,
+      // партнёрская ли это выплата.
+      recipientType: channel.recipientType,
+      recipientId,
+      partnerId: channel.partnerId || null,
       cardId: rawCardId && core.looksLikePan(rawCardId) ? maskPan(rawCardId) : rawCardId,
       panMask: card.panMask,
       cardScenario: card.cardScenario,
-      phone: body.Phone ? String(body.Phone) : null,
-      bankMemberId: body.BankMemberId ? String(body.BankMemberId) : null,
+      phone: channel.phone || null,
+      sbpMemberId: channel.sbpMemberId || null,
       recipient: {
         account: String(body.Account || ''),
         bank: String(body.Bank || ''),
@@ -2097,15 +2291,15 @@ async function route(req, res) {
       createdAt: clock.iso(),
     };
     persist();
-    console.log(`[mock] e2c Init ${payoutPaymentId}: ${amount}коп, order=${body.OrderId || ''}${dealId ? `, deal=${dealId}` : ''}`);
+    console.log(`[mock] e2c Init ${payoutPaymentId}: ${amount}коп, order=${orderId}, deal=${dealId}, канал=${channel.recipientType}`);
     return sendJson(res, {
       Success: true,
       ErrorCode: '0',
-      TerminalKey: body.TerminalKey || TERMINAL_KEY,
+      TerminalKey: TERMINAL_KEY,
       PaymentId: payoutPaymentId,
-      OrderId: String(body.OrderId || ''),
+      OrderId: orderId,
       Amount: amount,
-      DealId: dealId || undefined,
+      DealId: dealId,
       Status: 'NEW',
     });
   }
@@ -2113,16 +2307,15 @@ async function route(req, res) {
   if (p === '/e2c/v2/Payment' && req.method === 'POST') {
     if (!verifyToken(body)) return sendJson(res, err(13, 'Неверный Token (подпись) запроса'));
     const payout = state.payouts[String(body.PaymentId || '')];
-    if (!payout) return sendJson(res, err(4, 'Выплата не найдена'));
+    if (!payout) return sendJson(res, err(4, 'Выплата не найдена', null, { field: 'PaymentId', doc: PAYOUT_REF_DOC }));
     if (payout.status !== 'NEW' && payout.status !== 'CHECKED') {
       return sendJson(res, err(32, 'Неверный статус выплаты: ' + payout.status));
     }
     // Официальный тестовый кейс выплаты с ошибкой: карта 5000000000000553 -> REJECTED 1057.
     // Сценарий выбран в Init; PAN в состоянии не хранится (F-10).
     if (payout.cardScenario === 'reject-1057') {
-      payout.status = 'REJECTED';
       payout.errorCode = '1057';
-      payout.statusHistory.push({ status: 'REJECTED', at: clock.iso() });
+      pushPayoutStatus(payout, 'REJECTED');
       persist();
       return sendJson(res, {
         Success: false,
@@ -2144,8 +2337,7 @@ async function route(req, res) {
         return sendJson(res, err(32, `Недостаточно средств в сделке ${payout.dealId}: доступно ${available} коп., запрошено ${payout.amount} коп.`));
       }
     }
-    payout.status = 'CONFIRMED';
-    payout.statusHistory.push({ status: 'CONFIRMED', at: clock.iso() });
+    pushPayoutStatus(payout, 'CONFIRMED');
     // Если FinalPayout=true — сделка автоматически переходит в closed, остаток становится вознаграждением площадки
     let dealClosed = false;
     let platformReward;
@@ -2173,7 +2365,7 @@ async function route(req, res) {
   if (p === '/e2c/v2/GetState' && req.method === 'POST') {
     if (!verifyToken(body)) return sendJson(res, err(13, 'Неверный Token (подпись) запроса'));
     const payout = state.payouts[String(body.PaymentId || '')];
-    if (!payout) return sendJson(res, err(4, 'Выплата не найдена'));
+    if (!payout) return sendJson(res, err(4, 'Выплата не найдена', null, { field: 'PaymentId', doc: PAYOUT_REF_DOC }));
     return sendJson(res, {
       Success: true,
       ErrorCode: payout.errorCode || '0',
@@ -2185,22 +2377,70 @@ async function route(req, res) {
     });
   }
 
+  // Отмена выплаты: только успешная (CONFIRMED) выплата партнёру в открытой сделке
+  // (reference 03-payouts-and-deals.md §CancelPayment; трактовки координатора #15).
+  // Любой отказ возвращается до мутации — выплата остаётся в исходном статусе (F-18—F-22).
   if (p === '/e2c/v2/CancelPayment' && req.method === 'POST') {
     if (!verifyToken(body)) return sendJson(res, err(13, 'Неверный Token (подпись) запроса'));
-    const payout = state.payouts[String(body.PaymentId || '')];
-    if (!payout) return sendJson(res, err(4, 'Выплата не найдена'));
-    if (payout.status === 'REJECTED' || payout.status === 'CANCELED') {
-      return sendJson(res, err(32, `Выплата уже в статусе ${payout.status}`));
+    // F-22: точный TerminalKey — до поиска выплаты и любой мутации.
+    const badTerminal = checkE2cTerminalKey(body);
+    if (badTerminal) return sendJson(res, badTerminal);
+    // F-21: DealId обязателен в запросе и сверяется со сделкой выплаты.
+    const requestDealId = textOrNull(body.DealId);
+    if (!requestDealId) {
+      return sendJson(res, err(7, 'Обязательный параметр DealId не передан', null, {
+        field: 'DealId',
+        doc: PAYOUT_REF_DOC,
+        hint: 'CancelPayment отменяет выплату в рамках сделки: DealId обязателен и должен совпадать со сделкой выплаты.',
+      }));
     }
-    payout.status = 'CANCELED';
-    payout.statusHistory.push({ status: 'CANCELED', at: clock.iso() });
+    const payout = state.payouts[String(body.PaymentId || '')];
+    if (!payout) return sendJson(res, err(4, 'Выплата не найдена', null, { field: 'PaymentId', doc: PAYOUT_REF_DOC }));
+    if (String(payout.dealId || '') !== requestDealId) {
+      return sendJson(res, err(7, `DealId «${requestDealId}» не совпадает со сделкой выплаты (${payout.dealId || 'сделка не указана'})`, null, {
+        field: 'DealId',
+        doc: PAYOUT_REF_DOC,
+      }));
+    }
+    // F-18: отменяется только успешная выплата (в модели мока успех — CONFIRMED).
+    if (payout.status !== 'CONFIRMED') {
+      return sendJson(res, err(32, `Отменить можно только успешную выплату (CONFIRMED), текущий статус — ${payout.status}`, null, {
+        field: 'PaymentId',
+        doc: PAYOUT_REF_DOC,
+        hint: 'CancelPayment в банке отменяет успешную выплату; незавершённые/отклонённые выплаты не отменяются.',
+      }));
+    }
+    // F-19: сделка выплаты существует и открыта.
+    const deal = findDeal(payout.dealId);
+    if (!deal) {
+      return sendJson(res, err(8, `Сделка «${payout.dealId}» выплаты не найдена`, null, { field: 'DealId', doc: PAYOUT_REF_DOC }));
+    }
+    if (deal.status !== 'open') {
+      return sendJson(res, err(32, `Сделка «${payout.dealId}» закрыта (status=${deal.status}): отмена выплаты невозможна`, null, {
+        field: 'DealId',
+        doc: PAYOUT_REF_DOC,
+      }));
+    }
+    // F-20: только партнёрский канал («перечисление третьему лицу»).
+    if (payout.recipientType !== 'partner') {
+      return sendJson(res, err(32, `Отмена доступна только для выплаты партнёру (PartnerId), канал выплаты — ${payout.recipientType || 'не определён'}`, null, {
+        field: 'PartnerId',
+        doc: PAYOUT_REF_DOC,
+        hint: 'Канал выплаты фиксируется в /e2c/v2/Init: для отмены нужен партнёрский канал (PartnerId = shopCode).',
+      }));
+    }
+    // F-23: статусная модель отмены — CREDIT_CANCELING → CREDIT_CANCELED.
+    const canceledAt = pushPayoutStatus(payout, 'CREDIT_CANCELING');
+    pushPayoutStatus(payout, 'CREDIT_CANCELED');
+    payout.canceledAt = canceledAt;
     persist();
+    console.log(`[mock] e2c CancelPayment ${payout.paymentId}: CREDIT_CANCELED (${payout.amount}коп, deal=${payout.dealId})`);
     return sendJson(res, {
       Success: true,
       ErrorCode: '0',
       PaymentId: payout.paymentId,
-      Status: 'CANCELED',
-      DealId: payout.dealId || undefined,
+      Status: 'CREDIT_CANCELED',
+      DealId: payout.dealId,
     });
   }
 
