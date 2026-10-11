@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Протокольная точность Мультирасчётов: Init recipient и CancelPayment (#25, F-16—F-23).**
+  - `Init` в профиле `multisplit` требует `PaymentRecipientId` (≤16 символов) до создания платежа; `plain` не меняется.
+  - `/e2c/v2/Init` валидирует общие поля (`OrderId`, `Amount`, `DealId`, `PaymentRecipientId`), ровно один канал выплаты (карта / СБП `Phone`+`SbpMemberId` / партнёр `PartnerId`) и сохраняет нормализованный канал; неполная выплата в state не попадает.
+  - `/e2c/v2/CancelPayment` отменяет только `CONFIRMED`-выплату партнёру в открытой сделке, требует `DealId` и сверяет его с выплатой, проверяет `TerminalKey` до поиска; статусы `CREDIT_CANCELING` → `CREDIT_CANCELED`; при отказе выплата не меняется.
+
 ### Security
 - **Редакция секретов в журналах и минимизация PAN (#24, F-09/F-10).** В ядро
   добавлен слой редакции: ключи-секреты (`Authorization`, `Cookie`, `token`,
