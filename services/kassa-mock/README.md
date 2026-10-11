@@ -1,3 +1,6 @@
+© 2026 ООО «Аксиома» ИНН:7842223709 · https://github.com/rucorp/mock-services · все права защищены
+Документ проекта mock-services (оригинал: rucorp/mock-services).
+
 # kassa-mock — мок облачной кассы OFD Ferma (T-038)
 
 Пара к `tbank-mock`: вместе они образуют полный мок-стенд «банк + касса» для
@@ -118,8 +121,50 @@ FERMA_CALLBACK_SECRET=<секрет>
 | `MOCK_OPERATOR_TOKEN` | — | токен управляющей поверхности: `/mock/*`, смены ККТ, `/fn/state`, `/ofd/*` (fallback — `MOCK_ADMIN_TOKEN`) |
 | `MOCK_ADMIN_TOKEN` | — | токен админки `/admin*` |
 | `MOCK_HOSTED` | `false` | hosted-режим: управляющая поверхность fail-closed без токена, SSRF-политика по умолчанию |
+| `MOCK_TENANCY` | `owned` при `MOCK_HOSTED=1`, иначе `namespaces` | режим аренды: `1`/`on` — hosted tenancy с owner-token, `0`/`off` — одна общая песочница (селектор игнорируется) |
+| `MOCK_SANDBOX_TOKEN` | — | owner-token default-песочницы в hosted; без него `default` открыт (при старте пишется предупреждение) |
+| `MOCK_SANDBOX_TTL_MS` | 24 ч в hosted, иначе 0 (бессрочно) | TTL именованной песочницы; истёкшие удаляет sweep-воркер |
+| `MOCK_SANDBOX_MAX` | `100` в hosted, иначе `256` | максимум именованных песочниц |
+| `MOCK_SANDBOX_MAX_DOCUMENTS` | `5000` в hosted, иначе `0` (без лимита) | квота документов песочницы (F-15) |
+| `MOCK_SANDBOX_HOST_SUFFIX` | — | суффикс поддоменов песочниц, напр. `mock-services.dev`: `<id>.mock-services.dev` |
+| `MOCK_SANDBOX_CREATE_LIMIT` | `20` в hosted, иначе `0` | лимит создания песочниц на IP в час |
+| `MOCK_SANDBOX_FILE` | `<MOCK_STATE_FILE>.sandboxes.json` | файл реестра песочниц (owner-токены — только хэши) |
+| `MOCK_SANDBOX_SWEEP_MS` | `60000` | интервал воркера TTL/retention |
+| `MOCK_SANDBOX_RETENTION_MS` | `0` (выкл.) | retention диагностических записей (отправленные ОФД-записи, истёкшие токены) |
 | `MOCK_FERMA_DOWN` / `MOCK_FERMA_DOWN_MS` | `false` / `0` | старт «касса недоступна» и авто-восстановление |
 | `MOCK_STATE_FILE` | — | файл персистентности; без него состояние в памяти |
+
+## Песочницы и hosted tenancy (RFC-001, A-21)
+
+Каждый запрос разрешает свою песочницу **один раз** и дальше видит только её
+состояние, креды и персистентность: параллельные A/B-запросы не смешиваются
+между `await` (включая токены `getToken`), а запрос без селектора всегда
+попадает в `default`. Селектор: `X-Mock-Sandbox: <id>` → `?sandbox=<id>` →
+поддомен `<id>.<MOCK_SANDBOX_HOST_SUFFIX>` (если суффикс задан).
+
+| Режим | Включается | Поведение |
+|---|---|---|
+| `namespaces` | дефолт self-hosted | `X-Mock-Sandbox` создаёт изолированное пространство имён для параллельных CI-воркеров; креды и управляющие токены — общие |
+| `owned` | `MOCK_TENANCY=1` или `MOCK_HOSTED=1` | hosted tenancy: у каждой песочницы свои креды Ferma и owner-token (показывается один раз); знание id без owner-token доступа не даёт (401, код 11), неизвестный id — 404 (код 10), истёкший — 410 |
+| `off` | `MOCK_TENANCY=0` | одна общая песочница `default`; селектор игнорируется |
+
+API (в `owned` — с owner-token; в `namespaces` те же маршруты управляют
+пространствами имён без owner-token):
+
+| Запрос | Что делает |
+|---|---|
+| `POST /sandboxes` | создать песочницу: `id`, `url`, `creds` (свой логин/пароль/группа Ferma) и `ownerToken` — показывается один раз |
+| `GET /sandboxes` (алиас `GET /mock/sandboxes`) | список: владельцу — своя песочница, оператору (`MOCK_OPERATOR_TOKEN`) — все |
+| `DELETE /sandboxes?sandbox=<id>` | удалить песочницу вместе с состоянием (владелец или оператор) |
+| `GET /sandboxes/me` | своя песочница: состояние, креды, TTL, расход квоты; `POST /sandboxes/me/reset`, `POST /sandboxes/me/reset-creds`, `DELETE /sandboxes/me` |
+
+Owner-token принимается в `Authorization: Bearer`, `X-Sandbox-Token` или
+`?sandbox_token=`. Персистентность: реестр песочниц пишется атомарно в
+`<MOCK_STATE_FILE>.sandboxes.json` (хэши owner-токенов + снимки состояния), а
+`default` всегда восстанавливается только из `MOCK_STATE_FILE` — состояние
+именованной песочницы не может быть выдано за `default` (F-14). Просроченные
+песочницы удаляет sweep-воркер; квота документов (`MOCK_SANDBOX_MAX_DOCUMENTS`,
+F-15) проверяется до фискализации и отвечает ошибкой 4 с подсказкой.
 
 ## staging
 

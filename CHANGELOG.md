@@ -1,9 +1,37 @@
+© 2026 ООО «Аксиома» ИНН:7842223709 · https://github.com/rucorp/mock-services · все права защищены
+Документ проекта mock-services (оригинал: rucorp/mock-services).
+
 # Changelog
 
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версии — [SemVer](https://semver.org/lang/ru/).
 
 ## [Unreleased]
+
+### Added
+- **Изоляция песочниц: request-local контекст и hosted tenancy за env-флагом (#8, RFC-001, A-21, F-11—F-15).**
+  - ядро `createSandboxRuntime`: контекст песочницы разрешается на каждый запрос ровно один раз
+    (`X-Mock-Sandbox` → `?sandbox=` → поддомен при `MOCK_SANDBOX_HOST_SUFFIX`) и резолвится
+    через `AsyncLocalStorage` — параллельные A/B-запросы не смешивают `state`, креды и
+    `persist` между `await`, а запрос без селектора не остаётся в предыдущей песочнице (F-11);
+  - режимы аренды `MOCK_TENANCY=off|namespaces|owned` (`MOCK_HOSTED=1` включает `owned`):
+    у песочницы собственные креды терминала/Ferma и `ownerToken`, показываемый один раз;
+    знание id без токена доступа не даёт — 401, чужой снимок состояния не читается (F-12);
+  - API `POST /sandboxes`, `GET /sandboxes` (алиас `/mock/sandboxes`), `/sandboxes/me`
+    (инфо, `reset`, `reset-creds`, удаление); `/mock/state` и `/mock/reset` принимают явный
+    target и не переключают активную песочницу (F-13);
+  - lifecycle (F-14): реестр песочниц пишется атомарно в `<MOCK_STATE_FILE>.sandboxes.json`
+    (owner-токены — только хэши), TTL + sweep-воркер, лимит количества, запрет relabel
+    чужого state как `default`;
+  - квоты (F-15): `MOCK_SANDBOX_MAX_DOCUMENTS` и retention per sandbox, счётчики документов
+    учитывают растущие коллекции; ссылочные индексы `OrderId`/`DealId` убирают полное
+    сканирование истории на hot paths (Init/GetState/CheckOrder, баланс сделки) и
+    пересобираются при загрузке файла/импорте снимка — старый state-файл без индексов
+    обслуживается корректно; compose-selftest выполняется в одноразовой песочнице и
+    убирает её за собой в `finally` — повторные прогоны не накапливают данные (F-33);
+  - env песочниц (`MOCK_TENANCY`, `MOCK_SANDBOX_TOKEN`, TTL/лимиты) прокинуты в
+    `docker-compose.include.yml`, копирайт-шапки §3 добавлены в тронутые `*.md`.
+  - новые маршруты описаны в OpenAPI 3.1 и манифестах протоколов (дрейф 142/142).
 
 ### Fixed
 - **Протокольная точность Мультирасчётов: Init recipient и CancelPayment (#25, F-16—F-23).**

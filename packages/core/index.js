@@ -30,6 +30,7 @@ const crypto = require('crypto');
 const dns = require('dns');
 const fs = require('fs');
 const path = require('path');
+const { AsyncLocalStorage } = require('async_hooks');
 
 /* ------------------------------------------------------------- env flags */
 
@@ -993,6 +994,10 @@ function createDeliveryQueue({
   blockPrivateHosts = false,
   now = () => Date.now(),
 }) {
+  // `entries` может быть объектом (как раньше) или функцией: в этом случае она
+  // резолвится на каждом тике — так очередь работает с состоянием песочницы,
+  // в контексте которой запущен tick (F-11/F-14).
+  const entriesOf = () => (typeof entries === 'function' ? entries() : entries);
   const isDue = due || ((entry) => !entry.done && now() >= (entry.nextAttemptAt || 0) && entry.attempts < maxAttempts);
   const onFail = onFailure || ((entry, status, body) => {
     entry.attempts += 1;
@@ -1033,9 +1038,10 @@ function createDeliveryQueue({
   }
 
   async function tick() {
-    const ids = Object.keys(entries);
+    const currentEntries = entriesOf() || {};
+    const ids = Object.keys(currentEntries);
     for (const id of ids) {
-      const entry = entries[id];
+      const entry = currentEntries[id];
       if (!entry || inFlight.has(id)) continue;
       if (!isDue(entry)) continue;
       prepare(entry);
@@ -1109,6 +1115,16 @@ const DURATION_UNITS = {
  *   parseDuration("1d 12h")  -> 129600000
  *   parseDuration("bad")     -> null
  */
+/**
+ * Разбор длительности из env/JSON с fallback: '' / мусор -> fallback, «0» -> 0.
+ * Отличается от `parseInt(...) || default`, который не даёт выключить лимит нулём (A-10).
+ */
+function parseMsOr(raw, fallback = 0) {
+  const parsed = parseDuration(raw);
+  if (parsed === null) return fallback;
+  return Math.max(0, parsed);
+}
+
 function parseDuration(input) {
   if (input === null || input === undefined || input === '') return null;
   if (typeof input === 'number' && Number.isFinite(input)) return Math.round(input);
@@ -1595,6 +1611,635 @@ function createSandboxManager({ state, persist = () => {}, initialStateFactory }
   };
 }
 
+/* ------------------------------------- request-local песочницы (RFC-001, A-21) */
+
+const SANDBOX_ID_UNSAFE = /[^a-zA-Z0-9_.-]/g;
+const SANDBOX_ID_MAX = 64;
+const SANDBOX_WORDS_ADJ = [
+  'swift', 'calm', 'brave', 'lucky', 'quiet', 'bright', 'kind', 'bold',
+  'clever', 'gentle', 'happy', 'silent', 'warm', 'neat', 'rapid', 'solid',
+];
+const SANDBOX_WORDS_NOUN = [
+  'fox', 'heron', 'otter', 'lynx', 'finch', 'raven', 'panda', 'bison',
+  'koi', 'moth', 'crane', 'gecko', 'walrus', 'wren', 'ibis', 'yak',
+];
+
+/** Человекочитаемый, но не подбираемый ID песочницы (RFC-001 §4/§7). */
+function generateSandboxId() {
+  const adj = SANDBOX_WORDS_ADJ[crypto.randomInt(SANDBOX_WORDS_ADJ.length)];
+  const noun = SANDBOX_WORDS_NOUN[crypto.randomInt(SANDBOX_WORDS_NOUN.length)];
+  return `${adj}-${noun}-${crypto.randomBytes(5).toString('hex')}`;
+}
+
+function sanitizeSandboxId(raw) {
+  const id = String(raw === undefined || raw === null ? '' : raw)
+    .trim()
+    .replace(SANDBOX_ID_UNSAFE, '')
+    .slice(0, SANDBOX_ID_MAX);
+  return id === '.' || id === '..' ? '' : id;
+}
+
+function hashSecret(value) {
+  return crypto.createHash('sha256').update(String(value)).digest('hex');
+}
+
+/** URL-safe секрет: owner-token, креды песочницы (≥192 бит энтропии). */
+function randomToken(bytes = 24) {
+  return crypto.randomBytes(bytes).toString('base64url');
+}
+
+/**
+ * Режим мульти-аренды (F-12, RFC-001 §2/§9):
+ *   'off'        — одна общая песочница `default` (селектор игнорируется);
+ *   'namespaces' — именованные песочницы-пространства имён для параллельных
+ *                  CI-воркеров (дефолт self-hosted, владелец не проверяется);
+ *   'owned'      — hosted-режим: каждая песочница имеет владельца и owner-token,
+ *                  знание ID не даёт доступ (MOCK_HOSTED=1 или MOCK_TENANCY=1).
+ */
+function resolveTenancyMode(value, hosted = false) {
+  const raw = String(value === undefined || value === null ? '' : value).trim().toLowerCase();
+  if (raw) return flagEnabled(raw) ? 'owned' : 'off';
+  return hosted ? 'owned' : 'namespaces';
+}
+
+/**
+ * Request-local изоляция песочниц (RFC-001, находки F-11—F-15).
+ *
+ * В отличие от `createSandboxManager` (legacy, «переключает» singleton state),
+ * рантайм держит отдельное состояние у каждой песочницы, а модульный `state` —
+ * это фасад-прокси, который резолвится из контекста текущего запроса
+ * (AsyncLocalStorage). Один запрос = один контекст: запрос без селектора
+ * получает default/активную песочницу, а не остатки предыдущего арендатора;
+ * параллельные A/B-запросы не видят state друг друга даже между `await`.
+ *
+ * Гарантии:
+ *   - селектор: `X-Mock-Sandbox` > `?sandbox=` > поддомен (только если задан
+ *     `hostSuffix`, чтобы не путать поддомены хостинга с ID песочницы);
+ *   - `owned`: изоляция по owner-token (создание отдаёт токен один раз),
+ *     чужие креды/состояние недоступны; в остальных режимах — совместимость;
+ *   - экспорт/импорт принимают явный target и не переключают активную песочницу;
+ *   - TTL + автоочистка + лимит количества; состояние персистится только JSON-снимком
+ *     через `safeStateSnapshot` (null-proto словари, #23).
+ */
+function createSandboxRuntime({
+  state,
+  persist = () => {},
+  initialStateFactory,
+  mode = 'namespaces',
+  stateFile = '',
+  sandboxFile = '',
+  ttlMs = 0,
+  maxSandboxes = 0,
+  maxDocuments = 0,
+  documentCounter = null,
+  retention = null,
+  defaultOwnerToken = '',
+  hostSuffix = '',
+  operatorTokens = [],
+  createLimit = 0,
+  log = () => {},
+  now = () => Date.now(),
+  saveDelayMs = 150,
+} = {}) {
+  if (!isPlainObject(state)) throw new Error('createSandboxRuntime: state должен быть JSON-объектом');
+  const tenancy = ['off', 'namespaces', 'owned'].includes(mode) ? mode : 'namespaces';
+  const defaultPersist = typeof persist === 'function' ? persist : () => {};
+  const registryFile = String(sandboxFile || (stateFile ? `${stateFile}.sandboxes.json` : ''));
+  const suffix = String(hostSuffix || '').trim().toLowerCase().replace(/^\./, '');
+  const operators = (Array.isArray(operatorTokens) ? operatorTokens : [operatorTokens])
+    .map((t) => String(t || '').trim())
+    .filter(Boolean);
+  const als = new AsyncLocalStorage();
+  const sandboxes = new Map();
+  const createLog = new Map(); // ip -> [timestamps] — лимит создания (RFC-001 §7)
+  let activeId = 'default';
+  let serial = 0;
+  let saveTimer = null;
+
+  const isoNow = () => new Date(now()).toISOString();
+
+  function freshState(id) {
+    const seed = (serial += 1);
+    const fresh = typeof initialStateFactory === 'function' ? initialStateFactory({ id, seed }) : {};
+    return isPlainObject(fresh) ? fresh : {};
+  }
+
+  const defaultRecord = {
+    id: 'default',
+    isDefault: true,
+    createdAt: isoNow(),
+    updatedAt: isoNow(),
+    expiresAt: 0,
+    ownerTokenHash: defaultOwnerToken ? hashSecret(defaultOwnerToken) : null,
+    creds: null,
+    profile: null,
+    state,
+  };
+  sandboxes.set('default', defaultRecord);
+
+  /* --------------------------------------------------- персистентность (F-14) */
+
+  function registryPayload() {
+    return {
+      version: 1,
+      activeId,
+      savedAt: isoNow(),
+      sandboxes: Array.from(sandboxes.values())
+        .filter((rec) => !rec.isDefault)
+        .map((rec) => ({
+          id: rec.id,
+          createdAt: rec.createdAt,
+          updatedAt: rec.updatedAt,
+          expiresAt: rec.expiresAt || 0,
+          ownerTokenHash: rec.ownerTokenHash || null,
+          creds: rec.creds || null,
+          profile: rec.profile || null,
+          state: rec.state,
+        })),
+    };
+  }
+
+  function flushRegistry() {
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    if (!registryFile) return;
+    try {
+      fs.mkdirSync(path.dirname(registryFile), { recursive: true });
+      const tmp = `${registryFile}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(registryPayload()));
+      fs.renameSync(tmp, registryFile); // атомарная замена: файл не бывает полузаписан
+    } catch (e) {
+      log(`sandbox registry persist failed: ${e.message}`);
+    }
+  }
+
+  function scheduleRegistrySave() {
+    if (!registryFile || saveTimer) return;
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      flushRegistry();
+    }, Math.max(0, saveDelayMs));
+    if (typeof saveTimer.unref === 'function') saveTimer.unref();
+  }
+
+  function persistRecord(rec, immediate = false) {
+    if (!rec || rec.isDefault) {
+      defaultPersist();
+      return;
+    }
+    if (immediate) flushRegistry();
+    else scheduleRegistrySave();
+  }
+
+  /**
+   * Восстановление реестра песочниц. Запись с id `default` из файла намеренно
+   * игнорируется: состояние именованной песочницы нельзя выдать за default
+   * (F-14), default всегда восстанавливается только из MOCK_STATE_FILE.
+   */
+  function restoreRegistry() {
+    if (!registryFile || !fs.existsSync(registryFile)) return;
+    try {
+      const raw = JSON.parse(fs.readFileSync(registryFile, 'utf8'));
+      const items = raw && Array.isArray(raw.sandboxes) ? raw.sandboxes : [];
+      for (const item of items) {
+        const id = sanitizeSandboxId(item && item.id);
+        if (!id || id === 'default' || sandboxes.has(id)) continue;
+        let stored;
+        try {
+          stored = safeStateSnapshot(item.state || {}, `sandbox ${id}`, false);
+        } catch (e) {
+          log(`sandbox ${id} restore skipped: ${e.message}`);
+          continue;
+        }
+        const restored = freshState(id);
+        mergeValidatedInto(restored, stored);
+        sandboxes.set(id, {
+          id,
+          isDefault: false,
+          createdAt: item.createdAt || isoNow(),
+          updatedAt: item.updatedAt || isoNow(),
+          expiresAt: Number(item.expiresAt) || 0,
+          ownerTokenHash: item.ownerTokenHash || null,
+          creds: item.creds || null,
+          profile: item.profile || null,
+          state: restored,
+        });
+      }
+      const restoredActive = sanitizeSandboxId(raw && raw.activeId);
+      if (restoredActive && (restoredActive === 'default' || sandboxes.has(restoredActive))) {
+        activeId = restoredActive;
+      }
+      log(`sandboxes restored from ${registryFile}: ${sandboxes.size - 1}`);
+    } catch (e) {
+      log(`sandbox registry restore failed: ${e.message}`);
+    }
+  }
+
+  /* ------------------------------------------------------- разбор селектора */
+
+  function selector(req) {
+    const headers = (req && req.headers) || {};
+    const hdr = sanitizeSandboxId(headers['x-mock-sandbox']);
+    if (hdr) return { id: hdr, source: 'header' };
+    try {
+      const u = new URL((req && req.url) || '/', 'http://mock.local');
+      const q = sanitizeSandboxId(u.searchParams.get('sandbox'));
+      if (q) return { id: q, source: 'query' };
+    } catch { /* ignore */ }
+    if (suffix) {
+      const host = String(headers.host || '').split(':')[0].toLowerCase().replace(/\.$/, '');
+      if (host.endsWith(`.${suffix}`)) {
+        const prefix = host.slice(0, -(suffix.length + 1));
+        const labels = prefix.split('.').filter(Boolean);
+        const sub = sanitizeSandboxId(labels[labels.length - 1]);
+        if (sub && sub !== 'www') return { id: sub, source: 'host' };
+      }
+    }
+    return { id: '', source: null };
+  }
+
+  function ownerTokenOf(req) {
+    const headers = (req && req.headers) || {};
+    const auth = String(headers.authorization || '');
+    if (auth.toLowerCase().startsWith('bearer ')) return auth.slice(7).trim();
+    const direct = headers['x-sandbox-token'] || headers['x-owner-token'];
+    if (direct) return String(direct).trim();
+    try {
+      const u = new URL((req && req.url) || '/', 'http://mock.local');
+      return String(u.searchParams.get('sandbox_token') || '').trim();
+    } catch {
+      return '';
+    }
+  }
+
+  function isOperatorToken(token) {
+    return Boolean(token) && operators.some((expected) => safeEqual(token, expected));
+  }
+
+  function recordAuthorized(rec, req) {
+    if (!rec.ownerTokenHash) return true;
+    const token = ownerTokenOf(req);
+    if (!token) return false;
+    if (isOperatorToken(token)) return true;
+    return safeEqual(hashSecret(token), rec.ownerTokenHash);
+  }
+
+  /** Песочница, которой соответствует предъявленный owner-token (для /sandboxes/me). */
+  function recordByOwnerToken(req) {
+    const token = ownerTokenOf(req);
+    if (!token || isOperatorToken(token)) return null;
+    const hash = hashSecret(token);
+    for (const rec of sandboxes.values()) {
+      if (rec.ownerTokenHash && safeEqual(hash, rec.ownerTokenHash)) return rec;
+    }
+    return null;
+  }
+
+  function currentRecord() {
+    const rec = als.getStore();
+    if (rec && sandboxes.get(rec.id) === rec) return rec;
+    return sandboxes.get(activeId) || defaultRecord;
+  }
+
+  /* ---------------------------------------------- лимиты и квоты (F-14/F-15) */
+
+  function documents(rec = currentRecord()) {
+    if (typeof documentCounter !== 'function') return null;
+    try {
+      const used = documentCounter(rec.state);
+      return Number.isFinite(used) ? used : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  function checkDocuments() {
+    const used = documents();
+    if (maxDocuments > 0 && used !== null && used >= maxDocuments) {
+      return { ok: false, used, limit: maxDocuments };
+    }
+    return { ok: true, used, limit: maxDocuments };
+  }
+
+  function createLimitFor(ip) {
+    if (!createLimit) return { ok: true };
+    const key = String(ip || 'unknown');
+    const winStart = now() - 60 * 60 * 1000;
+    const hits = (createLog.get(key) || []).filter((ts) => ts >= winStart);
+    if (hits.length >= createLimit) return { ok: false, retryAfterMs: hits[0] + 60 * 60 * 1000 - now() };
+    hits.push(now());
+    createLog.set(key, hits);
+    if (createLog.size > 10000) createLog.clear();
+    return { ok: true };
+  }
+
+  function createRecord(id, { creds = null, profile = null, ttl = null, ownerToken = null } = {}) {
+    if (maxSandboxes > 0 && sandboxes.size - 1 >= maxSandboxes) return null;
+    const rec = {
+      id,
+      isDefault: false,
+      createdAt: isoNow(),
+      updatedAt: isoNow(),
+      expiresAt: ttl && ttl > 0 ? now() + ttl : 0,
+      ownerTokenHash: ownerToken ? hashSecret(ownerToken) : null,
+      creds: creds || null,
+      profile: profile || null,
+      state: freshState(id),
+    };
+    sandboxes.set(id, rec);
+    persistRecord(rec, true);
+    return rec;
+  }
+
+  /**
+   * Разрешение контекста запроса ровно один раз (F-11).
+   * policy: 'business' | 'control' | 'form' | 'public'.
+   */
+  function admit(req, policy = 'business') {
+    const sel = selector(req);
+    if (tenancy === 'off') return { ok: true, record: defaultRecord, selector: sel, via: 'off' };
+    if (tenancy === 'owned' && policy === 'public') {
+      return { ok: true, record: defaultRecord, selector: sel, via: 'public' };
+    }
+    const fallback = tenancy === 'owned' ? 'default' : (activeId || 'default');
+    const id = sel.id || fallback;
+    let rec = sandboxes.get(id);
+    if (!rec) {
+      if (tenancy === 'owned') {
+        return {
+          ok: false,
+          kind: 'not-found',
+          sandbox: id,
+          selector: sel,
+          hint: 'Создайте песочницу: POST /sandboxes — в ответе будут id, creds и ownerToken.',
+        };
+      }
+      const limit = createLimitFor(req && req.socket && req.socket.remoteAddress);
+      if (!limit.ok) return { ok: false, kind: 'rate-limit', sandbox: id, selector: sel };
+      rec = createRecord(id, { ttl: ttlMs });
+      if (!rec) return { ok: false, kind: 'limit', sandbox: id, selector: sel };
+    }
+    if (rec.expiresAt && rec.expiresAt <= now()) {
+      remove(rec.id);
+      return { ok: false, kind: 'expired', sandbox: rec.id, selector: sel };
+    }
+    // 'form' — capability-ссылки покупателя (форма оплаты, страница чека): сам
+    // объект доступа (PaymentId/UUID) и есть секрет, owner-token не требуется.
+    if (tenancy === 'owned' && policy !== 'form' && !recordAuthorized(rec, req)) {
+      return { ok: false, kind: 'unauthorized', sandbox: rec.id, selector: sel };
+    }
+    const via = !rec.ownerTokenHash
+      ? (rec.isDefault ? 'default' : 'namespace')
+      : (isOperatorToken(ownerTokenOf(req)) ? 'operator' : 'owner');
+    return { ok: true, record: rec, selector: sel, via };
+  }
+
+  function run(admission, fn) {
+    const rec = admission && admission.ok ? admission.record : currentRecord();
+    return als.run(rec, fn);
+  }
+
+  /* ------------------------------------------------------------- управление */
+
+  function describe(rec) {
+    return {
+      id: rec.id,
+      active: rec.id === activeId,
+      default: Boolean(rec.isDefault),
+      owned: Boolean(rec.ownerTokenHash),
+      createdAt: rec.createdAt,
+      updatedAt: rec.updatedAt,
+      expiresAt: rec.expiresAt || 0,
+      documents: documents(rec),
+    };
+  }
+
+  function list() {
+    return Array.from(sandboxes.values()).map(describe);
+  }
+
+  function find(id) {
+    return sandboxes.get(sanitizeSandboxId(id)) || null;
+  }
+
+  function create({ id = '', creds = null, profile = null, ttlMs: ttlOverride = null, ip = '', owner = true } = {}) {
+    const rate = createLimitFor(ip);
+    if (!rate.ok) {
+      const e = new Error(`Слишком много созданных песочниц: лимит ${createLimit}/час на адрес`);
+      e.code = 'SANDBOX_RATE_LIMIT';
+      e.retryAfterMs = rate.retryAfterMs;
+      throw e;
+    }
+    const wanted = sanitizeSandboxId(id) || generateSandboxId();
+    if (wanted === 'default' || sandboxes.has(wanted)) {
+      const e = new Error(`Песочница «${wanted}» уже существует`);
+      e.code = 'SANDBOX_EXISTS';
+      throw e;
+    }
+    const ownerToken = owner && tenancy === 'owned' ? `sbx_${randomToken(24)}` : null;
+    const rec = createRecord(wanted, {
+      creds,
+      profile,
+      ttl: ttlOverride === null ? ttlMs : ttlOverride,
+      ownerToken,
+    });
+    if (!rec) {
+      const e = new Error(`Достигнут лимит песочниц (${maxSandboxes}); удалите неиспользуемые или поднимите MOCK_SANDBOX_MAX`);
+      e.code = 'SANDBOX_LIMIT';
+      throw e;
+    }
+    return { ...describe(rec), ownerToken, creds: rec.creds || null, profile: rec.profile || null };
+  }
+
+  /** Смена кредов песочницы (RFC-001 §6, reset-creds): owner-token сохраняется. */
+  function updateCreds(id, creds) {
+    const rec = sandboxes.get(sanitizeSandboxId(id));
+    if (!rec || rec.isDefault) return { ok: false, error: 'not-found' };
+    rec.creds = creds || null;
+    rec.updatedAt = isoNow();
+    persistRecord(rec, true);
+    return { ok: true, sandbox: rec.id, creds: rec.creds };
+  }
+
+  function remove(id) {
+    const rec = sandboxes.get(sanitizeSandboxId(id));
+    if (!rec || rec.isDefault) return { ok: false, removed: null };
+    sandboxes.delete(rec.id);
+    if (activeId === rec.id) activeId = 'default';
+    flushRegistry();
+    return { ok: true, removed: rec.id };
+  }
+
+  function switchActive(id = 'default') {
+    const wanted = sanitizeSandboxId(id) || 'default';
+    if (tenancy === 'owned') return { ok: false, error: 'owned-mode', current: activeId };
+    if (!sandboxes.has(wanted)) {
+      const rec = createRecord(wanted, { ttl: ttlMs });
+      if (!rec) return { ok: false, error: 'limit', current: activeId };
+    }
+    activeId = wanted;
+    flushRegistry();
+    return { ok: true, current: activeId };
+  }
+
+  function reset(id = null) {
+    const rec = id === null || id === undefined ? currentRecord() : (sandboxes.get(sanitizeSandboxId(id)) || createRecord(sanitizeSandboxId(id), { ttl: ttlMs }));
+    if (!rec) return { ok: false, sandbox: id || null, error: 'not-found' };
+    const fresh = freshState(rec.id);
+    mergeValidatedInto(rec.state, safeStateSnapshot(fresh, 'fresh sandbox state'));
+    rec.updatedAt = isoNow();
+    persistRecord(rec, true);
+    return { ok: true, sandbox: rec.id };
+  }
+
+  function exportState(id = null) {
+    const rec = id === null || id === undefined ? currentRecord() : sandboxes.get(sanitizeSandboxId(id));
+    if (!rec) return { sandbox: sanitizeSandboxId(id) || null, exportedAt: isoNow(), state: {}, error: 'not-found' };
+    return {
+      sandbox: rec.id,
+      exportedAt: isoNow(),
+      state: safeStateSnapshot(JSON.parse(JSON.stringify(rec.state)), 'exported state'),
+    };
+  }
+
+  /**
+   * Импорт снимка в явно указанную песочницу (F-13): активная (текущая) песочница
+   * не переключается, соседние состояния не меняются.
+   */
+  function importState(payload = {}, targetId = null) {
+    let rec;
+    if (targetId === null || targetId === undefined) {
+      rec = currentRecord();
+    } else {
+      const wanted = sanitizeSandboxId(targetId);
+      rec = sandboxes.get(wanted) || createRecord(wanted, { ttl: ttlMs });
+      if (!rec) throw new Error(`Песочница «${wanted}» не найдена`);
+    }
+    const next = payload && isPlainObject(payload.state) ? payload.state : payload;
+    if (!isPlainObject(next)) throw new Error('Ожидается JSON-объект состояния');
+    const safe = safeStateSnapshot(next, 'imported state');
+    mergeValidatedInto(rec.state, safe);
+    rec.updatedAt = isoNow();
+    persistRecord(rec, true);
+    return { ok: true, sandbox: rec.id };
+  }
+
+  /** TTL + retention + лимиты: фоновый воркер вызывается раз в минуту. */
+  function sweep() {
+    const ts = now();
+    let expired = 0;
+    let pruned = 0;
+    for (const rec of Array.from(sandboxes.values())) {
+      if (rec.isDefault) continue;
+      if (rec.expiresAt && rec.expiresAt <= ts) {
+        sandboxes.delete(rec.id);
+        if (activeId === rec.id) activeId = 'default';
+        log(`sandbox ${rec.id} expired (TTL) and removed`);
+        expired += 1;
+        continue;
+      }
+      if (typeof retention === 'function') {
+        try {
+          pruned += retention(rec.state, ts) || 0;
+        } catch (e) {
+          log(`sandbox ${rec.id} retention failed: ${e.message}`);
+        }
+      }
+    }
+    if (expired || pruned) flushRegistry();
+    return { expired, pruned };
+  }
+
+  /** Прогон fn в контексте каждой песочницы (очереди вебхуков, bank-timers). */
+  function tickAll(fn) {
+    for (const rec of Array.from(sandboxes.values())) {
+      try {
+        als.run(rec, fn);
+      } catch (e) {
+        log(`sandbox tick failed (${rec.id}): ${e.message}`);
+      }
+    }
+  }
+
+  function creds() {
+    return currentRecord().creds || {};
+  }
+
+  /**
+   * Модульный фасад состояния: резолвится из контекста запроса, а вне запроса —
+   * в активную (default для owned) песочницу. Идентичность объекта сохранена,
+   * поэтому подсистемы, держащие ссылки (`state.notifications`), продолжают
+   * работать внутри контекста.
+   */
+  const stateProxy = new Proxy(Object.create(null), {
+    get(_target, prop) {
+      const rec = currentRecord();
+      if (prop === '__sandboxId') return rec.id;
+      const value = rec.state[prop];
+      if (value !== undefined || prop in rec.state) return value;
+      const fallback = Object.prototype[prop];
+      return typeof fallback === 'function' ? fallback : undefined;
+    },
+    set(_target, prop, value) {
+      currentRecord().state[prop] = value;
+      return true;
+    },
+    has(_target, prop) {
+      return prop in currentRecord().state;
+    },
+    deleteProperty(_target, prop) {
+      delete currentRecord().state[prop];
+      return true;
+    },
+    ownKeys() {
+      return Reflect.ownKeys(currentRecord().state);
+    },
+    getOwnPropertyDescriptor(_target, prop) {
+      const descriptor = Object.getOwnPropertyDescriptor(currentRecord().state, prop);
+      if (!descriptor) return undefined;
+      return { ...descriptor, configurable: true };
+    },
+  });
+
+  restoreRegistry();
+
+  return {
+    mode: tenancy,
+    state: stateProxy,
+    persist: () => persistRecord(currentRecord(), false),
+    admit,
+    run,
+    selector,
+    ownerTokenOf,
+    isOperatorToken,
+    recordAuthorized,
+    currentId: () => currentRecord().id,
+    recordByOwnerToken,
+    current: () => currentRecord(),
+    list,
+    find,
+    describe,
+    create,
+    updateCreds,
+    remove,
+    switchActive,
+    reset,
+    exportState,
+    importState,
+    sweep,
+    tickAll,
+    creds,
+    documents,
+    checkDocuments,
+    activeId: () => activeId,
+    stats: () => ({ mode: tenancy, activeId, count: sandboxes.size - 1, file: registryFile || null }),
+    flush: flushRegistry,
+    restore: restoreRegistry,
+  };
+}
+
 /**
  * Активный экзаменатор вебхуков интегратора (спека §1.4 «Контракт-тесты как продукт»):
  * прогоняет серию проб против webhook-эндпоинта мерчанта и выдаёт отчёт о
@@ -1790,11 +2435,18 @@ module.exports = {
   createErrorCatalog,
   parseDuration,
   createVirtualClock,
+  parseMsOr,
   parseScenarioSpec,
   createScenarioRegistry,
   checkAdminAuth,
   checkControlAccess,
   applyRequestChaos,
   createSandboxManager,
+  createSandboxRuntime,
+  resolveTenancyMode,
+  generateSandboxId,
+  sanitizeSandboxId,
+  hashSecret,
+  randomToken,
   verifyMerchantWebhook,
 };
