@@ -238,12 +238,20 @@ function createDeliveryQueue({
   isOk = (res) => res.statusCode >= 200 && res.statusCode < 300,
   prepare = () => {},
   onSuccess = (entry) => { entry.done = true; entry.nextAttemptAt = null; },
-  onFailure = (entry, status, body) => { entry.attempts += 1; entry.lastStatus = status; entry.lastBody = body; entry.nextAttemptAt = Date.now() + retryMs; },
-  due = (entry) => !entry.done && Date.now() >= (entry.nextAttemptAt || 0) && entry.attempts < maxAttempts,
+  onFailure,
+  due,
   awaitSequential = false,
   unref = false,
   blockPrivateHosts = false,
+  now = () => Date.now(),
 }) {
+  const isDue = due || ((entry) => !entry.done && now() >= (entry.nextAttemptAt || 0) && entry.attempts < maxAttempts);
+  const onFail = onFailure || ((entry, status, body) => {
+    entry.attempts += 1;
+    entry.lastStatus = status;
+    entry.lastBody = body;
+    entry.nextAttemptAt = now() + retryMs;
+  });
   // «В полёте» — рантайм-состояние, намеренно НЕ в state: после рестарта
   // процесса ничего не должно считаться отправленным «прямо сейчас».
   const inFlight = new Set();
@@ -263,11 +271,11 @@ function createDeliveryQueue({
         onSuccess(entry, res, id);
         log(`webhook ${id} delivered -> ${url} (${entry.attempts} attempt(s))`);
       } else {
-        onFailure(entry, res.statusCode, res.body, id);
+        onFail(entry, res.statusCode, res.body, id);
         log(`webhook ${id} failed status=${res.statusCode}, retry in ${retryMs}ms`);
       }
     } catch (e) {
-      onFailure(entry, `ERR ${e.message}`, e.message, id);
+      onFail(entry, `ERR ${e.message}`, e.message, id);
       log(`webhook ${id} error: ${e.message}, retry in ${retryMs}ms`);
     } finally {
       inFlight.delete(id);
@@ -280,7 +288,7 @@ function createDeliveryQueue({
     for (const id of ids) {
       const entry = entries[id];
       if (!entry || inFlight.has(id)) continue;
-      if (!due(entry)) continue;
+      if (!isDue(entry)) continue;
       prepare(entry);
       if (awaitSequential) await deliverOne(id, entry);
       else deliverOne(id, entry); // пачкой, без ожидания — как у Ferma-мока
@@ -329,6 +337,323 @@ function createErrorCatalog({ provider, docsBase, codes = {} }) {
   };
 }
 
+/* ---------------------------------------------------------- virtual clock */
+
+const DURATION_UNITS = {
+  ms: 1,
+  s: 1000,
+  sec: 1000,
+  m: 60 * 1000,
+  min: 60 * 1000,
+  h: 60 * 60 * 1000,
+  hr: 60 * 60 * 1000,
+  d: 24 * 60 * 60 * 1000,
+  day: 24 * 60 * 60 * 1000,
+  days: 24 * 60 * 60 * 1000,
+};
+
+/**
+ * Разбор длительности в миллисекунды:
+ *   parseDuration(5000)      -> 5000
+ *   parseDuration("7d")      -> 604800000
+ *   parseDuration("+36h")    -> 129600000
+ *   parseDuration("1d 12h")  -> 129600000
+ *   parseDuration("bad")     -> null
+ */
+function parseDuration(input) {
+  if (input === null || input === undefined || input === '') return null;
+  if (typeof input === 'number' && Number.isFinite(input)) return Math.round(input);
+  const raw = String(input).trim();
+  if (!raw) return null;
+  if (/^[+-]?\d+$/.test(raw)) return parseInt(raw, 10);
+  const sign = raw.startsWith('-') ? -1 : 1;
+  const cleaned = raw.replace(/^[+-]/, '').trim();
+  const tokenRe = /(\d+(?:\.\d+)?)\s*(ms|sec|s|min|m|hr|h|days|day|d)\b/gi;
+  let total = 0;
+  let matched = 0;
+  let m;
+  while ((m = tokenRe.exec(cleaned)) !== null) {
+    const val = parseFloat(m[1]);
+    const unit = DURATION_UNITS[m[2].toLowerCase()];
+    if (!Number.isFinite(val) || !unit) return null;
+    total += val * unit;
+    matched += m[0].length;
+  }
+  const compactRest = cleaned.replace(tokenRe, '').trim();
+  if (!matched || compactRest.length > 0) return null;
+  return Math.round(sign * total);
+}
+
+/**
+ * Виртуальные часы (этап 7 роадмапа, бриф §3.2):
+ * позволяют мгновенно сдвигать время стенда на «+7d» / «+60d» / «+36h» без
+ * ожидания реальных суток. Инициализируются из MOCK_VIRTUAL_CLOCK (смещение
+ * вида "+7d", миллисекунды или ISO-дата) и могут храниться в state-файле.
+ */
+function createVirtualClock({ initial = process.env.MOCK_VIRTUAL_CLOCK || '', getStateOffset, setStateOffset } = {}) {
+  let localOffsetMs = 0;
+  if (initial && String(initial).trim() !== '0' && String(initial).toLowerCase() !== 'false' && String(initial).toLowerCase() !== 'true') {
+    const dur = parseDuration(initial);
+    if (dur !== null) {
+      localOffsetMs = dur;
+    } else {
+      const parsedDate = Date.parse(String(initial));
+      if (Number.isFinite(parsedDate)) localOffsetMs = parsedDate - Date.now();
+    }
+  }
+
+  const readOffset = () => {
+    if (typeof getStateOffset === 'function') {
+      const v = getStateOffset();
+      if (typeof v === 'number' && Number.isFinite(v)) return v;
+    }
+    return localOffsetMs;
+  };
+
+  const writeOffset = (next) => {
+    const normalized = Math.round(Number(next) || 0);
+    localOffsetMs = normalized;
+    if (typeof setStateOffset === 'function') setStateOffset(normalized);
+    return normalized;
+  };
+
+  if (localOffsetMs !== 0) writeOffset(localOffsetMs);
+
+  function now() {
+    return Date.now() + readOffset();
+  }
+
+  function iso(ts = now()) {
+    return new Date(ts).toISOString();
+  }
+
+  function snapshot() {
+    const currentOffset = readOffset();
+    const currentNow = Date.now() + currentOffset;
+    return {
+      now: currentNow,
+      iso: new Date(currentNow).toISOString(),
+      offsetMs: currentOffset,
+      virtual: currentOffset !== 0 || Boolean(initial),
+    };
+  }
+
+  function advance(delta) {
+    const ms = parseDuration(delta);
+    if (ms === null) throw new Error(`Некорректный формат сдвига времени: ${JSON.stringify(delta)} (ожидается, например, "7d", "60d", "36h", "30m" или число мс)`);
+    writeOffset(readOffset() + ms);
+    return snapshot();
+  }
+
+  function reset() {
+    writeOffset(0);
+    return snapshot();
+  }
+
+  function set(spec = {}) {
+    if (spec.reset) return reset();
+    if (spec.advance !== undefined && spec.advance !== null && spec.advance !== '') {
+      return advance(spec.advance);
+    }
+    if (spec.offset !== undefined && spec.offset !== null && spec.offset !== '') {
+      const ms = parseDuration(spec.offset);
+      if (ms === null) throw new Error(`Некорректный формат offset: ${JSON.stringify(spec.offset)}`);
+      writeOffset(ms);
+      return snapshot();
+    }
+    if (spec.offsetMs !== undefined && spec.offsetMs !== null && spec.offsetMs !== '') {
+      const ms = Number(spec.offsetMs);
+      if (!Number.isFinite(ms)) throw new Error(`Некорректный offsetMs: ${JSON.stringify(spec.offsetMs)}`);
+      writeOffset(ms);
+      return snapshot();
+    }
+    if (spec.iso || spec.time) {
+      const ts = Date.parse(String(spec.iso || spec.time));
+      if (!Number.isFinite(ts)) throw new Error(`Некорректная ISO-дата: ${JSON.stringify(spec.iso || spec.time)}`);
+      writeOffset(ts - Date.now());
+      return snapshot();
+    }
+    return snapshot();
+  }
+
+  return { now, iso, advance, set, reset, snapshot, parseDuration };
+}
+
+/* ----------------------------------------------------- scenario registry */
+
+/**
+ * Разбор строки сценариев из заголовка X-Mock-Scenario или поля DATA.mock_scenario.
+ * Примеры:
+ *   "fail"
+ *   "chargeback-after:7d, webhook-drop"
+ *   "partial-refund:30000"
+ */
+function parseScenarioSpec(raw) {
+  const str = String(raw || '').trim();
+  const items = [];
+  if (str) {
+    for (const part of str.split(/[,;]+/)) {
+      const token = part.trim();
+      if (!token) continue;
+      const colonIdx = token.indexOf(':');
+      const eqIdx = token.indexOf('=');
+      const sepIdx = colonIdx >= 0 && eqIdx >= 0 ? Math.min(colonIdx, eqIdx) : Math.max(colonIdx, eqIdx);
+      if (sepIdx > 0) {
+        items.push({
+          name: token.slice(0, sepIdx).trim().toLowerCase(),
+          arg: token.slice(sepIdx + 1).trim(),
+          raw: token,
+        });
+      } else {
+        items.push({ name: token.toLowerCase(), arg: null, raw: token });
+      }
+    }
+  }
+  const find = (name) => {
+    const n = String(name || '').toLowerCase();
+    return items.find((i) => i.name === n) || null;
+  };
+  return {
+    raw: str,
+    items,
+    has: (name) => Boolean(find(name)),
+    get: (name) => {
+      const item = find(name);
+      return item ? (item.arg !== null ? item.arg : true) : null;
+    },
+  };
+}
+
+/**
+ * Единый реестр сценариев (этап 7 роадмапа, бриф §3.2):
+ * объединяет сценарии из заголовка `X-Mock-Scenario`, поля запроса и
+ * программируемых правил (`POST /mock/scenarios`), плюс ведёт журнал
+ * срабатываний для отладки в CI.
+ */
+function createScenarioRegistry({ clock, size = 200 } = {}) {
+  const nowIsoFn = () => (clock && typeof clock.iso === 'function' ? clock.iso() : new Date().toISOString());
+  const rules = [];
+  const history = [];
+  let seq = 1;
+
+  function addRule(rule = {}) {
+    const scenario = String(rule.scenario || '').trim();
+    if (!scenario) throw new Error('Поле scenario обязательно (например, "chargeback-after:7d", "webhook-drop", "fail")');
+    const entry = {
+      id: rule.id ? String(rule.id) : `sc-${seq++}`,
+      target: rule.target ? String(rule.target).toLowerCase() : '*',
+      match: rule.match && typeof rule.match === 'object' ? { ...rule.match } : null,
+      scenario,
+      times: rule.times === null || rule.times === undefined || rule.times === -1
+        ? (rule.persistent ? null : 1)
+        : Math.max(1, parseInt(rule.times, 10) || 1),
+      createdAt: nowIsoFn(),
+    };
+    rules.push(entry);
+    return entry;
+  }
+
+  function matchRule(target, context = {}) {
+    const normTarget = String(target || '*').toLowerCase();
+    for (let i = 0; i < rules.length; i += 1) {
+      const r = rules[i];
+      if (r.target !== '*' && r.target !== normTarget) continue;
+      if (r.match) {
+        let ok = true;
+        for (const [k, v] of Object.entries(r.match)) {
+          if (String(context[k] ?? '') !== String(v)) {
+            ok = false;
+            break;
+          }
+        }
+        if (!ok) continue;
+      }
+      if (typeof r.times === 'number') {
+        r.times -= 1;
+        if (r.times <= 0) rules.splice(i, 1);
+      }
+      return r;
+    }
+    return null;
+  }
+
+  function recordTrigger(event = {}) {
+    const entry = { at: nowIsoFn(), ...event };
+    history.push(entry);
+    if (history.length > size) history.splice(0, history.length - size);
+    return entry;
+  }
+
+  function resolve({ header = '', bodyScenario = '', target = '*', context = {} } = {}) {
+    const parts = [];
+    let source = null;
+    if (header && String(header).trim()) {
+      parts.push(String(header).trim());
+      source = 'header';
+    }
+    if (bodyScenario && String(bodyScenario).trim()) {
+      parts.push(String(bodyScenario).trim());
+      source = source ? `${source}+body` : 'body';
+    }
+    const matchedRule = matchRule(target, context);
+    if (matchedRule) {
+      parts.push(matchedRule.scenario);
+      source = source ? `${source}+rule:${matchedRule.id}` : `rule:${matchedRule.id}`;
+    }
+    const spec = parseScenarioSpec(parts.join(','));
+    if (spec.items.length) {
+      recordTrigger({
+        scenario: spec.raw,
+        source,
+        target,
+        ...(context.orderId ? { orderId: context.orderId } : {}),
+        ...(context.paymentId ? { paymentId: context.paymentId } : {}),
+        ...(context.externalId ? { externalId: context.externalId } : {}),
+      });
+    }
+    return spec;
+  }
+
+  function clearRules() {
+    rules.length = 0;
+  }
+
+  function clearHistory() {
+    history.length = 0;
+  }
+
+  return {
+    addRule,
+    matchRule,
+    resolve,
+    recordTrigger,
+    listRules: () => rules.slice(),
+    listHistory: () => history.slice(),
+    clearRules,
+    clearHistory,
+    parseScenarioSpec,
+  };
+}
+
+/**
+ * Опциональная защита /admin* по токену (рекомендация аудита A-20):
+ * если задан MOCK_ADMIN_TOKEN, требует заголовок Authorization: Bearer <token>,
+ * X-Admin-Token: <token> или query-параметр ?admin_token=<token>.
+ * По умолчанию пустой — локальный DX и существующие тесты не меняются.
+ */
+function checkAdminAuth(req, adminToken = process.env.MOCK_ADMIN_TOKEN || '') {
+  const expected = String(adminToken || '').trim();
+  if (!expected) return true;
+  const authHeader = String(req.headers['authorization'] || '');
+  if (authHeader.toLowerCase().startsWith('bearer ') && authHeader.slice(7).trim() === expected) return true;
+  if (String(req.headers['x-admin-token'] || '').trim() === expected) return true;
+  try {
+    const u = new URL(req.url, 'http://localhost');
+    if (u.searchParams.get('admin_token') === expected) return true;
+  } catch { /* ignore */ }
+  return false;
+}
+
 module.exports = {
   createStore,
   createLog,
@@ -344,4 +669,9 @@ module.exports = {
   postJson,
   createDeliveryQueue,
   createErrorCatalog,
+  parseDuration,
+  createVirtualClock,
+  parseScenarioSpec,
+  createScenarioRegistry,
+  checkAdminAuth,
 };

@@ -150,6 +150,49 @@ async function main() {
     assert.ok(derr(999).message.includes('999'));
   });
 
+  check('parseDuration разбирает дни/часы/минуты/мс (этап 7)', () => {
+    assert.strictEqual(core.parseDuration('7d'), 7 * 86400000);
+    assert.strictEqual(core.parseDuration('+60d'), 60 * 86400000);
+    assert.strictEqual(core.parseDuration('36h'), 36 * 3600000);
+    assert.strictEqual(core.parseDuration('1d 12h'), 36 * 3600000);
+    assert.strictEqual(core.parseDuration(1500), 1500);
+    assert.strictEqual(core.parseDuration('invalid'), null);
+  });
+
+  check('createVirtualClock сдвигает виртуальное время на +7d / +60d и сбрасывает (этап 7)', () => {
+    let savedOffset = 0;
+    const clock = core.createVirtualClock({
+      initial: '+1h',
+      getStateOffset: () => savedOffset,
+      setStateOffset: (v) => { savedOffset = v; },
+    });
+    assert.strictEqual(clock.snapshot().offsetMs, 3600000);
+    clock.advance('7d');
+    assert.strictEqual(clock.snapshot().offsetMs, 3600000 + 7 * 86400000);
+    clock.set({ offset: '60d' });
+    assert.strictEqual(clock.snapshot().offsetMs, 60 * 86400000);
+    clock.reset();
+    assert.strictEqual(clock.snapshot().offsetMs, 0);
+  });
+
+  check('createScenarioRegistry объединяет заголовок X-Mock-Scenario, правила и журнал срабатываний', () => {
+    const reg = core.createScenarioRegistry();
+    reg.addRule({ target: 'init', match: { orderId: 'ord-1' }, scenario: 'chargeback-after:7d', times: 1 });
+    const spec = reg.resolve({ header: 'webhook-drop', target: 'init', context: { orderId: 'ord-1' } });
+    assert.strictEqual(spec.has('webhook-drop'), true);
+    assert.strictEqual(spec.get('chargeback-after'), '7d');
+    assert.strictEqual(reg.listRules().length, 0, 'одноразовое правило должно списаться');
+    assert.strictEqual(reg.listHistory().length, 1, 'срабатывание должно попасть в журнал');
+  });
+
+  check('checkAdminAuth пропускает по умолчанию и проверяет токен при MOCK_ADMIN_TOKEN (A-20)', () => {
+    assert.strictEqual(core.checkAdminAuth({ headers: {}, url: '/admin' }, ''), true);
+    assert.strictEqual(core.checkAdminAuth({ headers: {}, url: '/admin' }, 'sec-1'), false);
+    assert.strictEqual(core.checkAdminAuth({ headers: { authorization: 'Bearer sec-1' }, url: '/admin' }, 'sec-1'), true);
+    assert.strictEqual(core.checkAdminAuth({ headers: { 'x-admin-token': 'sec-1' }, url: '/admin' }, 'sec-1'), true);
+    assert.strictEqual(core.checkAdminAuth({ headers: {}, url: '/admin?admin_token=sec-1' }, 'sec-1'), true);
+  });
+
   hook.close();
   fs.rmSync(dir, { recursive: true, force: true });
   console.log(`\nИТОГ: ${passed} passed, ${failed} failed\n`);
