@@ -14,6 +14,8 @@ const path = require('path');
 
 const PORT = 3301;
 const BASE = `http://127.0.0.1:${PORT}`;
+// Лог дочернего стенда: нужен для проверок «секретов нет в логах» (#24, F-09).
+const SERVER_LOG = [];
 let passed = 0;
 let failed = 0;
 
@@ -440,6 +442,46 @@ async function main() {
     Boolean(tokenEntry && tokenEntry.path.includes('token=YOUR_TOKEN') && tokenEntry.curl.includes('token=YOUR_TOKEN')
       && !tokenEntry.path.includes(token) && !tokenEntry.curl.includes(token)));
 
+  // 23b. #24 (F-09): креды getToken (login/pass) и выданный токен не попадают
+  //      ни в журнал (JSON, HTML, curl), ни в лог стенда.
+  {
+    const sentinelPass = `sentinel-pass-${process.pid}`;
+    const denied = (await request('POST', '/possystem/v1/getToken', { login: 'loviitest', pass: sentinelPass })).json();
+    check('#24: getToken с чужим паролем -> error 14', Boolean(denied && denied.error && denied.error.code === 14));
+    const issuedToken = (await request('POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' })).json().token;
+    check('#24: getToken с верным паролем выдаёт токен', Boolean(issuedToken));
+
+    const redactedJournal = (await request('GET', '/admin/journal')).json();
+    const journalText = JSON.stringify(redactedJournal);
+    check('#24: пароль getToken отсутствует в /admin/journal',
+      !journalText.includes(sentinelPass) && !journalText.includes('mockpass123'));
+    check('#24: логин getToken отсутствует в /admin/journal', !journalText.includes('loviitest'));
+    check('#24: выданный токен не хранится в журнале', !journalText.includes(issuedToken));
+
+    // В журнал Kassa попадает тело запроса (выжимка + rawBody), поэтому
+    // проверяем обе формы: и выжимку, и сырое тело, и curl-сниппет.
+    const getTokenEntries = (redactedJournal.entries || []).filter((entry) => String(entry.path).includes('/getToken'));
+    check('#24: запись getToken хранит креды только как [REDACTED]',
+      getTokenEntries.length >= 2
+      && getTokenEntries.every((entry) => String(entry.rawBody).includes('"pass":"[REDACTED]"')
+        && String(entry.rawBody).includes('"login":"[REDACTED]"')
+        && !String(entry.rawBody).includes(sentinelPass)
+        && entry.body && entry.body.pass === '[REDACTED]' && entry.body.login === '[REDACTED]'));
+    check('#24: curl-сниппет getToken воспроизводим без секретов',
+      getTokenEntries.every((entry) => String(entry.curl).startsWith('curl ')
+        && entry.curl.includes('"pass":"[REDACTED]"')
+        && !entry.curl.includes(sentinelPass)));
+
+    const adminHtml = await request('GET', '/admin');
+    check('#24: пароль getToken отсутствует в HTML-консоли',
+      adminHtml.status === 200 && !adminHtml.text.includes(sentinelPass) && !adminHtml.text.includes('mockpass123'));
+
+    const serverLog = SERVER_LOG.join('\n');
+    check('#24: креды getToken отсутствуют в логе стенда',
+      serverLog.length > 0 && !serverLog.includes(sentinelPass) && !serverLog.includes('mockpass123') && !serverLog.includes('loviitest'));
+    check('#24: в логе остаётся различимый префикс логина (DX)', serverLog.includes('login=lo***'));
+  }
+
   /* --- #22 (F-07/F-08): доступ к управляющей поверхности и SSRF-политика --- */
 
   // 24. Токены управляющей поверхности: /mock/*, смены, ФН и ОФД закрыты,
@@ -714,6 +756,7 @@ const proc = spawn('node', [path.join(__dirname, 'server.js')], {
   env: { ...process.env, MOCK_PORT: String(PORT), MOCK_PROCESS_MS: '500', MOCK_CALLBACK_RETRY_MS: '1000' },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
+proc.stdout.on('data', (d) => SERVER_LOG.push(String(d)));
 proc.stderr.on('data', (d) => process.stderr.write(d));
 
 setTimeout(async () => {

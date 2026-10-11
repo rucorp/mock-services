@@ -191,6 +191,53 @@ const CARDS = {
 
 const maskPan = (pan) => `${pan.slice(0, 6)}**${pan.slice(-4)}`;
 
+/* ------------------------------------------------------- e2c card data (F-10) */
+
+/**
+ * Тестовые карты выплат: сценарий выбирается по номеру карты один раз — в
+ * `/e2c/v2/Init`; дальше в состоянии живёт только маска и тип сценария.
+ */
+const PAYOUT_CARD_SCENARIOS = new Map([
+  // Официальный тестовый кейс: привязка успешна, Payment -> authRC 1057
+  ['5000000000000553', 'reject-1057'],
+]);
+
+/**
+ * Минимизация карточных данных выплаты (F-10): полный PAN не сохраняется
+ * ни в state, ни в снимке `/mock/state`, ни в журнале. Возвращаем только
+ * маску (BIN + последние 4) и выбранный тестовый сценарий.
+ */
+function resolvePayoutCard(pan, cardId) {
+  const candidates = [pan, cardId].map((value) => String(value ?? '').trim()).filter(Boolean);
+  const cardNumber = candidates.find((value) => core.looksLikePan(value)) || '';
+  const scenarioSource = candidates.find((value) => PAYOUT_CARD_SCENARIOS.has(value));
+  return {
+    panMask: cardNumber ? maskPan(cardNumber) : null,
+    cardScenario: scenarioSource ? PAYOUT_CARD_SCENARIOS.get(scenarioSource) : null,
+  };
+}
+
+/**
+ * Снимки состояния прежних версий содержат полный PAN в `payouts[*].pan`.
+ * Вычищаем его при загрузке и импорте, чтобы старый state-файл не тащил
+ * реквизиты (F-10).
+ */
+function scrubLegacyPan(targetState) {
+  const payouts = targetState && targetState.payouts;
+  if (!payouts || typeof payouts !== 'object') return 0;
+  let scrubbed = 0;
+  for (const payout of Object.values(payouts)) {
+    if (!payout || typeof payout !== 'object' || !('pan' in payout)) continue;
+    const resolved = resolvePayoutCard(payout.pan, payout.cardId);
+    if (!payout.panMask && resolved.panMask) payout.panMask = resolved.panMask;
+    if (!payout.cardScenario && resolved.cardScenario) payout.cardScenario = resolved.cardScenario;
+    if (payout.cardId && core.looksLikePan(payout.cardId)) payout.cardId = maskPan(payout.cardId);
+    delete payout.pan;
+    scrubbed += 1;
+  }
+  return scrubbed;
+}
+
 /* ------------------------------------------------------------ notifications */
 
 const NOTIFIED_STATUSES = new Set([
@@ -1630,17 +1677,13 @@ function adminAction(body) {
 
 /* ------------------------------------------------------------------ http */
 
+/**
+ * Выжимка запроса для журнала: скаляры, не более 8 полей, значения до 60
+ * символов. Редакцию секретов и PII делает ядро (F-09): `Token`, `Password`,
+ * `Pan`, `CardData`, `CVV`, ИНН/телефон/e-mail и ФИО в журнал не попадают.
+ */
 function bodySummary(body) {
-  const out = {};
-  let n = 0;
-  for (const [k, v] of Object.entries(body || {})) {
-    if (n >= 8) break;
-    if (k === 'Token' || k === 'Password') continue;
-    if (v === null || v === undefined || typeof v === 'object') continue;
-    out[k] = String(v).slice(0, 60);
-    n += 1;
-  }
-  return out;
+  return core.summarizeBody(body, { maxKeys: 8, maxValueLength: 60 });
 }
 
 /**
@@ -1780,7 +1823,13 @@ async function route(req, res) {
       const snapshot = (body && body.state) || body || {};
       try {
         const imported = sandboxManager.importState(snapshot, targetSandbox);
-        return sendJson(res, { ok: true, sandbox: imported });
+        // F-10: импортированный снимок тоже не должен оставлять полный PAN.
+        const scrubbed = scrubLegacyPan(state);
+        if (scrubbed) {
+          log(`[mock] из импортированного снимка удалён полный PAN у ${scrubbed} выплат(ы) (F-10)`);
+          persist();
+        }
+        return sendJson(res, { ok: true, sandbox: imported, panScrubbed: scrubbed || undefined });
       } catch (e) {
         return sendJson(res, err(7, 'Недопустимый снимок состояния', e.message, {
           field: 'state',
@@ -2022,6 +2071,9 @@ async function route(req, res) {
     }
     const payoutPaymentId = 'P-' + String(state.counters.payoutId++);
     const finalPayout = body.FinalPayout === true || body.FinalPayout === 'true';
+    // F-10: полный PAN не сохраняем — только маска и выбранный тестовый сценарий.
+    const card = resolvePayoutCard(body.Pan, body.CardId);
+    const rawCardId = body.CardId ? String(body.CardId) : null;
     state.payouts[payoutPaymentId] = {
       paymentId: payoutPaymentId,
       amount,
@@ -2029,8 +2081,9 @@ async function route(req, res) {
       customerKey: String(body.CustomerKey || ''),
       dealId,
       finalPayout,
-      cardId: body.CardId ? String(body.CardId) : null,
-      pan: body.Pan ? String(body.Pan) : null,
+      cardId: rawCardId && core.looksLikePan(rawCardId) ? maskPan(rawCardId) : rawCardId,
+      panMask: card.panMask,
+      cardScenario: card.cardScenario,
       phone: body.Phone ? String(body.Phone) : null,
       bankMemberId: body.BankMemberId ? String(body.BankMemberId) : null,
       recipient: {
@@ -2064,8 +2117,9 @@ async function route(req, res) {
     if (payout.status !== 'NEW' && payout.status !== 'CHECKED') {
       return sendJson(res, err(32, 'Неверный статус выплаты: ' + payout.status));
     }
-    // Официальный тестовый кейс выплаты с ошибкой: карта 5000000000000553 -> REJECTED 1057
-    if (payout.pan === '5000000000000553' || payout.cardId === '5000000000000553') {
+    // Официальный тестовый кейс выплаты с ошибкой: карта 5000000000000553 -> REJECTED 1057.
+    // Сценарий выбран в Init; PAN в состоянии не хранится (F-10).
+    if (payout.cardScenario === 'reject-1057') {
       payout.status = 'REJECTED';
       payout.errorCode = '1057';
       payout.statusHistory.push({ status: 'REJECTED', at: clock.iso() });
@@ -2230,7 +2284,16 @@ async function route(req, res) {
     const handler = handlers[method];
     if (!handler) return sendJson(res, err(501, `Метод ${method} мок-стендом пока не поддерживается`));
     if (!verifyToken(body)) {
-      console.log(`[mock] ${method} token FAIL. payload:`, JSON.stringify({ ...body, Token: `<${String(body.Token || '').slice(0, 8)}…>`, expected: `<${tokenOf(body).slice(0, 8)}…>` }));
+      // Диагностический payload — через редакцию ядра (F-09/F-10): в console не
+      // должно быть ни PAN, ни прочих реквизитов из тела запроса. Префиксы
+      // подписи вынесены в отдельные поля, чтобы диагностика осталась полезной.
+      const safePayload = core.redactSecrets({
+        ...body,
+        Token: core.REDACTED,
+        tokenReceived: `<${String(body.Token || '').slice(0, 8)}…>`,
+        tokenExpected: `<${tokenOf(body).slice(0, 8)}…>`,
+      });
+      console.log(`[mock] ${method} token FAIL. payload:`, JSON.stringify(safePayload));
       return sendJson(res, err(13, 'Неверный Token (подпись) запроса'));
     }
     return sendJson(res, handler(body, req.headers));
@@ -2341,6 +2404,16 @@ setInterval(() => {
 }, 1000).unref();
 
 restore();
+
+// F-10: state-файлы, сохранённые до минимизации карточных данных, могут
+// содержать полный PAN в payouts — вычищаем сразу после загрузки.
+{
+  const scrubbed = scrubLegacyPan(state);
+  if (scrubbed) {
+    log(`[mock] из состояния удалён полный PAN у ${scrubbed} выплат(ы) — хранится только маска (F-10)`);
+    persist();
+  }
+}
 
 if (require.main === module) {
   server.listen(parseInt(MOCK_PORT, 10), MOCK_HOST, () => {

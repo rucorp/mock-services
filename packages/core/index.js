@@ -13,6 +13,8 @@
  *   readBody/parseBody     — разбор тела запроса (json + form-urlencoded)
  *   send/sendJson/html     — ответы
  *   escapeHtml             — экранирование значений для HTML-страниц сервисов
+ *   redactSecrets/redactSecretsInText/redactRawBody/summarizeBody
+ *                          — редакция секретов, PAN и PII до журнала и логов
  *   createJournal(size)    — журнал входящих запросов (последние N) для /admin
  *   postJson               — исходящий POST (http/https по схеме)
  *   createDeliveryQueue    — доставка вебхуков с ретраями (как у банков/ОФД):
@@ -294,6 +296,219 @@ function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
 }
 
+/* ------------------------------------------------- redaction (F-09, F-10) */
+
+/**
+ * Редакция секретов и карточных данных до журналирования, экспорта и логов.
+ *
+ * Мок видит реквизиты интегратора: подпись `Token` и `Password` терминала
+ * (T-Bank), `login`/`pass` Ferma (Kassa), `Authorization: Basic/Bearer`
+ * (acqapi), PAN в `e2c/v2/Init` и в форме оплаты. Журнал `/admin`, снимок
+ * `/mock/state`, state-файл и console — не место для секретов: стенд
+ * поднимают на публичных хостах, а снимки состояния пересылают в баг-репорты.
+ *
+ * Порядок правил (важен):
+ *   1. ключ-секрет (token, pass, Authorization, cookie, CVV, CardData, PAN…) —
+ *      значение заменяется целиком на `[REDACTED]`;
+ *   2. ключ-PII (ИНН, телефон, e-mail, ФИО…) — значение маскируется частично,
+ *      чтобы журнал оставался пригодным для отладки;
+ *   3. любая строка дополнительно сканируется на PAN (префикс платёжной
+ *      системы + контрольная сумма Luhn) и на `Basic`/`Bearer`-токены — так
+ *      реквизиты не утекают через произвольное поле или бесструктурное тело.
+ *
+ * Редакция односторонняя: восстановить исходное значение из журнала нельзя.
+ */
+const REDACTED = '[REDACTED]';
+
+/** Ключ считается секретным по точному совпадению… */
+const SECRET_KEYS = new Set([
+  // HTTP-креды и сессия
+  'authorization', 'proxyauthorization', 'wwwauthenticate', 'cookie', 'cookie2', 'setcookie',
+  // креды провайдеров (Ferma getToken, партнёрский пароль acqapi)
+  'pass', 'password', 'credentials', 'credential', 'privatekey', 'sig', 'sign',
+  'login', 'user', 'username',
+  // карточные данные: полный PAN и CVV хранить нельзя даже в моке (PCI DSS)
+  'pan', 'cardnumber', 'cardnum', 'cardno', 'carddata', 'cardholder', 'holder',
+  'expdate', 'expirydate', 'expirationdate', 'expiredate',
+]);
+
+/** …или по суффиксу: `access_token`, `client_secret`, `x-api-key`, `CVV2`… */
+const SECRET_KEY_SUFFIXES = [
+  'token', 'secret', 'password', 'passwd', 'pwd', 'passcode', 'apikey',
+  'signature', 'cvv', 'cvv2', 'cvc', 'cvc2',
+];
+
+/** PII: не секрет, но персональные данные — маскируем, а не показываем целиком. */
+const PII_KEYS = new Set([
+  'inn', 'kpp', 'ogrn', 'snils', 'passport', 'passportnumber', 'birthdate', 'birthday',
+  'phone', 'phonenumber', 'mobile', 'tel', 'customerphone',
+  'email', 'mail', 'customeremail',
+  'fio', 'fullname', 'recipientname', 'payername', 'customername', 'cardholdername',
+  'address', 'postaladdress',
+]);
+
+/** Суффиксы PII-ключей: `PayerInn`, `customer_phone`, `RecipientName`… */
+const PII_KEY_SUFFIXES = [
+  'inn', 'kpp', 'ogrn', 'snils', 'passport', 'birthdate', 'birthday',
+  'phone', 'mobile', 'email', 'fio', 'fullname',
+  'recipientname', 'payername', 'customername', 'cardholdername',
+];
+
+/** Ключ к нормализованному виду: регистр и разделители не влияют на класс. */
+const normalizeKey = (key) => String(key ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+/** Класс ключа: 'secret' | 'pii' | 'safe'. */
+function classifyKey(key) {
+  const normalized = normalizeKey(key);
+  if (!normalized) return 'safe';
+  if (SECRET_KEYS.has(normalized) || SECRET_KEY_SUFFIXES.some((suffix) => normalized.endsWith(suffix))) return 'secret';
+  if (PII_KEYS.has(normalized) || PII_KEY_SUFFIXES.some((suffix) => normalized.endsWith(suffix))) return 'pii';
+  return 'safe';
+}
+
+/** Контрольная сумма Луна: отсекает случайные длинные числа (id, таймстампы). */
+function luhnValid(digits) {
+  let sum = 0;
+  let double = false;
+  for (let i = digits.length - 1; i >= 0; i -= 1) {
+    let digit = digits.charCodeAt(i) - 48;
+    if (double) {
+      digit *= 2;
+      if (digit > 9) digit -= 9;
+    }
+    sum += digit;
+    double = !double;
+  }
+  return sum % 10 === 0;
+}
+
+/**
+ * Похоже ли значение на PAN: 13–19 цифр (пробелы/дефисы допустимы), префикс
+ * платёжной системы (2 — «Мир», 4 — Visa, 5/6 — Mastercard/Maestro) и валидная
+ * контрольная сумма. Требование Луна нужно, чтобы не маскировать длинные
+ * идентификаторы и суммы в журнале.
+ */
+function looksLikePan(value) {
+  const digits = String(value ?? '').replace(/[\s-]/g, '');
+  return /^\d{13,19}$/.test(digits) && /^[2456]/.test(digits) && luhnValid(digits);
+}
+
+/** Маска PAN в формате стенда: первые 6 (BIN) и последние 4 цифры. */
+function maskPan(value) {
+  const digits = String(value ?? '').replace(/[\s-]/g, '');
+  if (!/^\d{10,}$/.test(digits)) return REDACTED;
+  return `${digits.slice(0, 6)}**${digits.slice(-4)}`;
+}
+
+/** Частичная маска PII: по ключу выбираем, сколько исходного значения оставить. */
+function maskPiiValue(key, value) {
+  const text = typeof value === 'string' || typeof value === 'number' ? String(value) : '';
+  if (!text) return REDACTED;
+  const normalized = normalizeKey(key);
+  if (normalized.includes('email') || normalized === 'mail') {
+    const at = text.indexOf('@');
+    return at > 0 ? `${text.slice(0, Math.min(2, at))}***${text.slice(at)}` : `${text.slice(0, 2)}***`;
+  }
+  if (normalized.includes('phone') || normalized === 'mobile' || normalized === 'tel') {
+    const digits = text.replace(/\D/g, '');
+    return digits.length >= 4 ? `***${digits.slice(-4)}` : '***';
+  }
+  if (/(inn|kpp|ogrn|snils)$/.test(normalized)) {
+    return /^\d{4}/.test(text) ? `${text.slice(0, 4)}${'*'.repeat(Math.max(0, text.length - 4))}` : '***';
+  }
+  // Прочие PII (ФИО, адрес, логин): короткий префикс, чтобы запись осталась различимой.
+  return text.length <= 3 ? '***' : `${text.slice(0, 2)}***`;
+}
+
+/** PAN целиком (в т.ч. с разделителями) и токены в произвольном тексте. */
+const PAN_IN_TEXT_RE = /(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)/g;
+
+/** Редакция произвольной строки: журнала, тела без структуры, строки лога. */
+function redactSecretsInText(text) {
+  return String(text ?? '')
+    .replace(/\b(Basic|Bearer)([ \t]+)([A-Za-z0-9+/=._-]{8,})/gi, (_match, scheme, space) => `${scheme}${space}${REDACTED}`)
+    .replace(PAN_IN_TEXT_RE, (match) => (looksLikePan(match) ? maskPan(match) : match));
+}
+
+const REDACT_MAX_DEPTH = 12;
+const REDACT_MAX_ARRAY_ITEMS = 100;
+
+/**
+ * Рекурсивная редакция JSON-дерева: объекты, массивы и строки. Глубина и
+ * длина массивов ограничены, опасные ключи (F-01) в результат не переносятся.
+ */
+function redactSecrets(value, depth = 0) {
+  if (value === null || value === undefined) return value;
+  if (Array.isArray(value)) {
+    if (depth >= REDACT_MAX_DEPTH) return '[…]';
+    return value.slice(0, REDACT_MAX_ARRAY_ITEMS).map((item) => redactSecrets(item, depth + 1));
+  }
+  if (typeof value === 'object') {
+    if (depth >= REDACT_MAX_DEPTH) return '[…]';
+    const out = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (DANGEROUS_STATE_KEYS.has(key)) continue;
+      const kind = classifyKey(key);
+      if (kind === 'secret') out[key] = REDACTED;
+      else if (kind === 'pii' && (item === null || typeof item !== 'object')) out[key] = maskPiiValue(key, item);
+      else out[key] = redactSecrets(item, depth + 1);
+    }
+    return out;
+  }
+  if (typeof value === 'string') return redactSecretsInText(value);
+  return value;
+}
+
+/**
+ * Редакция сырого тела запроса: JSON разбираем и правим по ключам,
+ * form-urlencoded — по параметрам, остальное — как текст (PAN/токены).
+ */
+function redactRawBody(raw) {
+  const text = String(raw ?? '');
+  const trimmed = text.trim();
+  if (!trimmed) return '';
+  if (trimmed[0] === '{' || trimmed[0] === '[') {
+    try {
+      return JSON.stringify(redactSecrets(JSON.parse(trimmed)));
+    } catch { /* не JSON — ниже обработаем как текст */ }
+  }
+  if (/^[^=&\s]+=[^&]*(&[^=&\s]+=[^&]*)*$/.test(trimmed)) {
+    // Пары не перекодируем: ключ остаётся как пришёл, правится только значение.
+    return trimmed.split('&').map((pair) => {
+      const eq = pair.indexOf('=');
+      const key = eq < 0 ? pair : pair.slice(0, eq);
+      const value = eq < 0 ? '' : pair.slice(eq + 1);
+      const kind = classifyKey(key);
+      if (kind === 'secret') return `${key}=${REDACTED}`;
+      if (kind === 'pii') {
+        let decoded = value;
+        try { decoded = decodeURIComponent(value); } catch { /* битый escape — маскируем как есть */ }
+        return `${key}=${maskPiiValue(key, decoded)}`;
+      }
+      return `${key}=${redactSecretsInText(value)}`;
+    }).join('&');
+  }
+  return redactSecretsInText(text);
+}
+
+/**
+ * Выжимка тела запроса для журнала: только скаляры, не больше `maxKeys` полей,
+ * значения до `maxValueLength` символов, секреты и PII — по правилам редакции.
+ */
+function summarizeBody(body, { maxKeys = 8, maxValueLength = 60 } = {}) {
+  const out = {};
+  let shown = 0;
+  for (const [key, value] of Object.entries(body || {})) {
+    if (shown >= maxKeys) break;
+    if (value === null || value === undefined || typeof value === 'object') continue;
+    const kind = classifyKey(key);
+    const safe = kind === 'secret' ? REDACTED : (kind === 'pii' ? maskPiiValue(key, value) : redactSecretsInText(String(value)));
+    out[key] = String(safe).slice(0, maxValueLength);
+    shown += 1;
+  }
+  return out;
+}
+
 /* ---------------------------------------------------------------- journal */
 
 /**
@@ -332,7 +547,9 @@ const shellQuote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
 /**
  * Генерация готовой команды curl для воспроизведения запроса из журнала (/admin).
  * Все динамические части заключаются в shell single quotes; секреты query
- * заменяются на безопасные placeholder-ы до формирования команды.
+ * заменяются на безопасные placeholder-ы до формирования команды, а тело
+ * проходит редакцию (F-09): PAN, креды и токены в сниппет не попадают —
+ * интегратор подставляет свои реквизиты вместо `[REDACTED]`.
  */
 function buildCurlCommand({ baseUrl = 'http://localhost:3100', method = 'POST', path: reqPath = '/', headers = {}, rawBody = '', body = null }) {
   const fullUrl = redactQuerySecrets(`${String(baseUrl).replace(/\/$/, '')}${reqPath}`);
@@ -346,35 +563,150 @@ function buildCurlCommand({ baseUrl = 'http://localhost:3100', method = 'POST', 
   for (const [key, value] of Object.entries(headers || {})) {
     const canonical = allowedHeaders.get(key.toLowerCase());
     if (!canonical || value === undefined || value === null || value === '') continue;
-    parts.push(`-H ${shellQuote(`${canonical}: ${String(value)}`)}`);
+    parts.push(`-H ${shellQuote(`${canonical}: ${redactSecretsInText(String(value))}`)}`);
   }
   const payloadStr = rawBody
-    ? String(rawBody)
-    : (body && Object.keys(body).length ? JSON.stringify(body) : '');
+    ? redactRawBody(rawBody)
+    : (body && Object.keys(body).length ? JSON.stringify(redactSecrets(body)) : '');
   if (payloadStr) parts.push(`-d ${shellQuote(payloadStr)}`);
   return parts.join(' ');
+}
+
+/** Заголовки, которые безопасно показывать в журнале (всё остальное отбрасывается). */
+const JOURNAL_HEADER_ALLOWLIST = new Set([
+  'contenttype', 'contentlength', 'useragent', 'xmockscenario', 'xmocksandbox', 'xmocklatency',
+]);
+
+/**
+ * Allowlist заголовков для журнала (F-09): `Authorization`, `Cookie` и прочие
+ * креды в запись не попадают вовсе, служебные `X-Mock-*` остаются для отладки.
+ */
+function filterJournalHeaders(headers, { maxValueLength = 256 } = {}) {
+  const out = {};
+  for (const [key, value] of Object.entries(headers || {})) {
+    const normalized = normalizeKey(key);
+    if (!(JOURNAL_HEADER_ALLOWLIST.has(normalized) || (normalized.startsWith('xmock') && classifyKey(key) === 'safe'))) continue;
+    if (value === undefined || value === null || value === '') continue;
+    const text = Array.isArray(value) ? value.join(', ') : String(value);
+    out[String(key).toLowerCase()] = redactSecretsInText(text).slice(0, maxValueLength);
+  }
+  return out;
+}
+
+/**
+ * Ограничение длины одной записи журнала (F-09): без него одна запись с телом
+ * на мегабайт превращает /admin/journal в способ уронить стенд. Пределы
+ * подобраны так, что обычная запись помещается в `entry` без потерь.
+ */
+const JOURNAL_LIMITS = {
+  path: 256,
+  key: 48,
+  keys: 16,
+  value: 120,
+  headerValue: 256,
+  rawBody: 1024,
+  curl: 2048,
+  entry: 8192,
+};
+
+function truncateText(value, max) {
+  const text = String(value ?? '');
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+/** Тело записи журнала: плоская выжимка с лимитом на число и длину полей. */
+function capJournalBody(body, { maxKeys = JOURNAL_LIMITS.keys, maxKeyLength = JOURNAL_LIMITS.key, maxValueLength = JOURNAL_LIMITS.value } = {}) {
+  if (body === null || body === undefined || typeof body !== 'object') return {};
+  const out = {};
+  let shown = 0;
+  for (const [key, value] of Object.entries(body)) {
+    if (shown >= maxKeys) break;
+    const text = value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value ?? '');
+    out[truncateText(key, maxKeyLength)] = truncateText(text, maxValueLength);
+    shown += 1;
+  }
+  return out;
+}
+
+/**
+ * Финальная гарантия размера записи: урезаем сырое тело, сниппет, значения и
+ * путь; если и этого мало — тело заменяется явным маркером.
+ */
+function fitJournalEntry(entry, maxChars) {
+  const tooBig = () => JSON.stringify(entry).length > maxChars;
+  const shrinkField = (key) => {
+    if (typeof entry[key] !== 'string') return;
+    let limit = entry[key].length;
+    while (limit > 32 && tooBig()) {
+      limit = Math.floor(limit / 2);
+      entry[key] = truncateText(entry[key], limit);
+    }
+  };
+  if (!tooBig()) return entry;
+  shrinkField('rawBody');
+  shrinkField('curl');
+  if (tooBig() && entry.body && typeof entry.body === 'object') {
+    let limit = Object.values(entry.body).reduce((max, value) => Math.max(max, String(value ?? '').length), 0);
+    while (limit > 16 && tooBig()) {
+      limit = Math.floor(limit / 2);
+      for (const [key, value] of Object.entries(entry.body)) entry.body[key] = truncateText(value, limit);
+    }
+  }
+  shrinkField('path');
+  if (tooBig()) entry.body = { journal: `запись сокращена: превышен лимит ${maxChars} символов` };
+  return entry;
 }
 
 /**
  * Журнал входящих запросов (спека §2: «журнал запросов»): последние N
  * обращений к API с методом, путём, ключевыми полями, кодом ответа,
  * длительностью и готовой командой curl для воспроизведения.
+ *
+ * F-09: запись редактируется до сохранения — заголовки через allowlist, тело и
+ * сырой payload через `redactSecrets`, значения и вся запись ограничены по
+ * длине. Журнал живёт в памяти процесса, но показывается в /admin (JSON и
+ * HTML) и попадает в баг-репорты, поэтому секретов в нём быть не должно.
  */
-function createJournal({ size = 200, baseUrl = '' } = {}) {
+function createJournal({ size = 200, baseUrl = '', maxEntryChars = JOURNAL_LIMITS.entry } = {}) {
   const entries = [];
-  function record(entry) {
-    const requestPath = entry.path || '/';
-    const curl = entry.curl || buildCurlCommand({
+  const KNOWN_ENTRY_KEYS = new Set(['at', 'method', 'path', 'status', 'ms', 'body', 'headers', 'rawBody', 'baseUrl', 'curl']);
+  function record(entry = {}) {
+    const safePath = redactQuerySecrets(truncateText(redactSecretsInText(entry.path || '/'), JOURNAL_LIMITS.path));
+    const safeBaseUrl = entry.baseUrl ? redactQuerySecrets(truncateText(entry.baseUrl, JOURNAL_LIMITS.path)) : '';
+    const safeHeaders = filterJournalHeaders(entry.headers, { maxValueLength: JOURNAL_LIMITS.headerValue });
+    const safeBody = entry.body === undefined || entry.body === null
+      ? {}
+      : capJournalBody(redactSecrets(entry.body));
+    const safeRawBody = entry.rawBody === undefined || entry.rawBody === null
+      ? ''
+      : truncateText(redactRawBody(entry.rawBody), JOURNAL_LIMITS.rawBody);
+    const safeCurl = truncateText(entry.curl || buildCurlCommand({
       baseUrl: entry.baseUrl || baseUrl || 'http://localhost:3100',
       method: entry.method || 'POST',
-      path: requestPath,
+      path: safePath,
       headers: entry.headers || {},
-      rawBody: entry.rawBody || '',
-      body: entry.body || null,
-    });
-    const safeEntry = { ...entry, path: redactQuerySecrets(requestPath) };
-    if (safeEntry.baseUrl) safeEntry.baseUrl = redactQuerySecrets(safeEntry.baseUrl);
-    entries.push({ at: new Date().toISOString(), ...safeEntry, curl });
+      rawBody: safeRawBody,
+      body: safeBody,
+    }), JOURNAL_LIMITS.curl);
+
+    const safeEntry = {
+      at: new Date().toISOString(),
+      method: entry.method,
+      path: safePath,
+      status: entry.status,
+      ms: entry.ms,
+      body: safeBody,
+      headers: safeHeaders,
+    };
+    if (safeRawBody) safeEntry.rawBody = safeRawBody;
+    if (safeBaseUrl) safeEntry.baseUrl = safeBaseUrl;
+    // Прочие поля записи (если адаптер что-то добавил) — тоже через редакцию.
+    for (const [key, value] of Object.entries(entry)) {
+      if (!KNOWN_ENTRY_KEYS.has(key)) safeEntry[key] = redactSecrets(value);
+    }
+    safeEntry.curl = safeCurl;
+
+    entries.push(fitJournalEntry(safeEntry, maxEntryChars));
     if (entries.length > size) entries.splice(0, entries.length - size);
   }
   return { record, list: () => entries.slice(), clear: () => { entries.length = 0; } };
@@ -1438,6 +1770,16 @@ module.exports = {
   sendJson,
   html,
   escapeHtml,
+  REDACTED,
+  classifyKey,
+  looksLikePan,
+  maskPan,
+  maskPiiValue,
+  redactSecrets,
+  redactSecretsInText,
+  redactRawBody,
+  summarizeBody,
+  filterJournalHeaders,
   isPrivateHost,
   isPrivateAddress,
   assertPublicHost,

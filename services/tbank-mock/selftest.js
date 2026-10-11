@@ -11,6 +11,8 @@
  */
 
 const http = require('http');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const assert = require('assert');
 
@@ -863,6 +865,136 @@ process.env.MOCK_RETRY_MS = '1000';
       child.stop();
     }
     assert.ok(WEBHOOK_HITS.length > 0, 'локальный режим без флага продолжает доставлять вебхуки на localhost');
+  }
+
+  // 38. #24 (F-09, F-10): секреты и карточные данные не попадают в state,
+  //     /mock/state, журнал (JSON и HTML) и console output.
+  {
+    // Уникальный валидный по Luhn PAN («Мир»), которого нет среди тестовых карт.
+    const sentinelPan = '2200770012345676';
+    const sentinelSecret = `sentinel-secret-${process.pid}`;
+    const basicHeader = Buffer.from(`partner:${sentinelSecret}`).toString('base64');
+
+    let bearerToken = '';
+    const logged = [];
+    const originalLog = console.log;
+    console.log = (...args) => { logged.push(args.map((a) => String(a)).join(' ')); };
+    try {
+      // Выплата с PAN: в state остаются только маска и сценарий
+      const panInitPayload = {
+        TerminalKey: TERMINAL, Amount: '15000', OrderId: 'payout-sentinel-pan',
+        Pan: sentinelPan, RecipientName: 'Иван Петров', Phone: '+79211234567',
+      };
+      const panInit = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Init', { ...panInitPayload, Token: tokenOf(panInitPayload) })).body);
+      assert.strictEqual(panInit.Success, true, 'e2c Init с PAN должен проходить');
+      const panPayout = state.payouts[panInit.PaymentId];
+      assert.strictEqual(panPayout.pan, undefined, 'полный PAN не должен храниться в state (F-10)');
+      assert.strictEqual(panPayout.panMask, '220077**5676', 'в state остаётся маска BIN + последние 4');
+      assert.strictEqual(panPayout.cardScenario, null, 'PAN вне тестового списка сценария не выбирает');
+
+      // Официальный тестовый кейс 5000000000000553 -> 1057 продолжает работать без PAN в state
+      const badInitPayload = { TerminalKey: TERMINAL, Amount: '10000', OrderId: 'payout-sentinel-1057', Pan: '5000000000000553' };
+      const badInit = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Init', { ...badInitPayload, Token: tokenOf(badInitPayload) })).body);
+      const badPayout = state.payouts[badInit.PaymentId];
+      assert.strictEqual(badPayout.pan, undefined, 'полный PAN тестовой карты тоже не хранится');
+      assert.strictEqual(badPayout.panMask, '500000**0553');
+      assert.strictEqual(badPayout.cardScenario, 'reject-1057', 'сценарий выбирается в Init');
+      const badPayPayload = { TerminalKey: TERMINAL, PaymentId: badInit.PaymentId };
+      const badPay = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Payment', { ...badPayPayload, Token: tokenOf(badPayPayload) })).body);
+      assert.strictEqual(badPay.Success, false);
+      assert.strictEqual(badPay.ErrorCode, '1057');
+      assert.strictEqual(badPay.Status, 'REJECTED');
+
+      // acqapi: Basic (OAuth) и Bearer — заголовки с кредами в журнал не попадают
+      const oauth = await request(mockPort, 'POST', '/oauth/token', {}, { Authorization: `Basic ${basicHeader}` });
+      assert.strictEqual(oauth.statusCode, 200, 'POST /oauth/token с Basic должен проходить');
+      bearerToken = JSON.parse(oauth.body).access_token;
+      const shopPayload = { billingDescriptor: 'SENTINEL', inn: '7801111111', shopCode: '700999', name: 'ООО «Сентинел»' };
+      const shop = await request(mockPort, 'POST', '/sm-register/register', shopPayload, { Authorization: `Bearer ${bearerToken}` });
+      assert.strictEqual(shop.statusCode, 200, `POST /sm-register/register должен проходить: ${shop.body.slice(0, 120)}`);
+
+      // Битая подпись: диагностический payload в console — тоже через редакцию
+      await request(mockPort, 'POST', '/v2/Init', { TerminalKey: TERMINAL, Amount: '100', OrderId: 'sentinel-bad-token', Pan: sentinelPan, Token: 'deadbeefdeadbeef' });
+    } finally {
+      console.log = originalLog;
+    }
+
+    const consoleText = logged.join('\n');
+    assert.ok(logged.length > 0, 'стенд должен писать диагностику в console — иначе проверка логов пуста');
+    assert.ok(!consoleText.includes(sentinelPan), `PAN не должен попадать в console: ${consoleText.slice(0, 300)}`);
+    assert.ok(!consoleText.includes(sentinelSecret), 'секрет acqapi не должен попадать в console');
+    assert.ok(!consoleText.includes(basicHeader), 'Basic-заголовок не должен попадать в console');
+    assert.ok(!consoleText.includes('5000000000000553'), 'PAN тестовой карты не должен попадать в console');
+
+    const journalText = (await request(mockPort, 'GET', '/admin/journal')).body;
+    for (const [what, needle] of [
+      ['sentinel PAN', sentinelPan],
+      ['PAN тестовой карты', '5000000000000553'],
+      ['Basic-заголовок', basicHeader],
+      ['Bearer-токен', bearerToken],
+      ['секрет acqapi', sentinelSecret],
+    ]) {
+      assert.ok(!journalText.includes(needle), `${what} не должен попадать в /admin/journal`);
+    }
+    const journal = JSON.parse(journalText);
+    const initEntry = journal.entries.find((e) => e.path === '/e2c/v2/Init' && e.body && e.body.OrderId === 'payout-sentinel-pan');
+    assert.ok(initEntry, 'запись e2c Init должна быть в журнале');
+    assert.strictEqual(initEntry.body.Pan, '[REDACTED]', 'PAN в журнале — только [REDACTED]');
+    assert.strictEqual(initEntry.body.RecipientName, 'Ив***', 'ФИО в журнале маскируется');
+    assert.strictEqual(initEntry.body.Phone, '***4567', 'телефон в журнале маскируется');
+    assert.ok(!initEntry.curl.includes(sentinelPan), 'PAN не должен попадать в curl-сниппет');
+    for (const entry of journal.entries) {
+      assert.strictEqual(entry.headers && entry.headers.authorization, undefined, 'Authorization не должен храниться в журнале');
+    }
+    const oauthEntry = journal.entries.find((e) => e.path === '/oauth/token');
+    assert.ok(oauthEntry, 'запись /oauth/token должна быть в журнале');
+    assert.ok(JSON.stringify(oauthEntry.headers).length < 200, `в записи остаются только служебные заголовки: ${JSON.stringify(oauthEntry.headers)}`);
+
+    const adminHtml = (await request(mockPort, 'GET', '/admin')).body;
+    assert.ok(!adminHtml.includes(sentinelPan), 'PAN не должен попадать в HTML-консоль');
+    assert.ok(!adminHtml.includes(basicHeader), 'Basic-заголовок не должен попадать в HTML-консоль');
+
+    const stateText = (await request(mockPort, 'GET', '/mock/state')).body;
+    assert.ok(!stateText.includes(sentinelPan), 'PAN не должен попадать в экспорт /mock/state');
+    assert.ok(!stateText.includes('5000000000000553'), 'PAN тестовой карты не должен попадать в экспорт /mock/state');
+    assert.ok(stateText.includes('500000**0553'), 'маска PAN в экспорте остаётся для отладки');
+  }
+
+  // 39. #24 (F-10): снимок состояния 0.5.0 с полным PAN вычищается при загрузке
+  {
+    const legacyFile = path.join(os.tmpdir(), `tbank-legacy-pan-${process.pid}.json`);
+    fs.writeFileSync(legacyFile, JSON.stringify({
+      payouts: {
+        'P-1': { paymentId: 'P-1', amount: 100, status: 'NEW', pan: '2200770012345676', cardId: '5000000000000553', statusHistory: [] },
+      },
+    }));
+    const child = startChild({ MOCK_STATE_FILE: legacyFile });
+    const childPort = await child.port;
+    try {
+      const exported = JSON.parse((await request(childPort, 'GET', '/mock/state')).body);
+      const childState = (exported.state && exported.state.state) || exported.state || {};
+      const legacyPayout = (childState.payouts || {})['P-1'];
+      assert.ok(legacyPayout, 'выплата из снимка должна загрузиться');
+      assert.strictEqual(legacyPayout.pan, undefined, 'полный PAN из старого снимка должен быть удалён');
+      assert.strictEqual(legacyPayout.panMask, '220077**5676');
+      assert.strictEqual(legacyPayout.cardScenario, 'reject-1057', 'сценарий восстанавливается из номера карты');
+      assert.strictEqual(legacyPayout.cardId, '500000**0553', 'PAN в поле cardId тоже маскируется');
+      assert.ok(!(await request(childPort, 'GET', '/mock/state')).body.includes('2200770012345676'));
+
+      // Импорт снимка с полным PAN вычищается так же
+      const importRes = await request(childPort, 'POST', '/mock/state', {
+        state: { payouts: { 'P-9': { paymentId: 'P-9', amount: 100, status: 'NEW', pan: '2200770012345676' } } },
+      });
+      assert.strictEqual(JSON.parse(importRes.body).ok, true, 'импорт снимка должен проходить');
+      const imported = JSON.parse((await request(childPort, 'GET', '/mock/state')).body);
+      const importedState = (imported.state && imported.state.state) || imported.state || {};
+      assert.strictEqual(importedState.payouts['P-9'].pan, undefined, 'PAN из импорта не сохраняется');
+      assert.strictEqual(importedState.payouts['P-9'].panMask, '220077**5676');
+      assert.ok(!(await request(childPort, 'GET', '/mock/state')).body.includes('2200770012345676'), 'в экспорте после импорта PAN нет');
+    } finally {
+      child.stop();
+      try { fs.unlinkSync(legacyFile); } catch { /* уже удалён */ }
+    }
   }
 
   console.log(`selftest: ${WEBHOOK_HITS.length} webhook deliveries, ${Object.keys(state.payments).length} payment sessions`);

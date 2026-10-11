@@ -23,8 +23,21 @@ Zero dependencies, Node >= 18. Self-test: `npm run test:core`.
   `html(res, body, code)` — ответы.
 - `escapeHtml(value)` — экранирование значений, пришедших от интегратора,
   на HTML-страницах сервисов (чек покупателю, `/admin`).
-- `createJournal({size})` → `{record, list, clear}` — журнал входящих запросов
-  для `/admin/journal`: метод, путь, ключевые поля, код ответа, длительность.
+- `redactSecrets(value)` / `redactSecretsInText(text)` / `redactRawBody(raw)` /
+  `summarizeBody(body, {maxKeys, maxValueLength})` — редакция секретов перед
+  журналированием и логированием (F-09): ключи-секреты (`Authorization`, `Cookie`,
+  `token`, `pass`/`password`, `CVV`, `CardData`, `PAN`, `signature`) заменяются на
+  `[REDACTED]`, PII (ИНН, телефон, e-mail, ФИО) маскируются частично, а любая
+  строка дополнительно сканируется на PAN (`looksLikePan`/`maskPan`: 13–19 цифр,
+  префикс платёжной системы, контрольная сумма Luhn) и на `Basic`/`Bearer`-токены.
+- `classifyKey(key)` → `'secret' | 'pii' | 'safe'` — класс поля по имени;
+  `maskPiiValue(key, value)` — частичная маска PII.
+- `createJournal({size, baseUrl, maxEntryChars})` → `{record, list, clear}` —
+  журнал входящих запросов для `/admin/journal`: метод, путь, ключевые поля, код
+  ответа, длительность. Запись редактируется до сохранения (F-09): заголовки —
+  через allowlist (`Content-Type`, `Content-Length`, `User-Agent`, `X-Mock-*`),
+  тело и сырой payload — через `redactSecrets`/`redactRawBody`, длина полей и всей
+  записи ограничена.
 - `postJson(url, payload, timeoutMs)` — исходящий POST (http/https по схеме;
   другие схемы отклоняются, редиректы не отслеживаются).
 - `flagEnabled(value, fallback)` — разбор boolean-настроек из env: `1`/`true`/`yes`/`on`

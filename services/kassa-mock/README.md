@@ -25,7 +25,7 @@ Zero npm dependencies — чистый Node (>= 18), один файл `server.j
 | `GET/POST/PUT /mock/time` | виртуальные часы (`{"advance":"13h"}`, `{"reset":true}`) |
 | `GET/POST/DELETE /mock/scenarios` | сценарное API + заголовок `X-Mock-Scenario: fail\|hang\|ofd-queue\|ofd-reject\|mark-fail\|webhook-drop` |
 | `GET /admin` | консоль: последние 50 документов, фискальные данные, статус ОФД, журнал запросов, кнопки сценариев |
-| `GET /admin/journal` | JSON-журнал последних API-запросов |
+| `GET /admin/journal` | JSON-журнал последних API-запросов; креды `getToken` (`login`/`pass`), токены и реквизиты покупателя редактируются — `[REDACTED]`/маска, заголовки только из allowlist |
 | `GET /healthz` | ok/касса недоступна + `ofdMode` и `ofdQueueCount` |
 
 ### Валидация чека (DX-слой)
