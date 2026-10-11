@@ -45,6 +45,14 @@ services:
       MOCK_ADMIN_TOKEN: "${MOCK_ADMIN_TOKEN:-}"
       MOCK_OPERATOR_TOKEN: "${MOCK_OPERATOR_TOKEN:-}"
       MOCK_HOSTED: "${MOCK_HOSTED:-false}"
+      # RFC-001: изоляция песочниц. MOCK_TENANCY=1 (или MOCK_HOSTED=1) включает
+      # hosted tenancy; MOCK_SANDBOX_TOKEN закрывает default-песочницу стенда.
+      MOCK_TENANCY: "${MOCK_TENANCY:-}"
+      MOCK_SANDBOX_TOKEN: "${MOCK_SANDBOX_TOKEN:-}"
+      MOCK_SANDBOX_TTL_MS: "${MOCK_SANDBOX_TTL_MS:-}"
+      MOCK_SANDBOX_MAX: "${MOCK_SANDBOX_MAX:-}"
+      MOCK_SANDBOX_MAX_DOCUMENTS: "${MOCK_SANDBOX_MAX_DOCUMENTS:-}"
+      MOCK_SANDBOX_HOST_SUFFIX: "${MOCK_SANDBOX_HOST_SUFFIX:-}"
       MOCK_STATE_FILE: "/data/tbank-state.json"
     volumes:
       - mock-services-data:/data
@@ -87,6 +95,13 @@ services:
       MOCK_ADMIN_TOKEN: "${MOCK_ADMIN_TOKEN:-}"
       MOCK_OPERATOR_TOKEN: "${MOCK_OPERATOR_TOKEN:-}"
       MOCK_HOSTED: "${MOCK_HOSTED:-false}"
+      # RFC-001: изоляция песочниц (см. tbank-mock выше).
+      MOCK_TENANCY: "${MOCK_TENANCY:-}"
+      MOCK_SANDBOX_TOKEN: "${MOCK_SANDBOX_TOKEN:-}"
+      MOCK_SANDBOX_TTL_MS: "${MOCK_SANDBOX_TTL_MS:-}"
+      MOCK_SANDBOX_MAX: "${MOCK_SANDBOX_MAX:-}"
+      MOCK_SANDBOX_MAX_DOCUMENTS: "${MOCK_SANDBOX_MAX_DOCUMENTS:-}"
+      MOCK_SANDBOX_HOST_SUFFIX: "${MOCK_SANDBOX_HOST_SUFFIX:-}"
       MOCK_STATE_FILE: "/data/kassa-state.json"
     volumes:
       - mock-services-data:/data

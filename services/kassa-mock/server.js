@@ -26,7 +26,8 @@ const crypto = require('crypto');
 const core = require('../../packages/core');
 const {
   createLog, readBody, send, sendJson, escapeHtml, checkControlAccess,
-  parseScenarioSpec, applyRequestChaos, createSandboxManager, verifyMerchantWebhook,
+  parseScenarioSpec, applyRequestChaos, createSandboxRuntime, resolveTenancyMode, parseMsOr,
+  verifyMerchantWebhook,
 } = core;
 // Журнал входящих запросов: интегратору видно в /admin/journal (спека §2).
 const journal = core.createJournal({ size: 200 });
@@ -54,6 +55,15 @@ const {
   MOCK_OPERATOR_TOKEN = '',
   MOCK_HOSTED = 'false',
   MOCK_OFD_MODE = 'online',
+  MOCK_TENANCY = '',
+  MOCK_SANDBOX_TOKEN = '',
+  MOCK_SANDBOX_TTL_MS = '',
+  MOCK_SANDBOX_MAX = '',
+  MOCK_SANDBOX_MAX_DOCUMENTS = '',
+  MOCK_SANDBOX_RETENTION_MS = '',
+  MOCK_SANDBOX_HOST_SUFFIX = '',
+  MOCK_SANDBOX_CREATE_LIMIT = '',
+  MOCK_SANDBOX_FILE = '',
 } = process.env;
 
 // Креды кассы: приоритет MOCK_FERMA_* -> FERMA_* -> дефолт стенда
@@ -76,22 +86,36 @@ const GROUPS = String(MOCK_GROUPS).split(',').map((g) => g.trim()).filter(Boolea
 const HOSTED = core.flagEnabled(MOCK_HOSTED);
 const OPERATOR_TOKEN = MOCK_OPERATOR_TOKEN || '';
 const BLOCK_PRIVATE_WEBHOOKS = core.flagEnabled(MOCK_BLOCK_PRIVATE_WEBHOOKS, HOSTED);
+
+/* --------------------------------------------- мульти-аренда (RFC-001, F-12) */
+
+// MOCK_TENANCY=off|on; по умолчанию tenancy выключена для self-hosted и
+// включается hosted-режимом: MOCK_TENANCY=1/MOCK_HOSTED=1 -> owned.
+const TENANCY = resolveTenancyMode(MOCK_TENANCY, HOSTED);
+const SANDBOX_OWNER_TOKEN = String(MOCK_SANDBOX_TOKEN || '').trim();
+const SANDBOX_TTL_MS = parseMsOr(MOCK_SANDBOX_TTL_MS, TENANCY === 'owned' ? 24 * 60 * 60 * 1000 : 0);
+const SANDBOX_MAX = parseMsOr(MOCK_SANDBOX_MAX, TENANCY === 'owned' ? 100 : 256);
+const SANDBOX_MAX_DOCUMENTS = parseMsOr(MOCK_SANDBOX_MAX_DOCUMENTS, TENANCY === 'owned' ? 5000 : 0);
+const SANDBOX_RETENTION_MS = parseMsOr(MOCK_SANDBOX_RETENTION_MS, 0);
+const SANDBOX_HOST_SUFFIX = String(MOCK_SANDBOX_HOST_SUFFIX || '').trim();
+const SANDBOX_CREATE_LIMIT = parseMsOr(MOCK_SANDBOX_CREATE_LIMIT, TENANCY === 'owned' ? 20 : 0);
 const CALLBACK_RETRY_MS = Math.max(1000, parseInt(MOCK_CALLBACK_RETRY_MS, 10) || 10000);
 const CALLBACK_MAX_ATTEMPTS = Math.max(1, parseInt(MOCK_CALLBACK_MAX_ATTEMPTS, 10) || 24);
 
 const store = core.createStore({ stateFile: MOCK_STATE_FILE, log: console.error });
-const { state } = store;
-const persist = store.persist;
+const defaultState = store.state; // идентичность состояния default-песочницы (BC с self-hosted)
 
 const DEFAULT_FN_CAPACITY = Math.max(1, parseInt(process.env.MOCK_FN_CAPACITY || '250000', 10) || 250000);
 const SHIFT_MAX_DURATION_MS = 24 * 60 * 60 * 1000;
 
-function createInitialKassaState() {
+function createInitialKassaState({ seed = 0 } = {}) {
   const defaultMode = ['online', 'offline', 'reject'].includes(String(MOCK_OFD_MODE).toLowerCase())
     ? String(MOCK_OFD_MODE).toLowerCase()
     : 'online';
   return {
-    counters: { deviceId: 1001, uuid: Date.now(), fd: 50000, notification: 1 },
+    // seed уникален для песочницы: числовые id (uuid/fd/deviceId) не совпадают
+    // между арендаторами.
+    counters: { deviceId: 1001 + seed * 1000, uuid: Date.now() + seed * 1000000, fd: 50000 + seed * 1000000, notification: 1 },
     tokens: {},
     receipts: {},
     externalIds: {},
@@ -131,25 +155,93 @@ function createInitialKassaState() {
 }
 
 const initDefaults = createInitialKassaState();
-Object.assign(state, {
-  counters: state.counters || initDefaults.counters,
-  tokens: state.tokens || {},
-  receipts: state.receipts || {},
-  externalIds: state.externalIds || {},
-  callbacks: state.callbacks || {},
-  ofdQueue: state.ofdQueue || {}, // uuid -> { uuid, externalId, queuedAt, status: 'pending'|'rejected', error }
-  clockOffsetMs: state.clockOffsetMs || 0,
-  cashbox: state.cashbox || initDefaults.cashbox,
-  shift: state.shift || initDefaults.shift,
-  zReports: state.zReports || [],
-  fn: state.fn || initDefaults.fn,
+Object.assign(defaultState, {
+  counters: defaultState.counters || initDefaults.counters,
+  tokens: defaultState.tokens || {},
+  receipts: defaultState.receipts || {},
+  externalIds: defaultState.externalIds || {},
+  callbacks: defaultState.callbacks || {},
+  ofdQueue: defaultState.ofdQueue || {}, // uuid -> { uuid, externalId, queuedAt, status: 'pending'|'rejected', error }
+  clockOffsetMs: defaultState.clockOffsetMs || 0,
+  cashbox: defaultState.cashbox || initDefaults.cashbox,
+  shift: defaultState.shift || initDefaults.shift,
+  zReports: defaultState.zReports || [],
+  fn: defaultState.fn || initDefaults.fn,
 });
 
-const sandboxManager = createSandboxManager({
-  state,
-  persist,
+/**
+ * Лимит документов песочницы (F-15): чеки, очередь ОФД, Z-отчёты и токены —
+ * всё, что растёт от запросов интегратора.
+ */
+function countKassaDocuments(snapshot) {
+  return ['receipts', 'externalIds', 'callbacks', 'ofdQueue', 'tokens']
+    .reduce((sum, key) => sum + Object.keys(snapshot[key] || {}).length, 0)
+    + (Array.isArray(snapshot.zReports) ? snapshot.zReports.length : 0);
+}
+
+/**
+ * Retention (F-15, по умолчанию выключен): подчищаем только диагностическую
+ * очередь ОФД по уже отправленным/отклонённым документам и просроченные токены.
+ * Чеки и Z-отчёты (протокольная история) не удаляются — их ограничивает TTL.
+ */
+function kassaRetention(snapshot, ts) {
+  if (!SANDBOX_RETENTION_MS) return 0;
+  const deadline = ts - SANDBOX_RETENTION_MS;
+  let pruned = 0;
+  for (const [uuid, q] of Object.entries(snapshot.ofdQueue || {})) {
+    const doc = snapshot.receipts && snapshot.receipts[uuid];
+    const at = Date.parse((q && q.queuedAt) || (doc && doc.processedAt) || '') || 0;
+    if ((q.status === 'sent' || (doc && doc.ofdStatus === 'sent')) && at && at <= deadline) {
+      delete snapshot.ofdQueue[uuid];
+      pruned += 1;
+    }
+  }
+  for (const [token, meta] of Object.entries(snapshot.tokens || {})) {
+    if (meta && meta.createdAt && meta.createdAt + TOKEN_TTL_MS <= ts - SANDBOX_RETENTION_MS) {
+      delete snapshot.tokens[token];
+      pruned += 1;
+    }
+  }
+  return pruned;
+}
+
+/**
+ * Рантайм песочниц (RFC-001, F-11—F-15): request-local контекст, per-sandbox
+ * state/creds/persist, owner-token в hosted, TTL/лимиты и квоты.
+ */
+const sandboxRuntime = createSandboxRuntime({
+  state: defaultState,
+  persist: store.persist,
   initialStateFactory: createInitialKassaState,
+  mode: TENANCY,
+  stateFile: MOCK_STATE_FILE,
+  sandboxFile: String(MOCK_SANDBOX_FILE || ''),
+  ttlMs: SANDBOX_TTL_MS,
+  maxSandboxes: SANDBOX_MAX,
+  maxDocuments: SANDBOX_MAX_DOCUMENTS,
+  documentCounter: countKassaDocuments,
+  retention: kassaRetention,
+  defaultOwnerToken: SANDBOX_OWNER_TOKEN,
+  hostSuffix: SANDBOX_HOST_SUFFIX,
+  operatorTokens: [MOCK_ADMIN_TOKEN, OPERATOR_TOKEN],
+  createLimit: SANDBOX_CREATE_LIMIT,
+  log: (msg) => console.error(`[kassa-mock] ${msg}`),
 });
+
+// Фасад состояния/персистентности: внутри запроса резолвится в его песочницу.
+const state = sandboxRuntime.state;
+const persist = sandboxRuntime.persist;
+
+/* --------------------------------------------------- креды песочницы (F-12) */
+
+/**
+ * В owned-режиме у созданной песочницы свои логин/пароль/группа Ferma
+ * (интегратор проходит тот же путь, что в бою: «впиши свои креды»). Иначе —
+ * креды стенда, поэтому self-hosted поведение не меняется.
+ */
+const fermaLogin = () => sandboxRuntime.creds().fermaLogin || FERMA_LOGIN_CRED;
+const fermaPassword = () => sandboxRuntime.creds().fermaPassword || FERMA_PASSWORD_CRED;
+const fermaGroup = () => sandboxRuntime.creds().fermaGroup || null;
 
 const clock = core.createVirtualClock({
   initial: MOCK_VIRTUAL_CLOCK,
@@ -576,7 +668,9 @@ function fiscalSnapshot(doc) {
     fiscal_receipt_number: doc.fiscalReceiptNumber,
     fiscal_document_number: doc.fiscalDocumentNumber,
     fiscal_document_attribute: String(1000000000 + (doc.fiscalDocumentNumber * 7919) % 8999999999),
-    ofd_receipt_url: `${MOCK_PUBLIC_BASE_URL}/receipts/${doc.uuid}`,
+    // В именованной песочнице ссылка несёт её селектор: покупатель открывает чек
+    // в том же контексте (в owned-режиме без селектора страница попала бы в default).
+    ofd_receipt_url: `${MOCK_PUBLIC_BASE_URL}/receipts/${doc.uuid}${sandboxRuntime.currentId() === 'default' ? '' : `?sandbox=${encodeURIComponent(sandboxRuntime.currentId())}`}`,
     ofd_status: doc.ofdStatus || 'sent',
     operator: OPERATOR_NAME,
     taxation_type: doc.receipt.company?.sno || 'ОСН',
@@ -654,7 +748,9 @@ function customerReceiptText(doc) {
 }
 
 const deliveryQueue = core.createDeliveryQueue({
-  entries: state.callbacks,
+  // Функция, а не объект: очередь резолвит state песочницы, в контексте которой
+  // выполняется tick (каждая песочница доставляет свои callback'и, F-11).
+  entries: () => state.callbacks,
   retryMs: CALLBACK_RETRY_MS,
   maxAttempts: CALLBACK_MAX_ATTEMPTS,
   persist,
@@ -817,9 +913,21 @@ function tickKassa() {
   }
 }
 
+// Тик обслуживает КАЖДУЮ песочницу в её контексте: печать чеков, ОФД,
+// callback-очередь и авто-восстановление не смешивают арендаторов (F-11/F-14).
 setInterval(() => {
-  tickKassa();
+  sandboxRuntime.tickAll(() => tickKassa());
 }, 1000).unref();
+
+// Воркер TTL/лимитов (RFC-001 §8): просроченные песочницы удаляются, retention
+// подчищает диагностические записи; интервал настраивается MOCK_SANDBOX_SWEEP_MS.
+const SANDBOX_SWEEP_MS = parseMsOr(process.env.MOCK_SANDBOX_SWEEP_MS, 60000);
+if (SANDBOX_TTL_MS > 0 || SANDBOX_MAX_DOCUMENTS > 0 || SANDBOX_RETENTION_MS > 0) {
+  setInterval(() => {
+    const result = sandboxRuntime.sweep();
+    if (result.expired) log(`[kassa-mock] sandbox sweep: удалено по TTL — ${result.expired}`);
+  }, Math.max(1000, SANDBOX_SWEEP_MS)).unref();
+}
 
 /* ------------------------------------------------------------- request API */
 
@@ -958,14 +1066,187 @@ function controlSurface(url) {
   return null;
 }
 
-const server = http.createServer(async (req, res) => {
+/**
+ * Политика admission по маршруту (F-11/F-12): какие запросы требуют контекст
+ * песочницы и owner-token в hosted-режиме.
+ */
+function kassaSandboxPolicy(p) {
+  if (p.startsWith('/sandboxes')) return 'public'; // управление песочницами проверяет доступ само
+  if (p.startsWith('/admin') || p.startsWith('/mock/')) return 'control';
+  if (/^\/possystem\/v1\/(shift\/(open|close|status)|fn\/state|ofd\/(mode|queue))$/.test(p)) return 'control';
+  if (p.startsWith('/possystem/')) return 'business';
+  if (p.startsWith('/receipts/')) return 'form';
+  return 'public';
+}
+
+/** DX-ответ на ошибку admission песочницы (F-12): знание ID ≠ доступ. */
+function sendSandboxError(res, admission) {
+  const id = admission.sandbox || 'default';
+  if (admission.kind === 'not-found') {
+    return jsonRaw(res, 404, errBody(10, `Песочница «${id}» не найдена`, {
+      hint: 'Создайте песочницу: POST /sandboxes — в ответе будут id, creds и ownerToken. Список доступных — GET /mock/sandboxes.',
+    }));
+  }
+  if (admission.kind === 'unauthorized') {
+    return jsonRaw(res, 401, errBody(11, `Доступ к песочнице «${id}» ограничен: знание ID не является доступом`, {
+      field: 'X-Sandbox-Token',
+      hint: 'Передайте owner-token из ответа POST /sandboxes: Authorization: Bearer <ownerToken>, X-Sandbox-Token или ?sandbox_token=.',
+    }));
+  }
+  if (admission.kind === 'expired') {
+    return jsonRaw(res, 410, errBody(10, `Песочница «${id}» истекла по TTL и удалена`, {
+      hint: 'Песочницы живут ограниченное время; создайте новую: POST /sandboxes.',
+    }));
+  }
+  if (admission.kind === 'rate-limit' || admission.kind === 'limit') {
+    return jsonRaw(res, 429, errBody(4, 'Лимит создания песочниц исчерпан', {
+      hint: 'Переиспользуйте существующий ID или поднимите MOCK_SANDBOX_CREATE_LIMIT / MOCK_SANDBOX_MAX.',
+    }));
+  }
+  return jsonRaw(res, 500, errBody(500, 'Не удалось разрешить контекст песочницы'));
+}
+
+/** Базовый URL песочницы для ответа POST /sandboxes (RFC-001 §6). */
+function sandboxPublicUrl(id) {
+  const base = String(MOCK_PUBLIC_BASE_URL || '').replace(/\/$/, '');
+  if (SANDBOX_HOST_SUFFIX) {
+    try {
+      const u = new URL(base || 'http://localhost');
+      return `${u.protocol}//${id}.${SANDBOX_HOST_SUFFIX}`;
+    } catch { /* ignore */ }
+  }
+  return `${base}/?sandbox=${encodeURIComponent(id)}`;
+}
+
+/** Креды песочницы (RFC-001 §4): логин/пароль/группа Ferma у каждой свои. */
+function generateSandboxCreds(body = {}) {
+  return {
+    terminalKey: `SBX${crypto.randomBytes(5).toString('hex').toUpperCase()}`,
+    terminalPassword: core.randomToken(24),
+    fermaLogin: `sbx${crypto.randomBytes(4).toString('hex')}`,
+    fermaPassword: core.randomToken(24),
+    fermaGroup: String(body.group || 'Main'),
+  };
+}
+
+/**
+ * GET/POST/DELETE /sandboxes (алиас /mock/sandboxes): список, создание и
+ * удаление песочниц. В owned-режиме создание публичное (демо) с лимитом на IP,
+ * список/удаление — владельцу (owner-token) или оператору (F-12, RFC-001 §6/§7).
+ */
+async function handleSandboxApi(req, res, parsedUrl, admission) {
+  let body = {};
+  if (req.method === 'POST' || req.method === 'DELETE') {
+    try { body = JSON.parse((await readBody(req)) || '{}'); } catch { body = {}; }
+  }
+  const operator = sandboxRuntime.isOperatorToken(sandboxRuntime.ownerTokenOf(req));
+  if (req.method === 'GET') {
+    if (TENANCY === 'owned' && !operator) {
+      const own = sandboxRuntime.recordByOwnerToken(req);
+      if (!own) {
+        return jsonRaw(res, 401, errBody(11, 'Список песочниц в hosted-режиме доступен владельцу (owner-token) или оператору', {
+          field: 'X-Sandbox-Token',
+          hint: 'Owner-token выдаётся один раз при создании: POST /sandboxes.',
+        }));
+      }
+      return sendJson(res, { mode: TENANCY, current: own.id, sandboxes: [sandboxRuntime.describe(own)] });
+    }
+    return sendJson(res, { mode: TENANCY, current: sandboxRuntime.currentId(), sandboxes: sandboxRuntime.list() });
+  }
+  if (req.method === 'POST') {
+    if (TENANCY === 'owned') {
+      try {
+        const created = sandboxRuntime.create({
+          id: String((body && (body.sandbox || body.id)) || ''),
+          creds: generateSandboxCreds(body || {}),
+          profile: 'ferma-ofd',
+          ip: (req.socket && req.socket.remoteAddress) || '',
+        });
+        return sendJson(res, {
+          ok: true,
+          mode: TENANCY,
+          id: created.id,
+          url: sandboxPublicUrl(created.id),
+          ownerToken: created.ownerToken,
+          creds: created.creds,
+          expiresAt: created.expiresAt || null,
+          ttlMs: SANDBOX_TTL_MS,
+          hint: 'Сохраните ownerToken: он показывается один раз и даёт доступ к песочнице.',
+        }, 201);
+      } catch (e) {
+        const status = e.code === 'SANDBOX_EXISTS' ? 409 : 429;
+        return jsonRaw(res, status, errBody(4, e.message, {
+          hint: 'Ограничения: MOCK_SANDBOX_MAX (количество), MOCK_SANDBOX_CREATE_LIMIT (созданий в час на IP).',
+        }));
+      }
+    }
+    // namespaces/off — BC: выбрать (и при необходимости создать) активную песочницу стенда.
+    const result = sandboxRuntime.switchActive((body && body.sandbox) || 'default');
+    if (!result.ok) return jsonRaw(res, 400, errBody(4, `Не удалось выбрать песочницу: ${result.error}`));
+    return sendJson(res, { ok: true, current: result.current, sandboxes: sandboxRuntime.list() });
+  }
+  if (req.method === 'DELETE') {
+    const target = String((body && body.sandbox) || parsedUrl.searchParams.get('sandbox') || '');
+    if (!target) return jsonRaw(res, 400, errBody(4, 'Укажите песочницу для удаления: ?sandbox=<id> или {"sandbox":"<id>"}'));
+    const record = sandboxRuntime.find(target);
+    if (!record) return jsonRaw(res, 404, errBody(10, `Песочница «${target}» не найдена`));
+    if (TENANCY === 'owned' && !operator && !sandboxRuntime.recordAuthorized(record, req)) {
+      return jsonRaw(res, 401, errBody(11, `Удалить песочницу «${target}» может её владелец (owner-token) или оператор`));
+    }
+    const result = sandboxRuntime.remove(target);
+    if (!result.ok) return jsonRaw(res, 400, errBody(4, `Песочницу «${target}» удалить нельзя (default-стенд)`));
+    return sendJson(res, { ok: true, removed: result.removed });
+  }
+  return jsonRaw(res, 405, errBody(4, `Метод ${req.method} для /sandboxes не поддерживается`));
+}
+
+/**
+ * RFC-001 §6: /sandboxes/me — своя песочница по owner-token (в namespaces-режиме
+ * — песочница текущего запроса). reset/reset-creds/DELETE работают только с ней.
+ */
+async function handleSandboxMe(req, res, p) {
+  let body = {};
+  if (req.method === 'POST') {
+    try { body = JSON.parse((await readBody(req)) || '{}'); } catch { body = {}; }
+  }
+  const record = sandboxRuntime.recordByOwnerToken(req) || (TENANCY === 'owned' ? null : sandboxRuntime.current());
+  if (!record) {
+    return jsonRaw(res, 401, errBody(11, 'Требуется owner-token песочницы', {
+      field: 'X-Sandbox-Token',
+      hint: 'Owner-token выдаётся один раз при создании: POST /sandboxes.',
+    }));
+  }
+  if (p === '/sandboxes/me' && req.method === 'GET') {
+    return sendJson(res, { ok: true, mode: TENANCY, sandbox: sandboxRuntime.describe(record), creds: record.creds || null });
+  }
+  if (p === '/sandboxes/me/reset' && req.method === 'POST') {
+    const result = sandboxRuntime.reset(record.id);
+    return sendJson(res, { ok: true, sandbox: result.sandbox });
+  }
+  if (p === '/sandboxes/me/reset-creds' && req.method === 'POST') {
+    // Смена кредов песочницы: owner-token не меняется, иначе интегратор потеряет доступ.
+    const creds = generateSandboxCreds(body || {});
+    sandboxRuntime.updateCreds(record.id, creds);
+    return sendJson(res, { ok: true, sandbox: record.id, creds, ownerTokenChanged: false });
+  }
+  if (p === '/sandboxes/me' && req.method === 'DELETE') {
+    const result = sandboxRuntime.remove(record.id);
+    if (!result.ok) return jsonRaw(res, 400, errBody(4, 'default-песочницу стенда удалить нельзя'));
+    return sendJson(res, { ok: true, removed: result.removed });
+  }
+  return jsonRaw(res, 405, errBody(4, `Метод ${req.method} для ${p} не поддерживается`));
+}
+
+const server = http.createServer((req, res) => {
   const parsedUrl = new URL(req.url, 'http://x');
   const url = parsedUrl.pathname;
 
-  if (req.headers['x-mock-sandbox'] || parsedUrl.searchParams.get('sandbox')) {
-    sandboxManager.fromRequest(req);
-  }
-
+  // F-11/F-12: контекст песочницы разрешается ровно один раз до бизнес-логики.
+  // Внутри run() обработчики и очереди видят state/creds/persist своей песочницы;
+  // module-singleton не переключается, параллельные запросы не пересекаются.
+  const admission = sandboxRuntime.admit(req, kassaSandboxPolicy(url));
+  if (!admission.ok) return sendSandboxError(res, admission);
+  return sandboxRuntime.run(admission, async () => {
   if (url.startsWith('/possystem/')) {
     const started = Date.now();
     const originalWriteHead = res.writeHead.bind(res);
@@ -997,7 +1278,10 @@ const server = http.createServer(async (req, res) => {
     // /admin* — MOCK_ADMIN_TOKEN; /mock/*, смены/ФН/ОФД — MOCK_OPERATOR_TOKEN
     // (с fallback на админ-токен). В hosted-режиме без секрета — fail-closed.
     const surface = controlSurface(url);
-    if (surface) {
+    // F-12: owner-token песочницы — равноправный доступ к её управляющей
+    // поверхности (RFC-001 §6), в т.ч. к алиасу /mock/sandboxes.
+    const ownerSurface = surface === 'operator' && Boolean(sandboxRuntime.recordByOwnerToken(req));
+    if (surface && admission.via !== 'owner' && !ownerSurface) {
       const access = checkControlAccess(req, {
         adminToken: MOCK_ADMIN_TOKEN,
         operatorToken: OPERATOR_TOKEN,
@@ -1029,7 +1313,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url === '/healthz') {
       return sendJson(res, {
         ok: !isDown(),
-        sandbox: sandboxManager.current(),
+        sandbox: sandboxRuntime.currentId(),
+        tenancy: TENANCY,
         checks: state.cashbox.checksCnt,
         ofdMode: state.cashbox.ofdMode || 'online',
         ofdQueueCount: Object.keys(state.ofdQueue || {}).length,
@@ -1039,42 +1324,30 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // Управление песочницами, сбросом и снимками состояния (RFC-001)
-    if (url === '/mock/sandboxes') {
-      if (req.method === 'GET') {
-        return sendJson(res, { current: sandboxManager.current(), sandboxes: sandboxManager.list() });
-      }
-      if (req.method === 'POST') {
-        const raw = await readBody(req);
-        let body = {};
-        try { body = JSON.parse(raw || '{}'); } catch { /* ignore */ }
-        const name = sandboxManager.switchTo(body.sandbox || 'default');
-        return sendJson(res, { ok: true, current: name, sandboxes: sandboxManager.list() });
-      }
-      if (req.method === 'DELETE') {
-        const raw = await readBody(req);
-        let body = {};
-        try { body = JSON.parse(raw || '{}'); } catch { /* ignore */ }
-        const resReset = sandboxManager.reset(body.sandbox || parsedUrl.searchParams.get('sandbox') || undefined);
-        return sendJson(res, { ...resReset, current: sandboxManager.current() });
-      }
+    // ── RFC-001 §6: управление песочницами (создание, инфо, reset, удаление) ──
+    if (url === '/sandboxes' || url === '/mock/sandboxes') {
+      return await handleSandboxApi(req, res, parsedUrl, admission);
+    }
+    if (url.startsWith('/sandboxes/')) {
+      return await handleSandboxMe(req, res, url);
     }
 
     if (url === '/mock/reset' && req.method === 'POST') {
-      const raw = await readBody(req);
-      let body = {};
-      try { body = JSON.parse(raw || '{}'); } catch { /* ignore */ }
-      const targetSandbox = body.sandbox || req.headers['x-mock-sandbox'] || undefined;
-      const resReset = sandboxManager.reset(targetSandbox);
+      // F-11/F-13: сбрасываем ровно ту песочницу, в контексте которой пришёл запрос.
+      const target = body.sandbox || admission.record.id;
+      const resReset = sandboxRuntime.reset(target);
       scenarios.clearRules();
       scenarios.clearHistory();
       journal.clear();
-      return sendJson(res, resReset);
+      return sendJson(res, { ...resReset, current: sandboxRuntime.currentId() });
     }
 
     if (url === '/mock/state') {
       if (req.method === 'GET') {
-        return sendJson(res, sandboxManager.exportState());
+        // F-13: target из query читается явно, active не переключается.
+        const targetSandbox = parsedUrl.searchParams.get('sandbox') || undefined;
+        const snapshot = targetSandbox ? sandboxRuntime.exportState(targetSandbox) : sandboxRuntime.exportState();
+        return sendJson(res, { ...snapshot, current: admission.record.id });
       }
       if (req.method === 'POST' || req.method === 'PUT') {
         const raw = await readBody(req);
@@ -1086,7 +1359,7 @@ const server = http.createServer(async (req, res) => {
           }));
         }
         try {
-          return sendJson(res, sandboxManager.importState(body));
+          return sendJson(res, sandboxRuntime.importState(body, body.sandbox || undefined));
         } catch (e) {
           return jsonRaw(res, 400, errBody(4, 'Недопустимый снимок состояния: ' + e.message, {
             field: 'state',
@@ -1425,7 +1698,7 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
       try { creds = JSON.parse(raw || '{}'); } catch { /* fallthrough */ }
       // F-09: креды Ferma не пишутся в лог целиком — только различимый префикс.
       const loginLabel = core.maskPiiValue('login', creds.login);
-      if (creds.login !== FERMA_LOGIN_CRED || creds.pass !== FERMA_PASSWORD_CRED) {
+      if (creds.login !== fermaLogin() || creds.pass !== fermaPassword()) {
         log(`[kassa-mock] getToken DENIED for login=${loginLabel}`);
         return jsonRaw(res, 200, errBody(14, 'Неверный логин или пароль'));
       }
@@ -1448,11 +1721,14 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
       const operation = opMatch[2];
       const externalId = String(body.external_id || '');
       if (!externalId) return jsonRaw(res, 200, errBody(5, 'external_id обязателен'));
-      // A-16: опечатка в группе отклоняется
-      if (GROUPS.length && !GROUPS.includes(groupCode)) {
+      // A-16: опечатка в группе отклоняется. У песочницы может быть своя группа
+      // (creds.fermaGroup) — она добавляется к разрешённым MOCK_GROUPS.
+      const sandboxGroup = fermaGroup();
+      const allowedGroups = sandboxGroup && !GROUPS.includes(sandboxGroup) ? [...GROUPS, sandboxGroup] : GROUPS;
+      if (allowedGroups.length && !allowedGroups.includes(groupCode)) {
         return jsonRaw(res, 200, errBody(4, `Группа «${groupCode}» не зарегистрирована на стенде`, {
           field: 'group_code',
-          hint: `Разрешённые группы задаются env MOCK_GROUPS: ${GROUPS.join(', ')}. Опечатка в группе на боевой кассе = отказ регистрации документа.`,
+          hint: `Разрешённые группы задаются env MOCK_GROUPS: ${allowedGroups.join(', ')}. Опечатка в группе на боевой кассе = отказ регистрации документа.`,
         }));
       }
       if (state.externalIds[externalId]) {
@@ -1485,6 +1761,15 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
           log(`[kassa-mock] ${operation} REJECTED (validation): ${problem.field} — ${externalId}`);
           return jsonRaw(res, 200, errBody(4, `Чек не прошёл проверку кассы: ${problem.field}`, problem));
         }
+      }
+
+      // F-15: квота песочницы — документы не растут без границ (hosted).
+      const quota = sandboxRuntime.checkDocuments();
+      if (!quota.ok) {
+        return jsonRaw(res, 200, errBody(4, `Лимит документов песочницы исчерпан (${quota.used}/${quota.limit})`, {
+          field: 'external_id',
+          hint: 'Песочница ограничена по объёму (MOCK_SANDBOX_MAX_DOCUMENTS): сбросьте её (POST /sandboxes/me/reset) или создайте новую (POST /sandboxes).',
+        }));
       }
 
       const doc = createDocument(operation, groupCode, body, req.headers['x-mock-scenario'], opSpec);
@@ -1597,6 +1882,7 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
     log('[kassa-mock] handler error:', e.message);
     return jsonRaw(res, 500, errBody(500, e.message));
   }
+  });
 });
 
 store.restore();
@@ -1612,9 +1898,10 @@ if (require.main === module) {
   server.listen(parseInt(MOCK_PORT, 10), MOCK_HOST, () => {
     const port = server.address().port; // MOCK_PORT=0 -> реальный порт
     log(`kassa-mock (Ferma cloud-cashbox mock) on ${MOCK_HOST}:${port}`);
-    log(`login=${core.maskPiiValue('login', FERMA_LOGIN_CRED)} process_delay=${PROCESS_MS}ms state=${MOCK_STATE_FILE || 'memory'}`);
+    log(`tenancy=${TENANCY} login=${core.maskPiiValue('login', FERMA_LOGIN_CRED)} process_delay=${PROCESS_MS}ms state=${MOCK_STATE_FILE || 'memory'}`);
     log(`control-plane: admin_token=${MOCK_ADMIN_TOKEN ? 'on' : 'off'} operator_token=${OPERATOR_TOKEN ? 'on' : 'off'} hosted=${HOSTED} block_private_webhooks=${BLOCK_PRIVATE_WEBHOOKS}`);
+    log(`sandboxes: mode=${TENANCY} ttl_ms=${SANDBOX_TTL_MS} max=${SANDBOX_MAX} max_documents=${SANDBOX_MAX_DOCUMENTS} host_suffix=${SANDBOX_HOST_SUFFIX || '-'} registry=${sandboxRuntime.stats().file || 'memory'}${TENANCY === 'owned' && !SANDBOX_OWNER_TOKEN ? ' (default-песочница открыта: задайте MOCK_SANDBOX_TOKEN, чтобы закрыть)' : ''}`);
   });
 }
 
-module.exports = { server, state, clock, scenarios, OPERATIONS };
+module.exports = { server, state, clock, scenarios, sandboxRuntime, OPERATIONS };

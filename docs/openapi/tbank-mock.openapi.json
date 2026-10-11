@@ -21,6 +21,12 @@
         "in": "header",
         "name": "X-Admin-Token",
         "description": "Токен админки /admin* (MOCK_ADMIN_TOKEN)."
+      },
+      "sandboxToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Sandbox-Token",
+        "description": "Owner-token песочницы (RFC-001): выдаётся один раз при POST /sandboxes; также Authorization: Bearer <ownerToken> или ?sandbox_token=. В режиме MOCK_TENANCY=on / MOCK_HOSTED=1 знание id песочницы без owner-token доступа не даёт."
       }
     },
     "parameters": {
@@ -251,6 +257,28 @@
       "security": [{ "operatorToken": [] }], "summary": "Добавление одноразового или постоянного правила сценария", "responses": { "200": { "description": "Правило добавлено" } } },
       "delete": {
       "security": [{ "operatorToken": [] }], "summary": "Очистка правил и истории сценариев", "responses": { "200": { "description": "Очищено" } } }
+    },
+    "/sandboxes": {
+      "post": {
+      "summary": "Создать изолированную песочницу (hosted tenancy, RFC-001): id, creds и ownerToken", "responses": { "201": { "description": "Песочница создана; ownerToken показывается один раз" }, "409": { "description": "Песочница с таким id уже существует" }, "429": { "description": "Превышен лимит количества/скорости создания" } } },
+      "get": {
+      "security": [{ "operatorToken": [] }, { "sandboxToken": [] }], "summary": "Список песочниц: оператору — все, владельцу (owner-token) — только своя", "responses": { "200": { "description": "Список песочниц" }, "401": { "description": "Нет owner-token или операторского токена" } } },
+      "delete": {
+      "security": [{ "operatorToken": [] }, { "sandboxToken": [] }], "summary": "Удалить песочницу (?sandbox=<id>): владелец или оператор", "responses": { "200": { "description": "Песочница удалена вместе с состоянием" }, "401": { "description": "Чужая песочница: знание id не является доступом" } } }
+    },
+    "/sandboxes/me": {
+      "get": {
+      "security": [{ "sandboxToken": [] }], "summary": "Своя песочница по owner-token: состояние, креды, TTL", "responses": { "200": { "description": "Описание песочницы и её креды" }, "401": { "description": "owner-token не предъявлен или неверен" } } },
+      "delete": {
+      "security": [{ "sandboxToken": [] }], "summary": "Удалить свою песочницу", "responses": { "200": { "description": "Песочница удалена" } } }
+    },
+    "/sandboxes/me/reset": {
+      "post": {
+      "security": [{ "sandboxToken": [] }], "summary": "Сбросить состояние своей песочницы к начальному", "responses": { "200": { "description": "Состояние сброшено" } } }
+    },
+    "/sandboxes/me/reset-creds": {
+      "post": {
+      "security": [{ "sandboxToken": [] }], "summary": "Сменить креды песочницы (owner-token сохраняется)", "responses": { "200": { "description": "Новые креды песочницы" } } }
     },
     "/mock/sandboxes": {
       "get": {

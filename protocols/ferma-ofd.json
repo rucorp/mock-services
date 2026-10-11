@@ -31,6 +31,10 @@
   "mockControlRoutes": [
     "/mock/time",
     "/mock/scenarios",
+    "/sandboxes",
+    "/sandboxes/me",
+    "/sandboxes/me/reset",
+    "/sandboxes/me/reset-creds",
     "/mock/sandboxes",
     "/mock/reset",
     "/mock/state",

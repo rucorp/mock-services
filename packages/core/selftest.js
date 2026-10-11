@@ -690,6 +690,137 @@ async function main() {
     assert.ok(st.payments.p1 && !st.payments.p2, 'песочница default сохранила p1');
   });
 
+  /* --- #8 (F-11—F-15): request-local песочницы RFC-001 -------------------- */
+
+  await acheck('createSandboxRuntime: запросы A/B не смешивают state между await', async () => {
+    const raw = { payments: {}, notifications: {} };
+    const rt = core.createSandboxRuntime({
+      state: raw,
+      initialStateFactory: () => ({ payments: {}, notifications: {} }),
+      mode: 'namespaces',
+      log: () => {},
+    });
+    const state = rt.state;
+    const job = (id, orderId) => {
+      const admission = rt.admit({ headers: { 'x-mock-sandbox': id }, url: '/' }, 'business');
+      return rt.run(admission, async () => {
+        await sleep(20);
+        state.payments[orderId] = { orderId };
+        return rt.currentId();
+      });
+    };
+    const [a, b] = await Promise.all([job('ci-a', 'p-a'), job('ci-b', 'p-b')]);
+    assert.strictEqual(a, 'ci-a');
+    assert.strictEqual(b, 'ci-b');
+    const admitA = rt.admit({ headers: { 'x-mock-sandbox': 'ci-a' }, url: '/' }, 'business');
+    const admitB = rt.admit({ headers: { 'x-mock-sandbox': 'ci-b' }, url: '/' }, 'business');
+    rt.run(admitA, () => assert.deepStrictEqual(Object.keys(state.payments), ['p-a']));
+    rt.run(admitB, () => assert.deepStrictEqual(Object.keys(state.payments), ['p-b']));
+    // запрос без селектора не остаётся в предыдущей песочнице
+    const plain = rt.admit({ headers: {}, url: '/' }, 'business');
+    assert.strictEqual(plain.record.id, 'default');
+    rt.run(plain, () => assert.deepStrictEqual(Object.keys(state.payments), []));
+  });
+
+  await acheck('createSandboxRuntime: owned-режим — owner-token, знание ID ≠ доступ', () => {
+    const rt = core.createSandboxRuntime({
+      state: {},
+      initialStateFactory: () => ({ payments: {} }),
+      mode: 'owned',
+      operatorTokens: ['op-secret'],
+      log: () => {},
+    });
+    const created = rt.create({ id: 'owned-a', creds: { terminalKey: 'K', terminalPassword: 'P' } });
+    assert.ok(created.ownerToken && created.ownerToken.startsWith('sbx_'));
+    assert.strictEqual(created.creds.terminalKey, 'K');
+    const idOnly = rt.admit({ headers: { 'x-mock-sandbox': 'owned-a' }, url: '/' }, 'business');
+    assert.strictEqual(idOnly.ok, false);
+    assert.strictEqual(idOnly.kind, 'unauthorized');
+    const wrong = rt.admit({ headers: { 'x-mock-sandbox': 'owned-a', 'x-sandbox-token': 'nope' }, url: '/' }, 'business');
+    assert.strictEqual(wrong.kind, 'unauthorized');
+    const right = rt.admit({ headers: { 'x-mock-sandbox': 'owned-a', authorization: `Bearer ${created.ownerToken}` }, url: '/' }, 'business');
+    assert.strictEqual(right.ok, true);
+    assert.strictEqual(right.via, 'owner');
+    const operator = rt.admit({ headers: { 'x-mock-sandbox': 'owned-a', authorization: 'Bearer op-secret' }, url: '/' }, 'business');
+    assert.strictEqual(operator.via, 'operator');
+    const unknown = rt.admit({ headers: { 'x-mock-sandbox': 'ghost' }, url: '/' }, 'business');
+    assert.strictEqual(unknown.kind, 'not-found');
+    rt.run(right, () => assert.strictEqual(rt.creds().terminalKey, 'K'));
+  });
+
+  await acheck('createSandboxRuntime: TTL-очистка и персистентность реестра без relabel default', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'core-sbx-'));
+    const stateFile = path.join(dir, 'state.json');
+    try {
+      const first = core.createSandboxRuntime({
+        state: { payments: {} },
+        initialStateFactory: () => ({ payments: {} }),
+        mode: 'namespaces',
+        stateFile,
+        log: () => {},
+      });
+      const admission = first.admit({ headers: { 'x-mock-sandbox': 'kept' }, url: '/' }, 'business');
+      first.run(admission, () => { first.state.payments.kept = { id: 'kept' }; first.persist(); });
+      first.flush();
+      assert.ok(fs.existsSync(`${stateFile}.sandboxes.json`), 'реестр песочниц должен быть записан');
+
+      const second = core.createSandboxRuntime({
+        state: { payments: {} },
+        initialStateFactory: () => ({ payments: {} }),
+        mode: 'namespaces',
+        stateFile,
+        log: () => {},
+      });
+      assert.deepStrictEqual(Object.keys(second.find('kept').state.payments), ['kept']);
+      assert.deepStrictEqual(Object.keys(second.find('default').state.payments), [], 'чужой state не должен приписываться default');
+      assert.strictEqual(second.list().filter((s) => s.id === 'default').length, 1);
+      assert.deepStrictEqual(second.importState({ payments: { x: {} } }, 'target').sandbox, 'target');
+      assert.deepStrictEqual(Object.keys(second.find('kept').state.payments), ['kept'], 'соседние песочницы не меняются');
+
+      const ttl = core.createSandboxRuntime({
+        state: {},
+        initialStateFactory: () => ({}),
+        mode: 'namespaces',
+        ttlMs: 10,
+        log: () => {},
+      });
+      ttl.admit({ headers: { 'x-mock-sandbox': 'short' }, url: '/' }, 'business');
+      return sleep(30).then(() => {
+        assert.strictEqual(ttl.sweep().expired, 1);
+        assert.strictEqual(ttl.find('short'), null);
+      });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await acheck('createDeliveryQueue: entries-функция отправляет записи каждой песочницы', async () => {
+    const hits = [];
+    const srv = http.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      req.on('end', () => { hits.push(JSON.parse(raw || '{}').mark); res.writeHead(200); res.end('OK'); });
+    });
+    const port = await listen(srv);
+    const first = { n1: { id: 'n1', url: `http://127.0.0.1:${port}/hook`, payload: { mark: 'first' }, attempts: 0, nextAttemptAt: 0 } };
+    const second = { n2: { id: 'n2', url: `http://127.0.0.1:${port}/hook`, payload: { mark: 'second' }, attempts: 0, nextAttemptAt: 0 } };
+    let current = first;
+    const queue = core.createDeliveryQueue({
+      entries: () => current,
+      retryMs: 1000,
+      maxAttempts: 3,
+      awaitSequential: true, // в тесте ждём доставку целиком, без гонки с tick
+      log: () => {},
+      request: (entry) => ({ url: entry.url, data: entry.payload }),
+      isOk: () => true,
+    });
+    await queue.tick();
+    current = second;
+    await queue.tick();
+    assert.deepStrictEqual(hits.sort(), ['first', 'second']);
+    srv.close();
+  });
+
   // Проверка активного экзаменатора вебхуков мерчанта (verifyMerchantWebhook)
   const merchSrv = http.createServer((req, res) => {
     let raw = '';

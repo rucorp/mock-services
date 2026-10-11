@@ -26,7 +26,8 @@ const crypto = require('crypto');
 const core = require('../../packages/core');
 const {
   readBody, parseBody, send, sendJson, html, escapeHtml, checkControlAccess,
-  parseScenarioSpec, applyRequestChaos, createSandboxManager, verifyMerchantWebhook,
+  parseScenarioSpec, applyRequestChaos, createSandboxRuntime, resolveTenancyMode, parseMsOr,
+  verifyMerchantWebhook,
 } = core;
 const log = core.createLog('tbank-mock');
 // Журнал входящих запросов: интегратору видно в /admin/journal, как мок понял
@@ -54,13 +55,19 @@ const {
   MOCK_ADMIN_TOKEN = '',
   MOCK_OPERATOR_TOKEN = '',
   MOCK_HOSTED = 'false',
+  MOCK_TENANCY = '',
+  MOCK_SANDBOX_TOKEN = '',
+  MOCK_SANDBOX_TTL_MS = '',
+  MOCK_SANDBOX_MAX = '',
+  MOCK_SANDBOX_MAX_DOCUMENTS = '',
+  MOCK_SANDBOX_RETENTION_MS = '',
+  MOCK_SANDBOX_HOST_SUFFIX = '',
+  MOCK_SANDBOX_CREATE_LIMIT = '',
 } = process.env;
 
-const TERMINAL_KEY = MOCK_TERMINAL_KEY || TBANK_TERMINAL_KEY || 'TBANKMOCKTEST';
-const TERMINAL_PASSWORD = MOCK_TERMINAL_PASSWORD || TBANK_TERMINAL_PASSWORD || 'mockpass123';
-// PAYOUT-терминал зарегистрированной через acqapi точки (`/sm-register/register`
-// отдаёт его в `terminals`); `/e2c/v2/Init` и `/e2c/v2/CancelPayment` принимают оба ключа (F-17/F-22).
-const E2C_TERMINAL_KEY = `${TERMINAL_KEY}E2C`;
+// Креды стенда (default-песочница и self-hosted): env -> дефолт мока.
+const DEFAULT_TERMINAL_KEY = MOCK_TERMINAL_KEY || TBANK_TERMINAL_KEY || 'TBANKMOCKTEST';
+const DEFAULT_TERMINAL_PASSWORD = MOCK_TERMINAL_PASSWORD || TBANK_TERMINAL_PASSWORD || 'mockpass123';
 const RETRY_MS = Math.max(1000, parseInt(MOCK_RETRY_MS, 10) || 60000);
 const MAX_ATTEMPTS = Math.max(1, parseInt(MOCK_MAX_ATTEMPTS, 10) || 24);
 const STRICT_TOKEN = String(MOCK_STRICT_TOKEN).toLowerCase() !== 'false';
@@ -81,68 +88,147 @@ const HOSTED = core.flagEnabled(MOCK_HOSTED);
 const OPERATOR_TOKEN = MOCK_OPERATOR_TOKEN || '';
 const BLOCK_PRIVATE_WEBHOOKS = core.flagEnabled(MOCK_BLOCK_PRIVATE_WEBHOOKS, HOSTED);
 
+/* --------------------------------------------- мульти-аренда (RFC-001, F-12) */
+
+// MOCK_TENANCY=off|on; по умолчанию tenancy выключена для self-hosted и
+// включается hosted-режимом (fail-closed): MOCK_TENANCY=1/MOCK_HOSTED=1 -> owned.
+const TENANCY = resolveTenancyMode(MOCK_TENANCY, HOSTED);
+const SANDBOX_OWNER_TOKEN = String(MOCK_SANDBOX_TOKEN || '').trim();
+const SANDBOX_TTL_MS = parseMsOr(MOCK_SANDBOX_TTL_MS, TENANCY === 'owned' ? 24 * 60 * 60 * 1000 : 0);
+const SANDBOX_MAX = parseMsOr(MOCK_SANDBOX_MAX, TENANCY === 'owned' ? 100 : 256);
+const SANDBOX_MAX_DOCUMENTS = parseMsOr(MOCK_SANDBOX_MAX_DOCUMENTS, TENANCY === 'owned' ? 5000 : 0);
+const SANDBOX_RETENTION_MS = parseMsOr(MOCK_SANDBOX_RETENTION_MS, 0);
+const SANDBOX_HOST_SUFFIX = String(MOCK_SANDBOX_HOST_SUFFIX || '').trim();
+const SANDBOX_CREATE_LIMIT = parseMsOr(MOCK_SANDBOX_CREATE_LIMIT, TENANCY === 'owned' ? 20 : 0);
+
 /* ------------------------------------------------------------------ store */
 
 const store = core.createStore({ stateFile: MOCK_STATE_FILE, log: console.error });
-const persist = store.persist;
 const restore = store.restore;
-const { state } = store;
+const defaultState = store.state; // идентичность состояния default-песочницы (BC с self-hosted)
 
-Object.assign(state, {
-  counters: state.counters || {
-    paymentId: Date.now(),
-    dealId: 50000,
-    cardId: 80000,
-    notificationId: 1,
-    verificationId: 7000000,
-    incomingId: 1,
-    payoutId: 900000,
-    disputeId: 30000,
-    shopCode: 700100,
-  },
-  payments: state.payments || {},             // paymentId -> payment
-  deals: state.deals || {},                   // spAccumulationId -> deal
-  verifications: state.verifications || {},   // verificationId -> account verification round-trip
-  incoming: state.incoming || {},             // incomingId -> поступление на спец-счёт (VER-платёж МСП)
-  notifications: state.notifications || {},   // notificationId -> {payload, paymentId, attempts, nextAttemptAt, lastStatus, lastBody, dumped}
-  externalRequests: state.externalRequests || {}, // ExternalRequestId -> {paymentId, status}
-  payouts: state.payouts || {},               // payoutPaymentId -> выплата e2c
-  disputes: state.disputes || {},             // disputeId -> {disputeId, paymentId, orderId, amount, status, reasonCode, ...}
-  customers: state.customers || {},           // customerKey -> {customerKey, email, phone, createdAt}
-  cards: state.cards || {},                   // cardId -> {cardId, customerKey, panMask, expDate, rebillId, status}
-  shops: state.shops || {},                   // shopCode -> acqapi partner shop registration
-  clockOffsetMs: state.clockOffsetMs || 0,
-});
-
-const sandboxManager = core.createSandboxManager({
-  state,
-  persist,
-  initialStateFactory: () => ({
+/**
+ * Начальное состояние песочницы. `seed` уникален для каждой песочницы, поэтому
+ * числовые id документов (PaymentId, DealId, …) не совпадают между арендаторами.
+ */
+function createInitialTbankState({ seed = 0 } = {}) {
+  const offset = seed * 1000000;
+  return {
     counters: {
-      paymentId: Date.now(),
-      dealId: 50000,
-      cardId: 80000,
+      paymentId: Date.now() + offset,
+      dealId: 50000 + offset,
+      cardId: 80000 + offset,
       notificationId: 1,
-      verificationId: 7000000,
+      verificationId: 7000000 + offset,
       incomingId: 1,
-      payoutId: 900000,
-      disputeId: 30000,
-      shopCode: 700100,
+      payoutId: 900000 + offset,
+      disputeId: 30000 + offset,
+      shopCode: 700100 + offset,
     },
-    payments: {},
-    deals: {},
-    verifications: {},
-    incoming: {},
-    notifications: {},
-    externalRequests: {},
-    payouts: {},
-    disputes: {},
-    customers: {},
-    cards: {},
-    shops: {},
+    payments: {},            // paymentId -> payment
+    deals: {},               // spAccumulationId -> deal
+    verifications: {},       // verificationId -> account verification round-trip
+    incoming: {},            // incomingId -> поступление на спец-счёт (VER-платёж МСП)
+    notifications: {},       // notificationId -> {payload, paymentId, attempts, nextAttemptAt, lastStatus, lastBody, dumped}
+    externalRequests: {},    // ExternalRequestId -> {paymentId, status}
+    payouts: {},             // payoutPaymentId -> выплата e2c
+    disputes: {},            // disputeId -> {disputeId, paymentId, orderId, amount, status, reasonCode, ...}
+    customers: {},           // customerKey -> {customerKey, email, phone, createdAt}
+    cards: {},               // cardId -> {cardId, customerKey, panMask, expDate, rebillId, status}
+    shops: {},               // shopCode -> acqapi partner shop registration
+    orderIndex: {},          // F-15: OrderId -> [PaymentId] (производный, без полных сканов)
+    dealIndex: {},           // F-15: DealId -> { payments: [PaymentId], payouts: [PayoutId] }
     clockOffsetMs: 0,
-  }),
+  };
+}
+
+// Boot default-песочницы: снимок из MOCK_STATE_FILE + генератор кредов песочниц.
+{
+  const initial = createInitialTbankState();
+  for (const key of Object.keys(initial)) {
+    if (defaultState[key] === undefined) defaultState[key] = initial[key];
+  }
+}
+
+/**
+ * Лимит документов песочницы (F-15): сумма видимых истории коллекций.
+ * `counters`/`clockOffsetMs` не считаются.
+ */
+function countTbankDocuments(snapshot) {
+  return ['payments', 'deals', 'payouts', 'disputes', 'incoming', 'verifications', 'customers', 'cards', 'shops']
+    .reduce((sum, key) => sum + Object.keys(snapshot[key] || {}).length, 0)
+    + Object.keys(snapshot.notifications || {}).length;
+}
+
+/**
+ * Retention (F-15, по умолчанию выключен): удаляем только диагностические
+ * терминальные записи (доставленные/исчерпанные нотификации и завершённые
+ * прогоны рубля) — протокольная история платежей/сделок/выплат не трогается.
+ */
+function tbankRetention(snapshot, ts) {
+  if (!SANDBOX_RETENTION_MS) return 0;
+  const deadline = ts - SANDBOX_RETENTION_MS;
+  let pruned = 0;
+  for (const [id, n] of Object.entries(snapshot.notifications || {})) {
+    const finished = n && (n.done || n.dumped || n.suppressed);
+    const at = Date.parse((n && (n.finishedAt || n.createdAt || n.updatedAt)) || '') || 0;
+    if (finished && at && at <= deadline) {
+      delete snapshot.notifications[id];
+      pruned += 1;
+    }
+  }
+  for (const [id, v] of Object.entries(snapshot.verifications || {})) {
+    const at = Date.parse((v && v.updatedAt) || '') || 0;
+    if (at && at <= deadline) {
+      delete snapshot.verifications[id];
+      pruned += 1;
+    }
+  }
+  return pruned;
+}
+
+/**
+ * Рантайм песочниц (RFC-001, F-11—F-15): request-local контекст, per-sandbox
+ * state/creds/persist, owner-token в hosted, TTL/лимиты и квоты.
+ */
+const sandboxRuntime = createSandboxRuntime({
+  state: defaultState,
+  persist: store.persist,
+  initialStateFactory: createInitialTbankState,
+  mode: TENANCY,
+  stateFile: MOCK_STATE_FILE,
+  sandboxFile: String(process.env.MOCK_SANDBOX_FILE || ''),
+  ttlMs: SANDBOX_TTL_MS,
+  maxSandboxes: SANDBOX_MAX,
+  maxDocuments: SANDBOX_MAX_DOCUMENTS,
+  documentCounter: countTbankDocuments,
+  retention: tbankRetention,
+  defaultOwnerToken: SANDBOX_OWNER_TOKEN,
+  hostSuffix: SANDBOX_HOST_SUFFIX,
+  operatorTokens: [MOCK_ADMIN_TOKEN, OPERATOR_TOKEN],
+  createLimit: SANDBOX_CREATE_LIMIT,
+  log: (msg) => console.error(`[mock] ${msg}`),
 });
+
+// Фасад состояния/персистентности: внутри запроса резолвится в его песочницу.
+const state = sandboxRuntime.state;
+const persist = sandboxRuntime.persist;
+
+/* --------------------------------------------------- креды песочницы (F-12) */
+
+/**
+ * В owned-режиме у каждой созданной песочницы свои TerminalKey/TerminalPassword
+ * (интегратор проходит тот же путь, что в бою: «впиши свой ключ»). В остальных
+ * режимах — креды стенда, поэтому self-hosted поведение не меняется.
+ */
+const terminalKey = () => sandboxRuntime.creds().terminalKey || DEFAULT_TERMINAL_KEY;
+const terminalPassword = () => sandboxRuntime.creds().terminalPassword || DEFAULT_TERMINAL_PASSWORD;
+const e2cTerminalKey = () => `${terminalKey()}E2C`;
+
+// DEPRECATED-константы: креды default/self-hosted стенда (BC для тестов и /admin).
+const TERMINAL_KEY = DEFAULT_TERMINAL_KEY;
+const TERMINAL_PASSWORD = DEFAULT_TERMINAL_PASSWORD;
+const E2C_TERMINAL_KEY = `${TERMINAL_KEY}E2C`;
 
 const clock = core.createVirtualClock({
   initial: MOCK_VIRTUAL_CLOCK,
@@ -154,7 +240,13 @@ const scenarios = core.createScenarioRegistry({ clock });
 
 /* --------------------------------------------------------------- signature */
 
-function tokenOf(payload) {
+/**
+ * Подпись запроса (как в банке): значения top-level скаляров кроме Token +
+ * Password, сортировка по ключу. Пароль резолвится из контекста песочницы
+ * (в owned-режиме у каждой он свой); явный `password` нужен инструментам
+ * (тесты, активный экзаменатор), которые подписывают не от лица запроса.
+ */
+function tokenOf(payload, password = null) {
   const values = [];
   for (const [key, value] of Object.entries(payload)) {
     if (key === 'Token') continue;
@@ -162,7 +254,7 @@ function tokenOf(payload) {
     if (typeof value === 'object') continue; // DATA, Receipt, arrays
     values.push([key, typeof value === 'boolean' ? (value ? 'true' : 'false') : String(value)]);
   }
-  values.push(['Password', TERMINAL_PASSWORD]);
+  values.push(['Password', password || terminalPassword()]);
   values.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return crypto.createHash('sha256').update(values.map(([, v]) => v).join('')).digest('hex');
 }
@@ -412,7 +504,7 @@ function scheduleNotification(payment, status, extra = {}, options = {}) {
   const suppressed = Boolean(options.suppress || payment.suppressWebhooks);
   const duplicate = Boolean(options.duplicate || payment.duplicateWebhooks);
   const payload = {
-    TerminalKey: TERMINAL_KEY,
+    TerminalKey: terminalKey(),
     OrderId: payment.orderId,
     Success: status !== 'REJECTED',
     Status: status,
@@ -457,7 +549,9 @@ function currentAmount(payment) {
 }
 
 const deliveryQueue = core.createDeliveryQueue({
-  entries: state.notifications,
+  // Функция, а не объект: очередь резолвит state песочницы, в контексте которой
+  // выполняется tick (каждая песочница доставляет свои нотификации, F-11).
+  entries: () => state.notifications,
   retryMs: RETRY_MS,
   maxAttempts: MAX_ATTEMPTS,
   persist,
@@ -496,6 +590,16 @@ const derr = core.createErrorCatalog({
   },
 });
 
+/** F-15: квота документов песочницы перед созданием нового документа. */
+function ensureSandboxQuota() {
+  const quota = sandboxRuntime.checkDocuments();
+  if (quota.ok) return null;
+  return err(7, `Лимит документов песочницы исчерпан (${quota.used}/${quota.limit})`, null, {
+    field: 'OrderId',
+    hint: 'Песочница ограничена по объёму (MOCK_SANDBOX_MAX_DOCUMENTS): сбросьте её (POST /sandboxes/me/reset) или создайте новую (POST /sandboxes).',
+  });
+}
+
 function err(code, message, details, overrides = {}) {
   const desc = derr(code, { message: message || undefined, details, ...overrides });
   return {
@@ -513,7 +617,7 @@ function err(code, message, details, overrides = {}) {
 
 function baseResponse(payment) {
   return {
-    TerminalKey: TERMINAL_KEY,
+    TerminalKey: terminalKey(),
     OrderId: payment.orderId,
     PaymentId: payment.paymentId,
     Amount: currentAmount(payment),
@@ -542,12 +646,77 @@ function statusCamel(s) {
   return out[0].toLowerCase() + out.slice(1);
 }
 
+/* ------------------------------------------- индексы ссылок (F-15, RFC §9.2) */
+/*
+ * `orderIndex`/`dealIndex` — производные от `payments`/`payouts`: нужны, чтобы
+ * Init/GetState/CheckOrder и `dealBalance` не сканировали всю историю песочницы
+ * (N+1 на растущем state, в т.ч. для каждой строки /admin). Индексы
+ * поддерживаются при создании документов и полностью перестраиваются из снимка
+ * (`rebuildIndexes`) при boot/restore/import/reset; читатели сверяются с самим
+ * state, поэтому отсутствующая запись индекса не создаёт «фантомных» ответов.
+ */
+function indexPayment(target, payment) {
+  if (!payment) return;
+  if (!target.orderIndex || !target.dealIndex) rebuildIndexes(target); // снимок из файла/импорта мог быть без индексов
+  const paymentId = String(payment.paymentId);
+  if (payment.orderId !== undefined && payment.orderId !== null && payment.orderId !== '') {
+    const key = String(payment.orderId);
+    const ids = target.orderIndex[key] || (target.orderIndex[key] = []);
+    if (!ids.includes(paymentId)) ids.push(paymentId);
+  }
+  if (payment.dealId) {
+    const key = String(payment.dealId);
+    const bucket = target.dealIndex[key] || (target.dealIndex[key] = { payments: [], payouts: [] });
+    if (!bucket.payments.includes(paymentId)) bucket.payments.push(paymentId);
+  }
+}
+
+function indexPayout(target, payout) {
+  if (!payout || !payout.dealId) return;
+  if (!target.orderIndex || !target.dealIndex) rebuildIndexes(target);
+  const key = String(payout.dealId);
+  const bucket = target.dealIndex[key] || (target.dealIndex[key] = { payments: [], payouts: [] });
+  const payoutId = String(payout.paymentId);
+  if (!bucket.payouts.includes(payoutId)) bucket.payouts.push(payoutId);
+}
+
+/** Полная перестройка индексов из снимка (состояние могло прийти файлом/импортом). */
+function rebuildIndexes(target) {
+  target.orderIndex = {};
+  target.dealIndex = {};
+  for (const payment of Object.values(target.payments || {})) indexPayment(target, payment);
+  for (const payout of Object.values(target.payouts || {})) indexPayout(target, payout);
+}
+
+/** Платежи заказа по индексу (fallback-скан — только если индекс отсутствует). */
+function paymentsOfOrder(orderId) {
+  const key = String(orderId);
+  if (!state.orderIndex) return Object.values(state.payments).filter((p) => p.orderId === key);
+  return (state.orderIndex[key] || []).map((id) => state.payments[id]).filter(Boolean);
+}
+
+/** Документы сделки по индексу (fallback-скан — только если индекс отсутствует). */
+function documentsOfDeal(dealId) {
+  if (!state.dealIndex) {
+    return {
+      payments: Object.values(state.payments).filter((p) => p.dealId === dealId),
+      payouts: Object.values(state.payouts || {}).filter((po) => po.dealId === dealId),
+    };
+  }
+  const bucket = state.dealIndex[String(dealId)] || { payments: [], payouts: [] };
+  return {
+    payments: (bucket.payments || []).map((id) => state.payments[id]).filter(Boolean),
+    payouts: (bucket.payouts || []).map((id) => state.payouts[id]).filter(Boolean),
+  };
+}
+
 function dealBalance(deal) {
-  const incomingConfirmed = Object.values(state.payments)
-    .filter((p) => p.dealId === deal.id && ['CONFIRMED', 'PARTIAL_REFUNDED', 'PARTIAL_CHARGEBACK'].includes(p.status))
+  const docs = documentsOfDeal(deal.id);
+  const incomingConfirmed = docs.payments
+    .filter((p) => ['CONFIRMED', 'PARTIAL_REFUNDED', 'PARTIAL_CHARGEBACK'].includes(p.status))
     .reduce((acc, p) => acc + currentAmount(p), 0);
-  const outgoingPaid = Object.values(state.payouts || {})
-    .filter((po) => po.dealId === deal.id && ['CONFIRMED', 'COMPLETED'].includes(po.status))
+  const outgoingPaid = docs.payouts
+    .filter((po) => ['CONFIRMED', 'COMPLETED'].includes(po.status))
     .reduce((acc, po) => acc + (po.amount || 0), 0);
   return Math.max(0, incomingConfirmed - outgoingPaid);
 }
@@ -614,7 +783,7 @@ function findPaymentByRef(body) {
     return state.payments[String(body.PaymentId)];
   }
   if (body.OrderId) {
-    const matches = Object.values(state.payments).filter((p) => p.orderId === String(body.OrderId));
+    const matches = paymentsOfOrder(body.OrderId).filter((p) => p.orderId === String(body.OrderId));
     if (matches.length === 1) return matches[0];
   }
   return null;
@@ -882,21 +1051,21 @@ function handleChargeback(body, reqHeaders = {}) {
 /* ------------------------------------------------------------- API logic */
 
 function checkTerminalKey(body) {
-  return body && body.TerminalKey === TERMINAL_KEY
+  return body && body.TerminalKey === terminalKey()
     ? null
-    : err(7, `TerminalKey «${body && body.TerminalKey}» не соответствует стенду (ожидается «${TERMINAL_KEY}»)`);
+    : err(7, `TerminalKey «${body && body.TerminalKey}» не соответствует стенду (ожидается «${terminalKey()}»)`);
 }
 
 /**
  * Терминал выплат (F-17/F-22): точное совпадение с ключом стенда или с
- * PAYOUT-терминалом зарегистрированной точки (`sm-register` отдаёт `${TERMINAL_KEY}E2C`).
+ * PAYOUT-терминалом зарегистрированной точки (`sm-register` отдаёт `${terminalKey()}E2C`).
  * Проверяется до поиска и мутации выплаты, чтобы подписанный запрос с чужим
  * TerminalKey не проходил по чужому телу.
  */
 function checkE2cTerminalKey(body) {
   const given = body && body.TerminalKey;
-  if (given === TERMINAL_KEY || given === E2C_TERMINAL_KEY) return null;
-  return err(7, `TerminalKey «${given}» не соответствует стенду (ожидается «${TERMINAL_KEY}» или PAYOUT-терминал «${E2C_TERMINAL_KEY}»)`, null, {
+  if (given === terminalKey() || given === e2cTerminalKey()) return null;
+  return err(7, `TerminalKey «${given}» не соответствует стенду (ожидается «${terminalKey()}» или PAYOUT-терминал «${e2cTerminalKey()}»)`, null, {
     field: 'TerminalKey',
     doc: PAYOUT_REF_DOC,
   });
@@ -910,7 +1079,7 @@ function handleInit(body, reqHeaders = {}) {
     return err(7, 'Обязательные параметры не заполнены или невалидны (Amount, OrderId)');
   }
   if (!ALLOW_DUPLICATE_ORDER_ID) {
-    const existing = Object.values(state.payments).find((p) => p.orderId === String(body.OrderId));
+    const existing = paymentsOfOrder(body.OrderId).find((p) => p.orderId === String(body.OrderId));
     if (existing) {
       return err(7, `OrderId «${body.OrderId}» уже использован (PaymentId=${existing.paymentId}, статус ${existing.status})`);
     }
@@ -982,6 +1151,8 @@ function handleInit(body, reqHeaders = {}) {
     dealId = deal.id;
   } else if (createDeal) {
     dealId = String(state.counters.dealId++);
+    const quotaDeal = ensureSandboxQuota();
+    if (quotaDeal) return quotaDeal;
     state.deals[dealId] = { id: dealId, type: 'NN', status: 'open', createdAt: clock.iso(), createdAtMs: clock.now() };
   } else if (body.PaymentRecipientId) {
     return err(7, 'Не переданы DealId или CreateDealWithType=NN');
@@ -1034,15 +1205,21 @@ function handleInit(body, reqHeaders = {}) {
   });
   applyScenarioToPayment(payment, spec);
 
+  const quotaPayment = ensureSandboxQuota();
+  if (quotaPayment) return quotaPayment;
   state.payments[paymentId] = payment;
+  indexPayment(state, payment);
   persist();
 
-  const paymentUrl = `${MOCK_PUBLIC_BASE_URL.replace(/\/$/, '')}/payment/${paymentId}`;
+  // Браузерная форма — capability-ссылка: в owned-режиме добавляем селектор
+  // песочницы, чтобы открытая страница оплаты не попала в другой контекст.
+  const sandboxSelector = sandboxRuntime.currentId() === 'default' ? '' : `?sandbox=${encodeURIComponent(sandboxRuntime.currentId())}`;
+  const paymentUrl = `${MOCK_PUBLIC_BASE_URL.replace(/\/$/, '')}/payment/${paymentId}${sandboxSelector}`;
   return {
     Success: true,
     ErrorCode: '0',
     Message: 'OK',
-    TerminalKey: TERMINAL_KEY,
+    TerminalKey: terminalKey(),
     OrderId: payment.orderId,
     PaymentId: paymentId,
     Amount: amount,
@@ -1056,8 +1233,7 @@ function handleGetState(body) {
   if (badTerminal) return badTerminal;
   let payment = body.PaymentId ? state.payments[String(body.PaymentId)] : null;
   if (!payment && body.OrderId) {
-    const found = Object.values(state.payments)
-      .filter((p) => p.orderId === String(body.OrderId))
+    const found = paymentsOfOrder(body.OrderId)
       .sort((a, b) => String(b.paymentId).localeCompare(String(a.paymentId)));
     if (found.length > 1) {
       return err(
@@ -1075,12 +1251,12 @@ function handleGetState(body) {
 function handleCheckOrder(body) {
   const badTerminal = checkTerminalKey(body);
   if (badTerminal) return badTerminal;
-  const payments = Object.values(state.payments).filter((p) => p.orderId === String(body.OrderId));
+  const payments = paymentsOfOrder(body.OrderId);
   if (!payments.length) return err(8, 'Заказ не найден');
   return {
     Success: true,
     ErrorCode: '0',
-    TerminalKey: TERMINAL_KEY,
+    TerminalKey: terminalKey(),
     OrderId: String(body.OrderId),
     Payments: payments.map((p) => ({
       PaymentId: p.paymentId,
@@ -1234,6 +1410,8 @@ function handleCreateSpDeal(body) {
     return err(7, `Неподдерживаемый тип сделки SpDealType=«${body.SpDealType}» (ожидается NN)`, null, { field: 'SpDealType' });
   }
   const dealId = String(state.counters.dealId++);
+  const quotaDeal = ensureSandboxQuota();
+  if (quotaDeal) return quotaDeal;
   state.deals[dealId] = {
     id: dealId,
     type: 'NN',
@@ -1245,7 +1423,7 @@ function handleCreateSpDeal(body) {
   return {
     Success: true,
     ErrorCode: '0',
-    TerminalKey: TERMINAL_KEY,
+    TerminalKey: terminalKey(),
     SpAccumulationId: dealId,
   };
 }
@@ -1267,7 +1445,7 @@ function handleCloseSpDeal(body) {
   return {
     Success: true,
     ErrorCode: '0',
-    TerminalKey: TERMINAL_KEY,
+    TerminalKey: terminalKey(),
     SpAccumulationId: deal.id,
     Status: 'CLOSED',
     PlatformReward: reward,
@@ -1305,7 +1483,7 @@ function handleGetQr(body) {
     Success: true,
     ErrorCode: '0',
     Message: 'OK',
-    TerminalKey: TERMINAL_KEY,
+    TerminalKey: terminalKey(),
     OrderId: payment.orderId,
     PaymentId: payment.paymentId,
     Data: data,
@@ -1367,7 +1545,7 @@ function handleSendClosingReceipt(body) {
     Success: true,
     ErrorCode: '0',
     Message: 'OK',
-    TerminalKey: TERMINAL_KEY,
+    TerminalKey: terminalKey(),
     PaymentId: payment.paymentId,
   };
 }
@@ -1377,6 +1555,8 @@ function handleAddCustomer(body) {
   if (badTerminal) return badTerminal;
   const customerKey = String(body.CustomerKey || '').trim();
   if (!customerKey) return err(7, 'Обязательный параметр CustomerKey не заполнен', null, { field: 'CustomerKey' });
+  const quotaCustomer = ensureSandboxQuota();
+  if (quotaCustomer) return quotaCustomer;
   state.customers[customerKey] = {
     customerKey,
     email: body.Email || null,
@@ -1384,7 +1564,7 @@ function handleAddCustomer(body) {
     createdAt: clock.iso(),
   };
   persist();
-  return { Success: true, ErrorCode: '0', TerminalKey: TERMINAL_KEY, CustomerKey: customerKey };
+  return { Success: true, ErrorCode: '0', TerminalKey: terminalKey(), CustomerKey: customerKey };
 }
 
 function handleGetCustomer(body) {
@@ -1396,7 +1576,7 @@ function handleGetCustomer(body) {
   return {
     Success: true,
     ErrorCode: '0',
-    TerminalKey: TERMINAL_KEY,
+    TerminalKey: terminalKey(),
     CustomerKey: cust.customerKey,
     Email: cust.email || undefined,
     Phone: cust.phone || undefined,
@@ -1413,7 +1593,7 @@ function handleRemoveCustomer(body) {
     if (c.customerKey === customerKey) delete state.cards[cid];
   }
   persist();
-  return { Success: true, ErrorCode: '0', TerminalKey: TERMINAL_KEY, CustomerKey: customerKey };
+  return { Success: true, ErrorCode: '0', TerminalKey: terminalKey(), CustomerKey: customerKey };
 }
 
 function handleAddCard(body) {
@@ -1426,6 +1606,8 @@ function handleAddCard(body) {
   }
   const cardId = String(state.counters.cardId++);
   const rebillId = `REB-${cardId}`;
+  const quotaCard = ensureSandboxQuota();
+  if (quotaCard) return quotaCard;
   state.cards[cardId] = {
     cardId,
     customerKey,
@@ -1439,7 +1621,7 @@ function handleAddCard(body) {
   return {
     Success: true,
     ErrorCode: '0',
-    TerminalKey: TERMINAL_KEY,
+    TerminalKey: terminalKey(),
     CustomerKey: customerKey,
     RequestKey: `REQ-${cardId}`,
     CardId: cardId,
@@ -1477,7 +1659,7 @@ function handleRemoveCard(body) {
   return {
     Success: true,
     ErrorCode: '0',
-    TerminalKey: TERMINAL_KEY,
+    TerminalKey: terminalKey(),
     CustomerKey: card.customerKey,
     CardId: card.cardId,
     Status: 'D',
@@ -1773,7 +1955,7 @@ function adminPage() {
   return page(`
     <span class="logo">T · мок банка</span>
     <h1>Консоль стенда</h1>
-    <div class="muted">TerminalKey <code>${TERMINAL_KEY}</code> · профиль <code>${PROFILE}</code> · подпись ${STRICT_TOKEN ? 'строгая' : 'выключена'} · ретраи ${Math.round(RETRY_MS / 1000)}с × ${MAX_ATTEMPTS} · виртуальное время <code>${esc(clock.iso())}</code></div>
+    <div class="muted">TerminalKey <code>${terminalKey()}</code> · профиль <code>${PROFILE}</code> · подпись ${STRICT_TOKEN ? 'строгая' : 'выключена'} · ретраи ${Math.round(RETRY_MS / 1000)}с × ${MAX_ATTEMPTS} · виртуальное время <code>${esc(clock.iso())}</code></div>
     <div style="background:#fff8e1;border:1px solid #f0d47a;border-radius:10px;padding:8px 10px;margin-bottom:10px;font-size:13px">⚠ Платежи проводятся <b>только по тестовым картам</b> из списка ниже — любая другая карта отклоняется (тестовый стенд: реальные карты не принимаются). Пресеты — на форме оплаты.</div>
     <div class="muted">Обновлено ${new Date(clock.now()).toLocaleTimeString('ru-RU')}</div>
     <h1 style="font-size:16px">Платежи</h1>
@@ -1886,22 +2068,191 @@ function controlSurface(p) {
   return null;
 }
 
+/** Базовый URL песочницы для ответа POST /sandboxes (RFC-001 §6). */
+function sandboxPublicUrl(id) {
+  const base = String(MOCK_PUBLIC_BASE_URL || '').replace(/\/$/, '');
+  if (SANDBOX_HOST_SUFFIX) {
+    try {
+      const u = new URL(base || 'http://localhost');
+      return `${u.protocol}//${id}.${SANDBOX_HOST_SUFFIX}`;
+    } catch { /* ignore */ }
+  }
+  return `${base}/?sandbox=${encodeURIComponent(id)}`;
+}
+
+/** Генерация кредов песочницы (RFC-001 §4): подпись Т-Банка зависит от пароля. */
+function generateSandboxCreds(body = {}) {
+  return {
+    terminalKey: `SBX${crypto.randomBytes(5).toString('hex').toUpperCase()}`,
+    terminalPassword: core.randomToken(24),
+    fermaLogin: `sbx${crypto.randomBytes(4).toString('hex')}`,
+    fermaPassword: core.randomToken(24),
+    fermaGroup: String(body.group || 'Main'),
+  };
+}
+
+/**
+ * GET/POST/DELETE /sandboxes (алиас /mock/sandboxes): список, создание и
+ * удаление песочниц. В owned-режиме создание публичное (демо) с лимитом на IP,
+ * список/удаление — владельцу (owner-token) или оператору (F-12, RFC-001 §6/§7).
+ */
+function handleSandboxApi(req, res, url, body, admission) {
+  const operator = sandboxRuntime.isOperatorToken(sandboxRuntime.ownerTokenOf(req));
+  if (req.method === 'GET') {
+    if (TENANCY === 'owned' && !operator) {
+      const own = sandboxRuntime.recordByOwnerToken(req);
+      if (!own) {
+        return sendJson(res, err(13, 'Список песочниц в hosted-режиме доступен владельцу (owner-token) или оператору', null, {
+          field: 'X-Sandbox-Token',
+          hint: 'Owner-token выдаётся один раз при создании: POST /sandboxes.',
+        }), 401);
+      }
+      return sendJson(res, { mode: TENANCY, current: own.id, sandboxes: [sandboxRuntime.describe(own)] });
+    }
+    return sendJson(res, { mode: TENANCY, current: sandboxRuntime.currentId(), sandboxes: sandboxRuntime.list() });
+  }
+  if (req.method === 'POST') {
+    if (TENANCY === 'owned') {
+      try {
+        const created = sandboxRuntime.create({
+          id: String((body && (body.sandbox || body.id)) || ''),
+          creds: generateSandboxCreds(body || {}),
+          profile: PROFILE,
+          ip: (req.socket && req.socket.remoteAddress) || '',
+        });
+        return sendJson(res, {
+          ok: true,
+          mode: TENANCY,
+          id: created.id,
+          url: sandboxPublicUrl(created.id),
+          ownerToken: created.ownerToken,
+          creds: created.creds,
+          expiresAt: created.expiresAt || null,
+          ttlMs: SANDBOX_TTL_MS,
+          hint: 'Сохраните ownerToken: он показывается один раз и даёт доступ к песочнице.',
+        }, 201);
+      } catch (e) {
+        const status = e.code === 'SANDBOX_EXISTS' ? 409 : 429;
+        return sendJson(res, err(7, e.message, e.code || null, {
+          hint: 'Ограничения: MOCK_SANDBOX_MAX (количество), MOCK_SANDBOX_CREATE_LIMIT (созданий в час на IP).',
+        }), status);
+      }
+    }
+    // namespaces/off — BC: выбрать (и при необходимости создать) активную песочницу стенда.
+    const result = sandboxRuntime.switchActive((body && body.sandbox) || 'default');
+    if (!result.ok) return sendJson(res, err(7, `Не удалось выбрать песочницу: ${result.error}`), 400);
+    return sendJson(res, { ok: true, current: result.current, sandboxes: sandboxRuntime.list() });
+  }
+  if (req.method === 'DELETE') {
+    const target = String((body && body.sandbox) || url.searchParams.get('sandbox') || '');
+    if (!target) return sendJson(res, err(7, 'Укажите песочницу для удаления: ?sandbox=<id> или {"sandbox":"<id>"}'), 400);
+    const record = sandboxRuntime.find(target);
+    if (!record) return sendJson(res, err(8, `Песочница «${target}» не найдена`), 404);
+    if (TENANCY === 'owned' && !operator && !sandboxRuntime.recordAuthorized(record, req)) {
+      return sendJson(res, err(13, `Удалить песочницу «${target}» может её владелец (owner-token) или оператор`), 401);
+    }
+    const result = sandboxRuntime.remove(target);
+    if (!result.ok) return sendJson(res, err(7, `Песочницу «${target}» удалить нельзя (default-стенд)`), 400);
+    return sendJson(res, { ok: true, removed: result.removed });
+  }
+  return sendJson(res, err(501, `Метод ${req.method} для /sandboxes не поддерживается`), 405);
+}
+
+/**
+ * RFC-001 §6: /sandboxes/me — своя песочница по owner-token (в namespaces-режиме
+ * — песочница текущего запроса). reset/reset-creds/DELETE работают только с ней.
+ */
+function handleSandboxMe(req, res, p, body) {
+  const record = sandboxRuntime.recordByOwnerToken(req) || (TENANCY === 'owned' ? null : sandboxRuntime.current());
+  if (!record) {
+    return sendJson(res, err(13, 'Требуется owner-token песочницы', null, {
+      field: 'X-Sandbox-Token',
+      hint: 'Owner-token выдаётся один раз при создании: POST /sandboxes.',
+    }), 401);
+  }
+  if (p === '/sandboxes/me' && req.method === 'GET') {
+    return sendJson(res, { ok: true, mode: TENANCY, sandbox: sandboxRuntime.describe(record), creds: record.creds || null });
+  }
+  if (p === '/sandboxes/me/reset' && req.method === 'POST') {
+    const result = sandboxRuntime.reset(record.id);
+    return sendJson(res, { ok: true, sandbox: result.sandbox });
+  }
+  if (p === '/sandboxes/me/reset-creds' && req.method === 'POST') {
+    // Смена кредов песочницы: owner-token не меняется, иначе интегратор потеряет доступ.
+    const creds = generateSandboxCreds(body || {});
+    sandboxRuntime.updateCreds(record.id, creds);
+    return sendJson(res, { ok: true, sandbox: record.id, creds, ownerTokenChanged: false });
+  }
+  if (p === '/sandboxes/me' && req.method === 'DELETE') {
+    const result = sandboxRuntime.remove(record.id);
+    if (!result.ok) return sendJson(res, err(7, 'default-песочницу стенда удалить нельзя'), 400);
+    return sendJson(res, { ok: true, removed: result.removed });
+  }
+  return sendJson(res, err(501, `Метод ${req.method} для ${p} не поддерживается`), 405);
+}
+
+/**
+ * Политика admission по маршруту (F-11/F-12): какие запросы требуют контекст
+ * песочницы и owner-token в hosted-режиме.
+ */
+function sandboxPolicy(p) {
+  if (p.startsWith('/sandboxes')) return 'public'; // управление песочницами решает свои проверки само
+  if (p.startsWith('/admin') || p.startsWith('/mock/')) return 'control';
+  if (p.startsWith('/payment/')) return 'form';    // ссылка на оплату — capability, как форма банка
+  if (/^\/(v2|e2c\/v2|av\/v1|oauth|sm-register)\//.test(p)) return 'business';
+  return 'public';
+}
+
+/** DX-ответ на ошибку admission песочницы (F-12): знание ID ≠ доступ. */
+function sendSandboxError(res, admission) {
+  const id = admission.sandbox || 'default';
+  if (admission.kind === 'not-found') {
+    return sendJson(res, err(8, `Песочница «${id}» не найдена`, null, {
+      hint: 'Создайте песочницу: POST /sandboxes — в ответе будут id, creds и ownerToken. Список доступных — GET /mock/sandboxes.',
+    }), 404);
+  }
+  if (admission.kind === 'unauthorized') {
+    return sendJson(res, err(13, `Доступ к песочнице «${id}» ограничен: знание ID не является доступом`, `${admission.kind}: owner-token не предъявлен или неверен`, {
+      field: 'X-Sandbox-Token',
+      hint: 'Передайте owner-token из ответа POST /sandboxes: Authorization: Bearer <ownerToken>, X-Sandbox-Token или ?sandbox_token=.',
+    }), 401);
+  }
+  if (admission.kind === 'expired') {
+    return sendJson(res, err(8, `Песочница «${id}» истекла по TTL и удалена`, null, {
+      hint: 'Песочницы живут ограниченное время; создайте новую: POST /sandboxes.',
+    }), 410);
+  }
+  if (admission.kind === 'rate-limit' || admission.kind === 'limit') {
+    return sendJson(res, err(7, `Лимит создания песочниц исчерпан`, admission.kind, {
+      hint: 'Переиспользуйте существующий ID или поднимите MOCK_SANDBOX_CREATE_LIMIT / MOCK_SANDBOX_MAX.',
+    }), 429);
+  }
+  return sendJson(res, err(5000, 'Не удалось разрешить контекст песочницы'), 500);
+}
+
 async function route(req, res) {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
   const raw = await readBody(req);
   const body = parseBody(raw, req.headers['content-type']);
 
-  // Мульти-тенантная изоляция песочниц (X-Mock-Sandbox или ?sandbox=)
-  if (req.headers['x-mock-sandbox'] || url.searchParams.get('sandbox')) {
-    sandboxManager.fromRequest(req);
-  }
+  // F-11/F-12: контекст песочницы разрешается ровно один раз до бизнес-логики.
+  // Внутри run() все обработчики (включая очереди, запущенные из запроса) видят
+  // state/creds/persist именно своей песочницы; module-singleton не переключается.
+  const admission = sandboxRuntime.admit(req, sandboxPolicy(p));
+  if (!admission.ok) return sendSandboxError(res, admission);
+  return sandboxRuntime.run(admission, () => routeRequest(req, res, url, p, raw, body, admission));
+}
 
+async function routeRequest(req, res, url, p, raw, body, admission) {
   // Единый access-control управляющей поверхности (F-07, A-20):
   // /admin* — MOCK_ADMIN_TOKEN; /mock/* и служебные чтения — MOCK_OPERATOR_TOKEN
   // (с fallback на админ-токен). В hosted-режиме без секрета — fail-closed.
   const surface = controlSurface(p);
-  if (surface) {
+  // F-12: owner-token песочницы — равноправный доступ к её управляющей
+  // поверхности (RFC-001 §6), в т.ч. к алиасу /mock/sandboxes.
+  const ownerSurface = surface === 'operator' && Boolean(sandboxRuntime.recordByOwnerToken(req));
+  if (surface && admission.via !== 'owner' && !ownerSurface) {
     const access = checkControlAccess(req, {
       adminToken: MOCK_ADMIN_TOKEN,
       operatorToken: OPERATOR_TOKEN,
@@ -1946,15 +2297,20 @@ async function route(req, res) {
   }
 
   if (req.method === 'GET' && p === '/health') {
-    return sendJson(res, {
-      ok: true,
-      sandbox: sandboxManager.current(),
-      payments: Object.keys(state.payments).length,
-      deals: Object.keys(state.deals).length,
-      payouts: Object.keys(state.payouts || {}).length,
-      disputes: Object.keys(state.disputes || {}).length,
-      shops: Object.keys(state.shops || {}).length,
-    });
+    const health = { ok: true, sandbox: sandboxRuntime.currentId(), tenancy: TENANCY };
+    // Чужие счётчики не раскрываем: в owned-режиме health отвечает по default-стенду
+    // и не показывает состояние именованных песочниц других арендаторов.
+    if (TENANCY !== 'owned' || admission.record.isDefault) {
+      Object.assign(health, {
+        payments: Object.keys(state.payments).length,
+        deals: Object.keys(state.deals).length,
+        payouts: Object.keys(state.payouts || {}).length,
+        disputes: Object.keys(state.disputes || {}).length,
+        shops: Object.keys(state.shops || {}).length,
+      });
+      // Управляющие токены стенда делает видимыми startup-лог, не health.
+    }
+    return sendJson(res, health);
   }
   if (req.method === 'GET' && p === '/openapi.json') {
     const specFile = require('path').join(__dirname, '..', '..', 'docs', 'openapi', 'tbank-mock.openapi.json');
@@ -1963,36 +2319,33 @@ async function route(req, res) {
   }
   if (req.method === 'GET' && p === '/admin/journal') return sendJson(res, { entries: journal.list() });
 
-  // Управление песочницами, сбросом и снимками состояния (RFC-001)
-  if (p === '/mock/sandboxes') {
-    if (req.method === 'GET') {
-      return sendJson(res, { current: sandboxManager.current(), sandboxes: sandboxManager.list() });
-    }
-    if (req.method === 'POST') {
-      const name = sandboxManager.switchTo((body && body.sandbox) || 'default');
-      return sendJson(res, { ok: true, current: name, sandboxes: sandboxManager.list() });
-    }
-    if (req.method === 'DELETE') {
-      const name = sandboxManager.reset((body && body.sandbox) || url.searchParams.get('sandbox') || undefined);
-      return sendJson(res, { ok: true, reset: name, current: sandboxManager.current() });
-    }
+  // ── RFC-001 §6: управление песочницами (создание, инфо, reset, удаление) ──
+  if (p === '/sandboxes' || p === '/mock/sandboxes') {
+    return handleSandboxApi(req, res, url, body, admission);
+  }
+  if (p.startsWith('/sandboxes/')) {
+    return handleSandboxMe(req, res, p, body);
   }
 
   if (p === '/mock/reset' && req.method === 'POST') {
-    const targetSandbox = (body && body.sandbox) || req.headers['x-mock-sandbox'] || undefined;
-    const resetName = sandboxManager.reset(targetSandbox);
+    // F-11/F-13: сбрасываем ровно ту песочницу, в контексте которой пришёл запрос
+    // (selector/owner-token уже разрешены admission), без переключения singleton.
+    const target = (body && body.sandbox) || admission.record.id;
+    const resetName = sandboxRuntime.reset(target);
     scenarios.clearRules();
     scenarios.clearHistory();
     journal.clear();
-    return sendJson(res, { ok: true, sandbox: resetName });
+    return sendJson(res, { ok: true, sandbox: resetName.sandbox || target });
   }
 
   if (p === '/mock/state') {
     if (req.method === 'GET') {
+      // F-13: target читается из query явно; active при этом не переключается.
       const targetSandbox = url.searchParams.get('sandbox') || undefined;
+      const snapshot = targetSandbox ? sandboxRuntime.exportState(targetSandbox) : sandboxRuntime.exportState();
       return sendJson(res, {
-        sandbox: targetSandbox || sandboxManager.current(),
-        state: sandboxManager.exportState(targetSandbox),
+        sandbox: snapshot.sandbox || admission.record.id,
+        state: snapshot,
       });
     }
     if (req.method === 'POST' || req.method === 'PUT') {
@@ -2004,17 +2357,23 @@ async function route(req, res) {
           }), 400);
         }
       }
-      const targetSandbox = (body && body.sandbox) || undefined;
+      const targetSandbox = (body && body.sandbox) || admission.record.id;
       const snapshot = (body && body.state) || body || {};
       try {
-        const imported = sandboxManager.importState(snapshot, targetSandbox);
-        // F-10: импортированный снимок тоже не должен оставлять полный PAN.
-        const scrubbed = scrubLegacyPan(state);
+        const imported = sandboxRuntime.importState(snapshot, targetSandbox);
+        // F-10: импортированный снимок тоже не должен оставлять полный PAN;
+        // F-15: снимок мог быть сделан до появления ссылочных индексов — индексы
+        // пересобираются из фактического state, а не принимаются на веру.
+        const scrubbed = sandboxRuntime.run({ ok: true, record: sandboxRuntime.find(imported.sandbox) }, () => {
+          const pan = scrubLegacyPan(state);
+          rebuildIndexes(state);
+          return pan;
+        });
         if (scrubbed) {
           log(`[mock] из импортированного снимка удалён полный PAN у ${scrubbed} выплат(ы) (F-10)`);
-          persist();
+          sandboxRuntime.flush();
         }
-        return sendJson(res, { ok: true, sandbox: imported, panScrubbed: scrubbed || undefined });
+        return sendJson(res, { ok: true, sandbox: imported.sandbox, panScrubbed: scrubbed || undefined });
       } catch (e) {
         return sendJson(res, err(7, 'Недопустимый снимок состояния', e.message, {
           field: 'state',
@@ -2034,7 +2393,7 @@ async function route(req, res) {
       const report = await verifyMerchantWebhook({
         url: targetUrl,
         provider: 'tbank',
-        terminalKey: TERMINAL_KEY,
+        terminalKey: terminalKey(),
         signPayload: (payload) => tokenOf(payload),
         blockPrivateHosts: BLOCK_PRIVATE_WEBHOOKS,
       });
@@ -2131,11 +2490,13 @@ async function route(req, res) {
       bankAccount: body.bankAccount || body.requisites || {},
       status: 'ACTIVE',
       terminals: [
-        { terminalKey: `${TERMINAL_KEY}`, type: 'ACQUIRING' },
-        { terminalKey: E2C_TERMINAL_KEY, type: 'PAYOUT' },
+        { terminalKey: `${terminalKey()}`, type: 'ACQUIRING' },
+        { terminalKey: e2cTerminalKey(), type: 'PAYOUT' },
       ],
       createdAt: clock.iso(),
     };
+    const quotaShop = ensureSandboxQuota();
+    if (quotaShop) return quotaShop;
     state.shops[shopCode] = shop;
     persist();
     return sendJson(res, shop);
@@ -2195,13 +2556,15 @@ async function route(req, res) {
       status: 'RECEIVED',
       createdAt: clock.iso(),
     };
+    const quotaIncoming = ensureSandboxQuota();
+    if (quotaIncoming) return quotaIncoming;
     state.incoming[incomingId] = incoming;
     persist();
     console.log(`[mock] incoming ${incomingId}: ${code} ${amount}коп от ${payerInn}`);
     const webhookUrl = String(body.NotificationURL || MOCK_DEFAULT_NOTIFICATION_URL || '');
     if (webhookUrl) {
       const payload = {
-        TerminalKey: TERMINAL_KEY,
+        TerminalKey: terminalKey(),
         Type: 'INCOMING',
         VerificationCode: code,
         Amount: amount,
@@ -2263,6 +2626,8 @@ async function route(req, res) {
     // F-10: полный PAN не сохраняем — только маска и выбранный тестовый сценарий.
     const card = resolvePayoutCard(body.Pan, body.CardId, body.CardData);
     const rawCardId = textOrNull(body.CardId);
+    const quotaPayout = ensureSandboxQuota();
+    if (quotaPayout) return quotaPayout;
     state.payouts[payoutPaymentId] = {
       paymentId: payoutPaymentId,
       amount,
@@ -2290,12 +2655,13 @@ async function route(req, res) {
       statusHistory: [{ status: 'NEW', at: clock.iso() }],
       createdAt: clock.iso(),
     };
+    indexPayout(state, state.payouts[payoutPaymentId]);
     persist();
     console.log(`[mock] e2c Init ${payoutPaymentId}: ${amount}коп, order=${orderId}, deal=${dealId}, канал=${channel.recipientType}`);
     return sendJson(res, {
       Success: true,
       ErrorCode: '0',
-      TerminalKey: TERMINAL_KEY,
+      TerminalKey: terminalKey(),
       PaymentId: payoutPaymentId,
       OrderId: orderId,
       Amount: amount,
@@ -2482,13 +2848,15 @@ async function route(req, res) {
         { status: 'RETURNED', at: now() },
       ],
     };
+    const quotaVerification = ensureSandboxQuota();
+    if (quotaVerification) return quotaVerification;
     state.verifications[verificationId] = verification;
     persist();
     console.log(`[mock] account verification ${verificationId}: ${code} ${amount}коп — прогон завершён (RETURNED)`);
     return sendJson(res, {
       Success: true,
       ErrorCode: '0',
-      TerminalKey: TERMINAL_KEY,
+      TerminalKey: terminalKey(),
       VerificationId: verificationId,
       VerificationCode: code,
       Amount: amount,
@@ -2638,31 +3006,50 @@ const server = http.createServer((req, res) => {
   });
 });
 
+// Тик обслуживает КАЖДУЮ песочницу в её собственном контексте: очередь вебхуков
+// и bank-таймеры (hold/3DS/сделки) не смешивают состояния арендаторов (F-11).
 setInterval(() => {
-  deliveryQueue.tick().catch((e) => console.error('[mock] delivery loop:', e.message));
-  tickBank();
+  sandboxRuntime.tickAll(() => {
+    deliveryQueue.tick().catch((e) => console.error('[mock] delivery loop:', e.message));
+    tickBank();
+  });
 }, 1000).unref();
+
+// Воркер TTL/лимитов (RFC-001 §8): просроченные песочницы удаляются, retention
+// подчищает диагностические записи; интервал настраивается через MOCK_SANDBOX_SWEEP_MS.
+const SANDBOX_SWEEP_MS = parseMsOr(process.env.MOCK_SANDBOX_SWEEP_MS, 60000);
+if (SANDBOX_TTL_MS > 0 || SANDBOX_MAX_DOCUMENTS > 0 || SANDBOX_RETENTION_MS > 0) {
+  setInterval(() => {
+    const result = sandboxRuntime.sweep();
+    if (result.expired) log(`[mock] sandbox sweep: удалено по TTL — ${result.expired}`);
+  }, Math.max(1000, SANDBOX_SWEEP_MS)).unref();
+}
 
 restore();
 
-// F-10: state-файлы, сохранённые до минимизации карточных данных, могут
-// содержать полный PAN в payouts — вычищаем сразу после загрузки.
-{
+// После загрузки во всех песочницах (default из MOCK_STATE_FILE, named — из
+// реестра) перестраиваем ссылочные индексы (F-15): файл мог быть записан до их
+// появления, а читатели не должны сканировать историю. Заодно выполняем F-10:
+// state-файлы, сохранённые до минимизации карточных данных, могут содержать
+// полный PAN в payouts — вычищаем сразу после загрузки.
+sandboxRuntime.tickAll(() => {
+  rebuildIndexes(state);
   const scrubbed = scrubLegacyPan(state);
   if (scrubbed) {
     log(`[mock] из состояния удалён полный PAN у ${scrubbed} выплат(ы) — хранится только маска (F-10)`);
     persist();
   }
-}
+});
 
 if (require.main === module) {
   server.listen(parseInt(MOCK_PORT, 10), MOCK_HOST, () => {
     const port = server.address().port; // MOCK_PORT=0 -> реальный порт (освобождает тесты от фиксированных номеров)
     console.log(`[mock] T-Bank multisplit mock on http://${MOCK_HOST}:${port}`);
-    console.log(`[mock] terminal=${TERMINAL_KEY} strict_token=${STRICT_TOKEN} public_base=${MOCK_PUBLIC_BASE_URL}`);
+    console.log(`[mock] tenancy=${TENANCY} terminal=${TERMINAL_KEY} strict_token=${STRICT_TOKEN} public_base=${MOCK_PUBLIC_BASE_URL}`);
     console.log(`[mock] notifications: retry ${RETRY_MS}ms x${MAX_ATTEMPTS}${MOCK_DEFAULT_NOTIFICATION_URL ? `, fallback ${MOCK_DEFAULT_NOTIFICATION_URL}` : ', fallback none'}`);
     console.log(`[mock] control-plane: admin_token=${MOCK_ADMIN_TOKEN ? 'on' : 'off'} operator_token=${OPERATOR_TOKEN ? 'on' : 'off'} hosted=${HOSTED} block_private_webhooks=${BLOCK_PRIVATE_WEBHOOKS}`);
+    console.log(`[mock] sandboxes: mode=${TENANCY} ttl_ms=${SANDBOX_TTL_MS} max=${SANDBOX_MAX} max_documents=${SANDBOX_MAX_DOCUMENTS} host_suffix=${SANDBOX_HOST_SUFFIX || '-'} registry=${sandboxRuntime.stats().file || 'memory'}${TENANCY === 'owned' && !SANDBOX_OWNER_TOKEN ? ' (default-песочница открыта: задайте MOCK_SANDBOX_TOKEN, чтобы закрыть)' : ''}`);
   });
 }
 
-module.exports = { server, state, clock, scenarios, tokenOf, CARDS, route, persist, restore, TERMINAL_KEY, TERMINAL_PASSWORD };
+module.exports = { server, state, clock, scenarios, tokenOf, CARDS, route, persist, restore, sandboxRuntime, TERMINAL_KEY, TERMINAL_PASSWORD };

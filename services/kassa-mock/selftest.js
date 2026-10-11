@@ -9,7 +9,9 @@
  */
 
 const { spawn } = require('child_process');
+const fs = require('fs');
 const http = require('http');
+const os = require('os');
 const path = require('path');
 
 const PORT = 3301;
@@ -608,6 +610,149 @@ async function main() {
     }
   }
 
+  /* --- #8 (RFC-001, F-11—F-15): изоляция песочниц ------------------------- */
+
+  // 27. F-11/F-13: request-local контекст (гонка activeId), target в export/import
+  {
+    const child = await startKassaChild({});
+    try {
+      // Токен резолвится в песочнице: getToken в каждой свой (state.tokens изолирован).
+      const tokenIn = async (sandbox) => (await requestOn(
+        child.port, 'POST', '/possystem/v1/getToken',
+        { login: 'loviitest', pass: 'mockpass123' },
+        { 'X-Mock-Sandbox': sandbox },
+      )).json().token;
+      const sellIn = (sandbox, tk, extId, latency = 0) => requestOn(
+        child.port,
+        'POST',
+        `/possystem/v1/Main/sell?token=${tk}`,
+        validBody(extId),
+        { 'X-Mock-Sandbox': sandbox, ...(latency ? { 'X-Mock-Latency': String(latency) } : {}) },
+      );
+      const checksBefore = (await requestOn(child.port, 'GET', '/healthz')).json().checks;
+      const [tkA, tkB] = await Promise.all([tokenIn('k-a'), tokenIn('k-b')]);
+      // A отвечает с задержкой, B — сразу: раньше первый await оставлял B в state A.
+      const [ra, rb] = await Promise.all([sellIn('k-a', tkA, 'k-a-1', 300), sellIn('k-b', tkB, 'k-b-1')]);
+      check('#8 F-11: параллельные чеки в разных песочницах принимаются',
+        Boolean(ra.json() && ra.json().uuid) && Boolean(rb.json() && rb.json().uuid), `${ra.text.slice(0, 80)} | ${rb.text.slice(0, 80)}`);
+      const stA = (await requestOn(child.port, 'GET', '/mock/state?sandbox=k-a')).json().state;
+      const stB = (await requestOn(child.port, 'GET', '/mock/state?sandbox=k-b')).json().state;
+      check('#8 F-11: песочница A видит только свой чек',
+        Object.keys(stA.receipts).length === 1 && Boolean(stA.receipts[ra.json().uuid]));
+      check('#8 F-11: песочница B видит только свой чек',
+        Object.keys(stB.receipts).length === 1 && Boolean(stB.receipts[rb.json().uuid]));
+      const health = (await requestOn(child.port, 'GET', '/healthz')).json();
+      check('#8 F-11: запрос без селектора разрешается в default без чеков песочниц',
+        health.sandbox === 'default' && health.checks === checksBefore, `sandbox=${health.sandbox}, checks=${health.checks}, before=${checksBefore}`);
+
+      // F-13: импорт в явный target не переключает активную (default) песочницу
+      const seeded = {
+        counters: { deviceId: 1, uuid: 1, fd: 1, notification: 1 },
+        tokens: {}, receipts: { seed: { uuid: 'seed', status: 'done' } }, externalIds: { seeded: 'seed' },
+        callbacks: {}, ofdQueue: {}, zReports: [], clockOffsetMs: 0, cashbox: {}, shift: {}, fn: {},
+      };
+      const imp = await requestOn(child.port, 'POST', '/mock/state', { sandbox: 'k-target', state: seeded });
+      check('#8 F-13: импорт возвращает фактический target', imp.json() && imp.json().sandbox === 'k-target', imp.text.slice(0, 120));
+      const targetState = (await requestOn(child.port, 'GET', '/mock/state?sandbox=k-target')).json().state;
+      check('#8 F-13: экспорт читает только выбранный снимок', Boolean(targetState.receipts.seed));
+      const defaultState = (await requestOn(child.port, 'GET', '/mock/state')).json().state;
+      check('#8 F-13: импорт в target не изменил default', !defaultState.receipts.seed);
+    } finally {
+      child.stop();
+    }
+  }
+
+  // 28. F-12: hosted tenancy — owner-token, креды песочницы, знание ID ≠ доступ
+  {
+    const child = await startKassaChild({ MOCK_TENANCY: '1', MOCK_OPERATOR_TOKEN: 'op-agent', MOCK_SANDBOX_TTL_MS: '3600000' });
+    try {
+      const created = (await requestOn(child.port, 'POST', '/sandboxes', {})).json();
+      check('#8 F-12: POST /sandboxes отдаёт id, ownerToken и креды песочницы',
+        Boolean(created.id && created.ownerToken && created.creds && created.creds.fermaPassword), JSON.stringify(created).slice(0, 180));
+      const owner = { Authorization: `Bearer ${created.ownerToken}` };
+
+      const idOnly = await requestOn(child.port, 'POST', '/possystem/v1/getToken', { login: created.creds.fermaLogin, pass: created.creds.fermaPassword }, { 'X-Mock-Sandbox': created.id });
+      check('#8 F-12: знание ID без owner-token -> 401', idOnly.status === 401, `получено ${idOnly.status}`);
+      const other = (await requestOn(child.port, 'POST', '/sandboxes', {})).json();
+      const foreign = await requestOn(child.port, 'GET', '/mock/state', null, { 'X-Mock-Sandbox': created.id, Authorization: `Bearer ${other.ownerToken}` });
+      check('#8 F-12: owner-token другой песочницы не открывает чужую', foreign.status === 401);
+      const unknown = await requestOn(child.port, 'GET', '/mock/state', null, { 'X-Mock-Sandbox': 'ghost-8' });
+      check('#8 F-12: неизвестная песочница -> 404 + подсказка создать', unknown.status === 404 && unknown.text.includes('POST /sandboxes'));
+
+      const tk = (await requestOn(child.port, 'POST', '/possystem/v1/getToken', { login: created.creds.fermaLogin, pass: created.creds.fermaPassword }, { 'X-Mock-Sandbox': created.id, ...owner })).json().token;
+      check('#8 F-12: getToken с кредами песочницы и owner-token работает', Boolean(tk));
+      const wrong = await requestOn(child.port, 'POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' }, { 'X-Mock-Sandbox': created.id, ...owner });
+      check('#8 F-12: креды стенда в песочнице не действуют (код 14)', Boolean(wrong.json() && wrong.json().error && wrong.json().error.code === 14));
+
+      const noTokList = await requestOn(child.port, 'GET', '/mock/sandboxes');
+      check('#8 F-12: список песочниц без токена -> 401', noTokList.status === 401);
+      const ownList = (await requestOn(child.port, 'GET', '/mock/sandboxes', null, owner)).json();
+      check('#8 F-12: владелец видит только свою песочницу', ownList && ownList.sandboxes.length === 1 && ownList.sandboxes[0].id === created.id);
+      const ownState = await requestOn(child.port, 'GET', '/mock/state', null, owner);
+      check('#8 F-12: owner-token открывает управляющие маршруты своей песочницы', ownState.status === 200);
+      const me = (await requestOn(child.port, 'GET', '/sandboxes/me', null, owner)).json();
+      check('#8 F-12: /sandboxes/me отдаёт песочницу владельца', Boolean(me && me.sandbox && me.sandbox.id === created.id));
+      const rotated = (await requestOn(child.port, 'POST', '/sandboxes/me/reset-creds', {}, owner)).json();
+      check('#8 F-12: reset-creds меняет пароль песочницы',
+        Boolean(rotated && rotated.creds && rotated.creds.fermaPassword && rotated.creds.fermaPassword !== created.creds.fermaPassword));
+    } finally {
+      child.stop();
+    }
+  }
+
+  // 29. F-14: персистентность песочницы через рестарт и TTL-очистка; F-15: квота
+  {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kassa-sbx-'));
+    const stateFile = path.join(tmpDir, 'state.json');
+    let savedUuid = '';
+    const child1 = await startKassaChild({ MOCK_STATE_FILE: stateFile });
+    try {
+      const tk = (await requestOn(child1.port, 'POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' }, { 'X-Mock-Sandbox': 'k-persist' })).json().token;
+      savedUuid = (await requestOn(child1.port, 'POST', `/possystem/v1/Main/sell?token=${tk}`, validBody('k-persist-1'), { 'X-Mock-Sandbox': 'k-persist' })).json().uuid;
+      await sleep(300); // реестр песочниц пишется атомарно с debounce
+    } finally {
+      child1.stop();
+    }
+    await sleep(300);
+    const child2 = await startKassaChild({ MOCK_STATE_FILE: stateFile });
+    try {
+      const restored = (await requestOn(child2.port, 'GET', '/mock/state?sandbox=k-persist')).json().state;
+      check('#8 F-14: состояние именованной песочницы восстанавливается после рестарта', Boolean(restored.receipts[savedUuid]));
+      const def = (await requestOn(child2.port, 'GET', '/mock/state')).json().state;
+      check('#8 F-14: чужой state не приписывается default', !def.receipts[savedUuid]);
+    } finally {
+      child2.stop();
+    }
+
+    const child3 = await startKassaChild({ MOCK_TENANCY: '1', MOCK_SANDBOX_TTL_MS: '800', MOCK_SANDBOX_SWEEP_MS: '1000' });
+    try {
+      const created = (await requestOn(child3.port, 'POST', '/sandboxes', {})).json();
+      const before = await requestOn(child3.port, 'GET', '/mock/state', null, { 'X-Mock-Sandbox': created.id, Authorization: `Bearer ${created.ownerToken}` });
+      check('#8 F-14: до TTL песочница доступна', before.status === 200);
+      await sleep(2300);
+      const after = await requestOn(child3.port, 'GET', '/mock/state', null, { 'X-Mock-Sandbox': created.id, Authorization: `Bearer ${created.ownerToken}` });
+      check('#8 F-14: после TTL песочница недоступна', [404, 410].includes(after.status), `получено ${after.status}`);
+    } finally {
+      child3.stop();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+
+    // Квота считает документы песочницы: токен, чеки, external_id и записи
+    // очереди callback'ов — поэтому лимит 6 пропускает два чека и режет третий.
+    const child4 = await startKassaChild({ MOCK_SANDBOX_MAX_DOCUMENTS: '6' });
+    try {
+      const tk = (await requestOn(child4.port, 'POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' }, { 'X-Mock-Sandbox': 'k-quota' })).json().token;
+      const sell = (extId) => requestOn(child4.port, 'POST', `/possystem/v1/Main/sell?token=${tk}`, validBody(extId), { 'X-Mock-Sandbox': 'k-quota' });
+      check('#8 F-15: первый чек проходит', Boolean((await sell('k-quota-1')).json().uuid));
+      check('#8 F-15: второй чек проходит (лимит 6 документов)', Boolean((await sell('k-quota-2')).json().uuid));
+      const third = (await sell('k-quota-3')).json();
+      check('#8 F-15: превышение квоты документов отклоняется с DX',
+        Boolean(third.error) && String(third.error.text).includes('Лимит документов песочницы'), JSON.stringify(third).slice(0, 160));
+    } finally {
+      child4.stop();
+    }
+  }
+
   await phaseRestart();
 
   console.log(`\nИТОГ: ${passed} passed, ${failed} failed\n`);
@@ -629,6 +774,14 @@ async function startKassaChild(env = {}) {
       MOCK_OPERATOR_TOKEN: '',
       MOCK_HOSTED: '',
       MOCK_BLOCK_PRIVATE_WEBHOOKS: '',
+      MOCK_TENANCY: '',
+      MOCK_SANDBOX_TOKEN: '',
+      MOCK_SANDBOX_TTL_MS: '',
+      MOCK_SANDBOX_MAX: '',
+      MOCK_SANDBOX_MAX_DOCUMENTS: '',
+      MOCK_SANDBOX_RETENTION_MS: '',
+      MOCK_SANDBOX_HOST_SUFFIX: '',
+      MOCK_SANDBOX_CREATE_LIMIT: '',
       ...env,
     },
     stdio: ['ignore', 'pipe', 'pipe'],

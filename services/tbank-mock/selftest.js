@@ -131,6 +131,14 @@ function startChild(env = {}) {
       MOCK_OPERATOR_TOKEN: '',
       MOCK_HOSTED: '',
       MOCK_BLOCK_PRIVATE_WEBHOOKS: '',
+      MOCK_TENANCY: '',
+      MOCK_SANDBOX_TOKEN: '',
+      MOCK_SANDBOX_TTL_MS: '',
+      MOCK_SANDBOX_MAX: '',
+      MOCK_SANDBOX_MAX_DOCUMENTS: '',
+      MOCK_SANDBOX_RETENTION_MS: '',
+      MOCK_SANDBOX_HOST_SUFFIX: '',
+      MOCK_SANDBOX_CREATE_LIMIT: '',
       ...env,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -1254,6 +1262,213 @@ process.env.MOCK_RETRY_MS = '1000';
     await e2c(mockPort, 'Payment', { PaymentId: cValidE2c.PaymentId });
     const cE2cKey = JSON.parse((await cancel({ TerminalKey: `${TERMINAL_KEY}E2C`, PaymentId: cValidE2c.PaymentId, DealId: dealId })).body);
     assert.strictEqual(cE2cKey.Success, true, 'F-22: PAYOUT-терминал точки тоже допустим');
+  }
+
+  /* --- #8 (RFC-001, F-11—F-15): изоляция песочниц -------------------------- */
+
+  // 43. F-11/F-13: request-local контекст (гонка activeId), target в export/import
+  {
+    const sandboxState = async (id) => JSON.parse((await request(mockPort, 'GET', `/mock/state?sandbox=${encodeURIComponent(id)}`)).body).state.state;
+    const initIn = (id, orderId, latency = 0) => {
+      // Профиль основного инстанса — multisplit: Init открывает сделку в песочнице.
+      const payload = { TerminalKey: TERMINAL, Amount: '100', OrderId: orderId, PaymentRecipientId: DEFAULT_RECIPIENT, CreateDealWithType: 'NN' };
+      return request(
+        mockPort,
+        'POST',
+        '/v2/Init',
+        { ...payload, Token: tokenOf(payload) },
+        { 'X-Mock-Sandbox': id, ...(latency ? { 'X-Mock-Latency': String(latency) } : {}) },
+      );
+    };
+
+    const defaultBefore = Object.keys(state.payments).length;
+    // A отвечает с задержкой, B — сразу: раньше первый await оставлял B в state A.
+    const [ra, rb] = await Promise.all([initIn('f11-a', 'f11-a-1', 300), initIn('f11-b', 'f11-b-1')]);
+    assert.strictEqual(JSON.parse(ra.body).Success, true, 'Init в песочнице A должен проходить');
+    assert.strictEqual(JSON.parse(rb.body).Success, true, 'Init в песочнице B должен проходить');
+    const stA = await sandboxState('f11-a');
+    const stB = await sandboxState('f11-b');
+    assert.deepStrictEqual(Object.keys(stA.payments), [JSON.parse(ra.body).PaymentId], 'A видит только свой платёж');
+    assert.deepStrictEqual(Object.keys(stB.payments), [JSON.parse(rb.body).PaymentId], 'B видит только свой платёж');
+
+    // запрос без ID разрешается в default, а не остаётся в предыдущей песочнице
+    const healthDefault = JSON.parse((await request(mockPort, 'GET', '/health')).body);
+    assert.strictEqual(healthDefault.sandbox, 'default');
+    assert.strictEqual(healthDefault.payments, defaultBefore, 'default не получает документы песочниц');
+
+    // F-13: импорт в явный target не переключает активную (default) песочницу
+    const seeded = {
+      counters: { paymentId: 777, dealId: 50000, cardId: 80000, notificationId: 1, verificationId: 7000000, incomingId: 1, payoutId: 900000, disputeId: 30000, shopCode: 700100 },
+      payments: { '777': { paymentId: '777', orderId: 'seeded-f13', status: 'CONFIRMED' } },
+      clockOffsetMs: 0,
+    };
+    const imp = JSON.parse((await request(mockPort, 'POST', '/mock/state', { sandbox: 'f13-target', state: seeded })).body);
+    assert.strictEqual(imp.sandbox, 'f13-target', 'импорт должен вернуть фактический target');
+    assert.ok((await sandboxState('f13-target')).payments['777'], 'снимок попал в указанную песочницу');
+    assert.ok(!(await sandboxState('default')).payments['777'], 'импорт в target не затронул default');
+    const expTarget = JSON.parse((await request(mockPort, 'GET', '/mock/state?sandbox=f13-target')).body);
+    assert.strictEqual(expTarget.sandbox, 'f13-target', 'экспорт называет фактическую песочницу');
+    assert.strictEqual(expTarget.state.sandbox, 'f13-target');
+    assert.ok(expTarget.state.state.payments['777'], 'экспорт читает выбранный снимок');
+  }
+
+  // 44. F-12: hosted tenancy — owner-token, креды песочницы, знание ID ≠ доступ
+  {
+    const child = startChild({ MOCK_TENANCY: '1', MOCK_OPERATOR_TOKEN: 'op-agent', MOCK_SANDBOX_TTL_MS: '3600000' });
+    const childPort = await child.port;
+    try {
+      const created = JSON.parse((await request(childPort, 'POST', '/sandboxes', {})).body);
+      assert.ok(created.id && created.ownerToken && created.creds && created.creds.terminalPassword,
+        `POST /sandboxes отдаёт id, ownerToken и креды: ${JSON.stringify(created).slice(0, 200)}`);
+      const owner = { Authorization: `Bearer ${created.ownerToken}` };
+
+      // знание ID не даёт доступ: без owner-token бизнес-вызов отклоняется
+      const idOnly = await request(childPort, 'POST', '/v2/Init', { TerminalKey: created.creds.terminalKey, Amount: '100', OrderId: 'owned-1' }, { 'X-Mock-Sandbox': created.id });
+      assert.strictEqual(idOnly.statusCode, 401, 'ID без owner-token — 401');
+      // чужой owner-token не подходит
+      const other = JSON.parse((await request(childPort, 'POST', '/sandboxes', {})).body);
+      const foreign = await request(childPort, 'GET', '/mock/state', undefined, { 'X-Mock-Sandbox': created.id, Authorization: `Bearer ${other.ownerToken}` });
+      assert.strictEqual(foreign.statusCode, 401, 'owner-token другой песочницы не открывает чужую');
+      // неизвестная песочница — 404 с подсказкой создать
+      const unknown = await request(childPort, 'GET', '/mock/state', undefined, { 'X-Mock-Sandbox': 'ghost-8', Authorization: 'Bearer nope' });
+      assert.strictEqual(unknown.statusCode, 404, 'неизвестный ID — 404');
+      assert.ok(String(unknown.body).includes('POST /sandboxes'), 'DX-ответ подсказывает создание песочницы');
+
+      // со своими кредами и owner-token — успех
+      const payload = { TerminalKey: created.creds.terminalKey, Amount: '100', OrderId: 'owned-1', PaymentRecipientId: DEFAULT_RECIPIENT };
+      const init = JSON.parse((await request(childPort, 'POST', '/v2/Init', { ...payload, Token: tokenOf(payload, created.creds.terminalPassword) }, { 'X-Mock-Sandbox': created.id, ...owner })).body);
+      assert.strictEqual(init.Success, true, `Init с кредами песочницы должен проходить: ${JSON.stringify(init).slice(0, 160)}`);
+      // криптография песочницы: чужой (stand) пароль не подходит
+      const wrongPassword = JSON.parse((await request(childPort, 'POST', '/v2/Init', { ...payload, OrderId: 'owned-2', Token: tokenOf({ ...payload, OrderId: 'owned-2' }) }, { 'X-Mock-Sandbox': created.id, ...owner })).body);
+      assert.strictEqual(wrongPassword.ErrorCode, '13', 'пароль стенда не действует в песочнице (свои креды)');
+
+      // список песочниц: без токена — 401, с owner-token — только своя, оператору — все
+      assert.strictEqual((await request(childPort, 'GET', '/mock/sandboxes')).statusCode, 401);
+      const ownList = JSON.parse((await request(childPort, 'GET', '/mock/sandboxes', undefined, owner)).body);
+      assert.deepStrictEqual(ownList.sandboxes.map((s) => s.id), [created.id], 'владелец видит только свою песочницу');
+      const opList = JSON.parse((await request(childPort, 'GET', '/mock/sandboxes', undefined, { Authorization: 'Bearer op-agent' })).body);
+      assert.ok(opList.sandboxes.length >= 2, 'оператор видит все песочницы');
+
+      // owner-token открывает управляющие маршруты своей песочницы (RFC-001 §6)
+      const stateOwn = await request(childPort, 'GET', '/mock/state', undefined, owner);
+      assert.strictEqual(stateOwn.statusCode, 200, 'owner-token открывает /mock/state своей песочницы');
+      // /sandboxes/me: инфо, смена кредов, reset
+      const me = JSON.parse((await request(childPort, 'GET', '/sandboxes/me', undefined, owner)).body);
+      assert.strictEqual(me.sandbox.id, created.id);
+      const rotated = JSON.parse((await request(childPort, 'POST', '/sandboxes/me/reset-creds', {}, owner)).body);
+      assert.ok(rotated.creds.terminalPassword && rotated.creds.terminalPassword !== created.creds.terminalPassword, 'reset-creds меняет пароль');
+      const afterRotate = JSON.parse((await request(childPort, 'GET', '/sandboxes/me', undefined, owner)).body);
+      assert.strictEqual(afterRotate.creds.terminalPassword, rotated.creds.terminalPassword, 'новые креды сохранены');
+      const meReset = JSON.parse((await request(childPort, 'POST', '/sandboxes/me/reset', {}, owner)).body);
+      assert.strictEqual(meReset.sandbox, created.id, 'reset работает по owner-token');
+    } finally {
+      child.stop();
+    }
+  }
+
+  // 45. F-14: персистентность песочницы через рестарт и TTL-очистка
+  {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tbank-sbx-'));
+    const stateFile = path.join(tmpDir, 'state.json');
+    let savedPaymentId = '';
+    const child1 = startChild({ MOCK_STATE_FILE: stateFile });
+    const port1 = await child1.port;
+    try {
+      const payload = { TerminalKey: TERMINAL, Amount: '100', OrderId: 'persist-1', PaymentRecipientId: DEFAULT_RECIPIENT };
+      savedPaymentId = JSON.parse((await request(port1, 'POST', '/v2/Init', { ...payload, Token: tokenOf(payload) }, { 'X-Mock-Sandbox': 'persist-a' })).body).PaymentId;
+      await sleep(300); // реестр песочниц пишется атомарно с debounce
+    } finally {
+      child1.stop();
+    }
+    await sleep(300);
+
+    const child2 = startChild({ MOCK_STATE_FILE: stateFile });
+    const port2 = await child2.port;
+    try {
+      const restored = JSON.parse((await request(port2, 'GET', '/mock/state?sandbox=persist-a')).body);
+      assert.ok(restored.state.state.payments[savedPaymentId], 'состояние именованной песочницы восстанавливается после рестарта');
+      const def = JSON.parse((await request(port2, 'GET', '/mock/state')).body);
+      assert.ok(!def.state.state.payments[savedPaymentId], 'чужой state не приписывается default (F-14)');
+      // F-15: после рестарта ссылочные индексы пересобраны — новый Init не падает,
+      // а поиск по OrderId находит и восстановленный снимком платёж.
+      const payload2 = { TerminalKey: TERMINAL, Amount: '100', OrderId: 'persist-2', PaymentRecipientId: DEFAULT_RECIPIENT };
+      const init2 = JSON.parse((await request(port2, 'POST', '/v2/Init', { ...payload2, Token: tokenOf(payload2) }, { 'X-Mock-Sandbox': 'persist-a' })).body);
+      assert.strictEqual(init2.Success, true, `Init после рестарта: ${JSON.stringify(init2).slice(0, 160)}`);
+      const ref = { TerminalKey: TERMINAL, OrderId: 'persist-1' };
+      const found = JSON.parse((await request(port2, 'POST', '/v2/GetState', { ...ref, Token: tokenOf(ref) }, { 'X-Mock-Sandbox': 'persist-a' })).body);
+      assert.strictEqual(found.PaymentId, savedPaymentId, 'GetState по OrderId находит платёж из восстановленного снимка (F-15)');
+    } finally {
+      child2.stop();
+    }
+
+    const child3 = startChild({ MOCK_TENANCY: '1', MOCK_SANDBOX_TTL_MS: '800', MOCK_SANDBOX_SWEEP_MS: '1000' });
+    const port3 = await child3.port;
+    try {
+      const created = JSON.parse((await request(port3, 'POST', '/sandboxes', {})).body);
+      const before = await request(port3, 'GET', '/mock/state', undefined, { 'X-Mock-Sandbox': created.id, Authorization: `Bearer ${created.ownerToken}` });
+      assert.strictEqual(before.statusCode, 200, 'до TTL песочница доступна');
+      await sleep(2300);
+      const after = await request(port3, 'GET', '/mock/state', undefined, { 'X-Mock-Sandbox': created.id, Authorization: `Bearer ${created.ownerToken}` });
+      assert.ok([404, 410].includes(after.statusCode), `после TTL песочница недоступна (получено ${after.statusCode})`);
+    } finally {
+      child3.stop();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
+
+  // 46. F-15: квота документов песочницы (hosted-лимит на объём state)
+  {
+    const child = startChild({ MOCK_SANDBOX_MAX_DOCUMENTS: '2' });
+    const childPort = await child.port;
+    try {
+      const mk = (orderId) => {
+        const payload = { TerminalKey: TERMINAL, Amount: '100', OrderId: orderId, PaymentRecipientId: DEFAULT_RECIPIENT };
+        return request(childPort, 'POST', '/v2/Init', { ...payload, Token: tokenOf(payload) }, { 'X-Mock-Sandbox': 'quota-a' });
+      };
+      assert.strictEqual(JSON.parse((await mk('quota-1')).body).Success, true, 'первый документ проходит');
+      assert.strictEqual(JSON.parse((await mk('quota-2')).body).Success, true, 'второй документ проходит (лимит 2)');
+      const third = JSON.parse((await mk('quota-3')).body);
+      assert.strictEqual(third.Success, false, 'третий документ отклоняется квотой');
+      assert.strictEqual(third.ErrorCode, '7');
+      assert.ok(String(third.Message).includes('Лимит документов песочницы'), `DX должен называть квоту: ${third.Message}`);
+    } finally {
+      child.stop();
+    }
+  }
+
+  // 47. F-15: снимок без ссылочных индексов (state-файл до их появления) не
+  // ломает создание и поиск по OrderId — индексы пересобираются из state
+  {
+    const child = startChild({});
+    const childPort = await child.port;
+    const inSandbox = { 'X-Mock-Sandbox': 'idx-a' };
+    const init = (orderId) => {
+      const payload = { TerminalKey: TERMINAL, Amount: '100', OrderId: orderId, PaymentRecipientId: DEFAULT_RECIPIENT };
+      return request(childPort, 'POST', '/v2/Init', { ...payload, Token: tokenOf(payload) }, inSandbox);
+    };
+    try {
+      const first = JSON.parse((await init('idx-1')).body);
+      assert.strictEqual(first.Success, true, 'платёж в песочнице idx-a создан');
+      // «старый» снимок: как state-файл до появления orderIndex/dealIndex
+      const exported = JSON.parse((await request(childPort, 'GET', '/mock/state?sandbox=idx-a')).body);
+      const legacy = exported.state.state;
+      delete legacy.orderIndex;
+      delete legacy.dealIndex;
+      const imported = await request(childPort, 'POST', '/mock/state', { sandbox: 'idx-a', state: legacy }, inSandbox);
+      assert.strictEqual(imported.statusCode, 200, `импорт снимка без индексов: ${imported.body}`);
+      const second = JSON.parse((await init('idx-2')).body);
+      assert.strictEqual(second.Success, true, `Init после импорта без индексов: ${JSON.stringify(second).slice(0, 160)}`);
+      for (const [orderId, paymentId] of [['idx-1', first.PaymentId], ['idx-2', second.PaymentId]]) {
+        const ref = { TerminalKey: TERMINAL, OrderId: orderId };
+        const found = JSON.parse((await request(childPort, 'POST', '/v2/GetState', { ...ref, Token: tokenOf(ref) }, inSandbox)).body);
+        assert.strictEqual(found.PaymentId, paymentId, `GetState по OrderId «${orderId}» после импорта`);
+      }
+      const check = { TerminalKey: TERMINAL, OrderId: 'idx-1' };
+      const orders = JSON.parse((await request(childPort, 'POST', '/v2/CheckOrder', { ...check, Token: tokenOf(check) }, inSandbox)).body);
+      assert.strictEqual((orders.Payments || []).length, 1, 'CheckOrder по OrderId работает после импорта');
+    } finally {
+      child.stop();
+    }
   }
 
   console.log(`selftest: ${WEBHOOK_HITS.length} webhook deliveries, ${Object.keys(state.payments).length} payment sessions`);

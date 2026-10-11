@@ -9,6 +9,10 @@
  *   2. Т-Банк: Init -> форма оплаты -> Confirm -> Chargeback (DISPUTED -> REPRESENTMENT -> ARBITRATION -> WON) -> виртуальные часы /mock/time -> /admin/journal
  *   3. Ferma (54-ФЗ): getToken -> sell (предоплата с расчётным НДС vat20_120) -> sell (зачёт предоплаты) -> buy (расход) -> маркировка -> очередь ОФД -> печать с ускорением через /mock/time -> /receipts/:uuid
  *
+ * F-33: прогон выполняется в одноразовой песочнице (X-Mock-Sandbox, в hosted —
+ * через POST /sandboxes с owner-token) и убирает её в finally, чтобы повторные
+ * запуски на persistent volume оставляли одинаковые базовые counts.
+ *
  * Zero dependencies. Запуск:
  *   node scripts/compose-selftest.js
  */
@@ -23,6 +27,27 @@ const TERMINAL_KEY = process.env.MOCK_TERMINAL_KEY || 'TBANKMOCKTEST';
 const TERMINAL_PASSWORD = process.env.MOCK_TERMINAL_PASSWORD || 'mockpass123';
 const FERMA_LOGIN = process.env.MOCK_FERMA_LOGIN || 'loviitest';
 const FERMA_PASSWORD = process.env.MOCK_FERMA_PASSWORD || 'mockpass123';
+
+/*
+ * F-33 (RFC-001 §8): прогон идёт в одноразовой песочнице, чтобы не накапливать
+ * платежи/чеки в default-состоянии стенда и не сдвигать его виртуальные часы.
+ *   • namespaces (дефолт self-hosted): достаточно селектора X-Mock-Sandbox;
+ *   • owned (MOCK_TENANCY/MOCK_HOSTED): POST /sandboxes выдаёт owner-token и креды;
+ *   • off: селектор игнорируется, проверка неизменности счётчиков пропускается.
+ */
+const SANDBOX_ID = (process.env.MOCK_SANDBOX_ID
+  || `cmp-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`)
+  .replace(/[^a-zA-Z0-9_.-]/g, '');
+const SANDBOX = {
+  [TBANK_BASE]: { id: SANDBOX_ID, token: '', creds: null },
+  [KASSA_BASE]: { id: SANDBOX_ID, token: '', creds: null },
+};
+
+/** Заголовки песочницы прогона; вызов может переопределить их (например, default). */
+function sandboxHeaders(baseUrl) {
+  const sbx = SANDBOX[baseUrl] || { id: SANDBOX_ID };
+  return { 'X-Mock-Sandbox': sbx.id, ...(sbx.token ? { 'X-Sandbox-Token': sbx.token } : {}) };
+}
 
 let passed = 0;
 let failed = 0;
@@ -45,7 +70,8 @@ function tokenOf(payload) {
     if (typeof value === 'object') continue;
     values.push([key, typeof value === 'boolean' ? (value ? 'true' : 'false') : String(value)]);
   }
-  values.push(['Password', TERMINAL_PASSWORD]);
+  const sbxCreds = SANDBOX[TBANK_BASE].creds || {};
+  values.push(['Password', sbxCreds.terminalPassword || TERMINAL_PASSWORD]);
   values.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return crypto.createHash('sha256').update(values.map(([, v]) => v).join('')).digest('hex');
 }
@@ -65,6 +91,7 @@ function httpReq(baseUrl, method, pathUrl, body = null, headers = {}) {
           'Content-Type': isRawString ? 'application/x-www-form-urlencoded' : 'application/json',
           'Content-Length': Buffer.byteLength(data),
         } : {}),
+        ...sandboxHeaders(baseUrl),
         ...headers,
       },
       timeout: 8000,
@@ -86,15 +113,55 @@ function httpReq(baseUrl, method, pathUrl, body = null, headers = {}) {
 }
 
 function tbankApi(method, body, headers = {}) {
-  const payload = { TerminalKey: TERMINAL_KEY, ...body };
+  const sbxCreds = SANDBOX[TBANK_BASE].creds || {};
+  const payload = { TerminalKey: sbxCreds.terminalKey || TERMINAL_KEY, ...body };
   return httpReq(TBANK_BASE, 'POST', `/v2/${method}`, { ...payload, Token: tokenOf(payload) }, headers);
 }
 
-async function main() {
-  console.log(`\n== compose black-box selftest (${TBANK_BASE} & ${KASSA_BASE}) ==\n`);
+/** Выделение песочницы прогона: в owned — POST /sandboxes, в namespaces — селектор. */
+async function provisionSandboxes() {
+  for (const base of [TBANK_BASE, KASSA_BASE]) {
+    const slot = SANDBOX[base];
+    try {
+      const r = await httpReq(base, 'POST', '/sandboxes', { sandbox: slot.id }, { 'X-Mock-Sandbox': 'default' });
+      const j = r.json();
+      if (j && j.ownerToken) {
+        slot.token = j.ownerToken;
+        slot.id = j.id || slot.id;
+      }
+      if (j && j.creds) slot.creds = j.creds;
+      if (j && j.current) slot.id = j.current;
+      if (j && j.ok && !j.ownerToken) {
+        // namespaces: POST переключил активную песочницу стенда — возвращаем default,
+        // чтобы прогон не влиял на немаркированные запросы.
+        await httpReq(base, 'POST', '/sandboxes', { sandbox: 'default' }, { 'X-Mock-Sandbox': 'default' });
+      }
+    } catch (e) {
+      console.warn(`  ! песочница на ${base} не выделена: ${e.message}`);
+    }
+  }
+}
 
-  const runId = `cmp-${Date.now()}`;
+/** Уборка: clock платформы, удаление песочницы и fallback-сброс (F-33, finally). */
+async function cleanupSandboxes() {
+  for (const base of [TBANK_BASE, KASSA_BASE]) {
+    const slot = SANDBOX[base];
+    const headers = sandboxHeaders(base);
+    try {
+      await httpReq(base, 'POST', '/mock/time', { reset: true }, headers);
+    } catch { /* виртуальные часы не критичны для уборки */ }
+    let removed = false;
+    try {
+      removed = (await httpReq(base, 'DELETE', `/mock/sandboxes?sandbox=${encodeURIComponent(slot.id)}`, null, headers)).status === 200;
+    } catch { /* ignore */ }
+    if (!removed) {
+      try { await httpReq(base, 'POST', '/mock/reset', {}, headers); } catch { /* ignore */ }
+      console.warn(`  ! песочница ${slot.id} на ${base} не удалена — состояние сброшено`);
+    }
+  }
+}
 
+async function scenario(runId) {
   // 1. Healthchecks + OpenAPI 3.1.0
   const hBank = await httpReq(TBANK_BASE, 'GET', '/health');
   check('tbank-mock /health === 200 ok', hBank.status === 200 && hBank.json() && hBank.json().ok === true);
@@ -138,7 +205,11 @@ async function main() {
   check('tbank Chargeback -> WON (возврат в CONFIRMED, сумма восстановлена)', cbWin && cbWin.DisputeStatus === 'WON' && cbWin.Status === 'CONFIRMED' && cbWin.NewAmount === 180000);
 
   // 3. Касса Ferma: getToken -> предоплата -> зачёт -> расход -> маркировка -> ОФД
-  const tokRes = (await httpReq(KASSA_BASE, 'POST', '/possystem/v1/getToken', { login: FERMA_LOGIN, pass: FERMA_PASSWORD })).json();
+  const kassaCreds = SANDBOX[KASSA_BASE].creds || {};
+  const tokRes = (await httpReq(KASSA_BASE, 'POST', '/possystem/v1/getToken', {
+    login: kassaCreds.fermaLogin || FERMA_LOGIN,
+    pass: kassaCreds.fermaPassword || FERMA_PASSWORD,
+  })).json();
   const token = tokRes && tokRes.token;
   check('kassa getToken выдаёт токен', Boolean(token));
 
@@ -198,11 +269,42 @@ async function main() {
   const fullRepAfterFlush = (await httpReq(KASSA_BASE, 'GET', `/possystem/v1/Main/report/${fullPay.uuid}?token=${token}`)).json();
   check('kassa очередь ОФД отправлена -> ofd_status=sent', fullRepAfterFlush && fullRepAfterFlush.ofd_status === 'sent');
 
-  const receiptHtml = await httpReq(KASSA_BASE, 'GET', `/receipts/${fullPay.uuid}`);
+  const receiptHtml = await httpReq(KASSA_BASE, 'GET', `/receipts/${fullPay.uuid}?sandbox=${encodeURIComponent(SANDBOX[KASSA_BASE].id)}`, null, { 'X-Mock-Sandbox': SANDBOX[KASSA_BASE].id });
   check('kassa страница чека /receipts/:uuid отдаёт 200 и [М]', receiptHtml.status === 200 && receiptHtml.text.includes('[М]'));
 
-  // Сбрасываем виртуальные часы кассы обратно
+  // Сбрасываем виртуальные часы кассы обратно (в песочнице прогона)
   await httpReq(KASSA_BASE, 'POST', '/mock/time', { reset: true });
+}
+
+async function main() {
+  console.log(`\n== compose black-box selftest (${TBANK_BASE} & ${KASSA_BASE}) ==\n`);
+  console.log(`  · одноразовая песочница прогона: ${SANDBOX_ID}`);
+
+  // Базовая линия default-состояния: прогон не должен её изменить (два запуска
+  // подряд оставляют одинаковые counts даже при ошибке в середине — уборка в finally).
+  const BANK_KEYS = ['payments', 'deals', 'payouts', 'disputes', 'shops'];
+  const bankCounts = (j) => BANK_KEYS.map((k) => `${k}=${j[k]}`).join(',');
+  const kassaCounts = (j) => `checks=${j.checks},ofdQueue=${j.ofdQueueCount},fnUsed=${j.fnUsed},shift=${j.shiftStatus}`;
+  const beforeBank = (await httpReq(TBANK_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
+  const beforeKassa = (await httpReq(KASSA_BASE, 'GET', '/healthz?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
+
+  await provisionSandboxes();
+  try {
+    await scenario(`cmp-${Date.now()}`);
+  } finally {
+    await cleanupSandboxes();
+  }
+
+  const afterBank = (await httpReq(TBANK_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
+  const afterKassa = (await httpReq(KASSA_BASE, 'GET', '/healthz?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
+  if (beforeBank.tenancy && beforeBank.tenancy !== 'off') {
+    check('tbank: прогон не изменил default-счётчики (F-33)', bankCounts(beforeBank) === bankCounts(afterBank),
+      `${bankCounts(beforeBank)} -> ${bankCounts(afterBank)}`);
+  }
+  if (beforeKassa.tenancy && beforeKassa.tenancy !== 'off') {
+    check('kassa: прогон не изменил default-счётчики (F-33)', kassaCounts(beforeKassa) === kassaCounts(afterKassa),
+      `${kassaCounts(beforeKassa)} -> ${kassaCounts(afterKassa)}`);
+  }
 
   console.log(`\nИТОГ compose-selftest: ${passed} passed, ${failed} failed\n`);
   assert.strictEqual(failed, 0, `${failed} checks failed`);
