@@ -1,3 +1,5 @@
+// © 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 'use strict';
 
 /*
@@ -479,8 +481,9 @@ async function phaseRestart() {
       receipts: { service: { callback_url: `http://127.0.0.1:${catchPort}/fail` } },
     },
   })).json();
-  await sleep(1200);
+  await sleep(1300);
   check('MOCK_PROCESS_MS=0: чек печатается сразу', (await api('GET', `/possystem/v1/Main/report/${doc.uuid}?token=${tok}`)).json().status === 'done');
+  for (let i = 0; i < 40 && hits.fail < 1; i += 1) await sleep(100); // первая callback-попытка — на следующем секундном тике (фиксированный sleep 1200 мс был гонкой)
   const hitsBefore = hits.fail;
   check('незавершённый callback ретраится до рестарта', hitsBefore >= 1);
   child.kill('SIGKILL');

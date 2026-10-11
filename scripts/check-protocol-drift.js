@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// © 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 'use strict';
 
 /**

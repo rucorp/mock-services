@@ -1,3 +1,6 @@
+# © 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
+#
 # Внешний compose-файл мок-контура (банк + касса) для подключения в приложение-потребитель
 # (например, lovii-core на dev-стенде и staging).
 #
@@ -27,7 +30,7 @@ services:
       MOCK_HOST: "0.0.0.0"
       MOCK_PORT: "3100"
       MOCK_HEALTH_PATH: "/health"
-      MOCK_PROFILE: "${MOCK_TBANK_PROFILE:-multisplit}"
+      MOCK_PROFILE: "${MOCK_TBANK_PROFILE:-plain}"
       MOCK_TERMINAL_KEY: "${MOCK_TERMINAL_KEY:-${TBANK_TERMINAL_KEY:-TBANKMOCKTEST}}"
       MOCK_TERMINAL_PASSWORD: "${MOCK_TERMINAL_PASSWORD:-${TBANK_TERMINAL_PASSWORD:-mockpass123}}"
       MOCK_PUBLIC_BASE_URL: "${MOCK_TBANK_PUBLIC_BASE_URL:-${MOCK_PUBLIC_BASE_URL:-http://localhost:3100}}"
