@@ -314,6 +314,163 @@ process.env.MOCK_RETRY_MS = '1000';
     } finally { plainProc.kill(); }
   }
 
+  /* --- Этап 6–7 (бриф 2026-10-11): чарджбэки e2e, сценарии, виртуальные часы, e2c/AV --- */
+
+  // Helper to call /v2/* with custom headers
+  const apiWithHeaders = (p, method, body, headers = {}) => {
+    const payload = { TerminalKey: TERMINAL, ...body };
+    return request(p, 'POST', `/v2/${method}`, { ...payload, Token: tokenOf(payload) }, headers);
+  };
+
+  // 26. Чарджбэк end-to-end (T-024): DISPUTED -> REPRESENTMENT -> ARBITRATION -> WON / LOST
+  {
+    const cbInit = JSON.parse((await api(mockPort, 'Init', {
+      Amount: '200000', OrderId: 'order-cb-1', CreateDealWithType: 'NN', PayType: 'O',
+      NotificationURL: notificationUrl, SuccessURL: successUrl, FailURL: failUrl,
+    })).body);
+    await request(mockPort, 'POST', `/payment/${cbInit.PaymentId}/pay`, 'pan=2201382000000013&exp=1227&cvv=123', { 'Content-Type': 'application/x-www-form-urlencoded' });
+    await waitNotification((h) => h.json.Status === 'CONFIRMED' && h.json.PaymentId === cbInit.PaymentId);
+
+    // Негатив: нельзя уйти в ARBITRATION до открытия спора -> код 32 / 8
+    const earlyArb = JSON.parse((await api(mockPort, 'Chargeback', { PaymentId: cbInit.PaymentId, Action: 'arbitration' })).body);
+    assert.strictEqual(earlyArb.Success, false, 'арбитраж без спора должен отклоняться');
+
+    // Негатив: чарджбэк сверх суммы платежа -> код 7
+    const overCb = JSON.parse((await api(mockPort, 'Chargeback', { PaymentId: cbInit.PaymentId, Amount: '500000' })).body);
+    assert.strictEqual(overCb.ErrorCode, '7', 'чарджбэк сверх суммы платежа -> 7');
+
+    // Шаг 1: Открытие частичного чарджбэка (DISPUTED -> PARTIAL_CHARGEBACK)
+    const openCb = JSON.parse((await api(mockPort, 'Chargeback', {
+      PaymentId: cbInit.PaymentId, Amount: '80000', ReasonCode: '4853',
+    })).body);
+    assert.strictEqual(openCb.Success, true, JSON.stringify(openCb));
+    assert.strictEqual(openCb.Status, 'PARTIAL_CHARGEBACK');
+    assert.strictEqual(openCb.DisputeStatus, 'DISPUTED');
+    assert.strictEqual(openCb.NewAmount, 120000);
+    const disputeId = openCb.DisputeId;
+    assert.ok(disputeId && disputeId.startsWith('DSP-'), 'должен вернуться DisputeId');
+
+    const dispNotif = await waitNotification((h) => h.json.DisputeId === disputeId && h.json.DisputeStatus === 'DISPUTED');
+    assert.strictEqual(dispNotif.json.Status, 'PARTIAL_CHARGEBACK');
+    assert.strictEqual(dispNotif.json.Token, tokenOf({ ...dispNotif.json, Token: undefined }), 'Token нотификации чарджбэка должен быть валидным');
+
+    // Негатив: нельзя перейти сразу в ARBITRATION из DISPUTED (минуя REPRESENTMENT) -> код 32
+    const skipRep = JSON.parse((await api(mockPort, 'Chargeback', { DisputeId: disputeId, Action: 'arbitration' })).body);
+    assert.strictEqual(skipRep.ErrorCode, '32', 'переход DISPUTED -> ARBITRATION без REPRESENTMENT запрещён (код 32)');
+
+    // Шаг 2: Representment (оспаривание мерчантом с номером ФД 54-ФЗ)
+    const repCb = JSON.parse((await api(mockPort, 'Chargeback', {
+      DisputeId: disputeId, Action: 'representment', FiscalDocumentNumber: '50015', Comment: 'Чек 54-ФЗ и акт выдачи',
+    })).body);
+    assert.strictEqual(repCb.DisputeStatus, 'REPRESENTMENT');
+    await waitNotification((h) => h.json.DisputeId === disputeId && h.json.DisputeStatus === 'REPRESENTMENT');
+
+    // Шаг 3: Arbitration (передача в арбитраж)
+    const arbCb = JSON.parse((await api(mockPort, 'Chargeback', { DisputeId: disputeId, Action: 'arbitration' })).body);
+    assert.strictEqual(arbCb.DisputeStatus, 'ARBITRATION');
+    await waitNotification((h) => h.json.DisputeId === disputeId && h.json.DisputeStatus === 'ARBITRATION');
+
+    // Шаг 4: Резолюция WON (мерчант выиграл спор -> сумма возвращена, статус платежа снова CONFIRMED)
+    const winCb = JSON.parse((await api(mockPort, 'Chargeback', { DisputeId: disputeId, Action: 'resolve', Outcome: 'WON' })).body);
+    assert.strictEqual(winCb.DisputeStatus, 'WON');
+    assert.strictEqual(winCb.Status, 'CONFIRMED');
+    assert.strictEqual(winCb.NewAmount, 200000);
+    await waitNotification((h) => h.json.DisputeId === disputeId && h.json.DisputeStatus === 'WON');
+
+    // Повторное открытие спора и проигрыш (LOST -> финальный CHARGEBACK)
+    const openCb2 = JSON.parse((await api(mockPort, 'Chargeback', { PaymentId: cbInit.PaymentId })).body);
+    assert.strictEqual(openCb2.DisputeStatus, 'DISPUTED');
+    const loseCb = JSON.parse((await api(mockPort, 'Chargeback', { DisputeId: openCb2.DisputeId, Action: 'lose' })).body);
+    assert.strictEqual(loseCb.DisputeStatus, 'LOST');
+    assert.strictEqual(loseCb.Status, 'CHARGEBACK');
+    assert.strictEqual(loseCb.NewAmount, 0);
+  }
+
+  // 27. Сценарное API + виртуальные часы:
+  //   - «вебхук не пришёл» (X-Mock-Scenario: webhook-drop)
+  //   - «возврат частичный» (X-Mock-Scenario: partial-refund:30%)
+  //   - «чарджбэк через 7 дней» (X-Mock-Scenario: chargeback-after:7d + сдвиг /mock/time на 7d)
+  //   - «авто-подтверждение холда через 7 дней» и «авто-отмена через 60 дней»
+  {
+    // 27a. webhook-drop + partial-refund:25%
+    const dropInit = JSON.parse((await apiWithHeaders(mockPort, 'Init', {
+      Amount: '100000', OrderId: 'order-sc-drop', CreateDealWithType: 'NN', PayType: 'O',
+      NotificationURL: notificationUrl,
+    }, { 'X-Mock-Scenario': 'webhook-drop' })).body);
+    await request(mockPort, 'POST', `/payment/${dropInit.PaymentId}/pay`, 'pan=2201382000000013&exp=1227&cvv=123', { 'Content-Type': 'application/x-www-form-urlencoded' });
+    await sleep(1200);
+    assert.ok(!WEBHOOK_HITS.some((h) => h.json.PaymentId === dropInit.PaymentId), 'при webhook-drop вебхук не должен приходить');
+    const dropState = JSON.parse((await api(mockPort, 'GetState', { PaymentId: dropInit.PaymentId })).body);
+    assert.strictEqual(dropState.Status, 'CONFIRMED', 'при webhook-drop сам платёж в банке проведён (GetState=CONFIRMED)');
+
+    // Частичный возврат через X-Mock-Scenario: partial-refund:25% (без передачи Amount в теле Cancel)
+    const partCancel = JSON.parse((await apiWithHeaders(mockPort, 'Cancel', {
+      PaymentId: dropInit.PaymentId,
+    }, { 'X-Mock-Scenario': 'partial-refund:25%' })).body);
+    assert.strictEqual(partCancel.Status, 'PARTIAL_REFUNDED');
+    assert.strictEqual(partCancel.NewAmount, 75000, 'partial-refund:25% должен вернуть 25000 из 100000');
+
+    // 27b. chargeback-after:7d + авто-подтверждение холда (AUTHORIZED -> CONFIRMED через 7d) + авто-отмена (NEW -> DEADLINE_EXPIRED через 60d)
+    const hold7d = JSON.parse((await api(mockPort, 'Init', {
+      Amount: '90000', OrderId: 'order-hold-7d', CreateDealWithType: 'NN', PayType: 'T',
+      NotificationURL: notificationUrl,
+    })).body);
+    await request(mockPort, 'POST', `/payment/${hold7d.PaymentId}/pay`, 'pan=2201382000000013&exp=1227&cvv=123', { 'Content-Type': 'application/x-www-form-urlencoded' });
+    assert.strictEqual(state.payments[hold7d.PaymentId].status, 'AUTHORIZED');
+
+    const cbAfter7d = JSON.parse((await apiWithHeaders(mockPort, 'Init', {
+      Amount: '110000', OrderId: 'order-cbafter-7d', CreateDealWithType: 'NN', PayType: 'O',
+      NotificationURL: notificationUrl,
+    }, { 'X-Mock-Scenario': 'chargeback-after:7d' })).body);
+    await request(mockPort, 'POST', `/payment/${cbAfter7d.PaymentId}/pay`, 'pan=2201382000000013&exp=1227&cvv=123', { 'Content-Type': 'application/x-www-form-urlencoded' });
+    assert.strictEqual(state.payments[cbAfter7d.PaymentId].status, 'CONFIRMED');
+
+    const abandonedOrder = JSON.parse((await api(mockPort, 'Init', {
+      Amount: '50000', OrderId: 'order-abandoned-60d', CreateDealWithType: 'NN', PayType: 'T',
+    })).body);
+    assert.strictEqual(state.payments[abandonedOrder.PaymentId].status, 'NEW');
+
+    // Сдвигаем виртуальные часы на +7 дней
+    const t7 = JSON.parse((await request(mockPort, 'POST', '/mock/time', { advance: '7d' })).body);
+    assert.ok(t7.offsetMs >= 7 * 86400000, 'виртуальные часы сдвинуты на 7d');
+    assert.strictEqual(state.payments[hold7d.PaymentId].status, 'CONFIRMED', 'холд через 7d должен авто-подтвердиться банком');
+    assert.strictEqual(state.payments[cbAfter7d.PaymentId].status, 'CHARGEBACK', 'платёж с chargeback-after:7d через 7d должен перейти в CHARGEBACK');
+
+    // Сдвигаем виртуальные часы ещё на +60 дней -> брошенный заказ истекает, незакрытая сделка рефандится
+    await request(mockPort, 'POST', '/mock/time', { advance: '60d' });
+    assert.strictEqual(state.payments[abandonedOrder.PaymentId].status, 'DEADLINE_EXPIRED', 'неоплаченный заказ через 60d -> DEADLINE_EXPIRED');
+
+    // Сброс виртуальных часов
+    await request(mockPort, 'POST', '/mock/time', { reset: true });
+  }
+
+  // 28. Покрытие /e2c/v2/* и /av/v1/* (рекомендация аудита A-22)
+  {
+    const e2cInitPayload = { TerminalKey: TERMINAL, Amount: '45000', OrderId: 'payout-1', CustomerKey: 'merch-1' };
+    const e2cInit = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Init', { ...e2cInitPayload, Token: tokenOf(e2cInitPayload) })).body);
+    assert.strictEqual(e2cInit.Success, true);
+    assert.strictEqual(e2cInit.Status, 'NEW');
+
+    const e2cPayPayload = { TerminalKey: TERMINAL, PaymentId: e2cInit.PaymentId };
+    const e2cPay = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/Payment', { ...e2cPayPayload, Token: tokenOf(e2cPayPayload) })).body);
+    assert.strictEqual(e2cPay.Status, 'CONFIRMED');
+
+    const e2cState = JSON.parse((await request(mockPort, 'POST', '/e2c/v2/GetState', { ...e2cPayPayload, Token: tokenOf(e2cPayPayload) })).body);
+    assert.strictEqual(e2cState.Status, 'CONFIRMED');
+    assert.strictEqual(e2cState.Amount, 45000);
+
+    const avVerifPayload = { TerminalKey: TERMINAL, VerificationCode: 'VER-777', Amount: '100', Account: '40702810000000000001' };
+    const avVerif = JSON.parse((await request(mockPort, 'POST', '/av/v1/verification', { ...avVerifPayload, Token: tokenOf(avVerifPayload) })).body);
+    assert.strictEqual(avVerif.Success, true);
+    assert.strictEqual(avVerif.Status, 'RETURNED');
+
+    const avPayPayload = { TerminalKey: TERMINAL, VerificationCode: 'VER-777', Amount: '100', PayerInn: '7801111111', PayerName: 'ООО Тест', NotificationURL: notificationUrl };
+    const avPay = JSON.parse((await request(mockPort, 'POST', '/av/v1/payment', { ...avPayPayload, Token: tokenOf(avPayPayload) })).body);
+    assert.strictEqual(avPay.Success, true);
+    assert.strictEqual(avPay.Status, 'RECEIVED');
+    await waitNotification((h) => h.json.Type === 'INCOMING' && h.json.VerificationCode === 'VER-777');
+  }
+
   console.log(`selftest: ${WEBHOOK_HITS.length} webhook deliveries, ${Object.keys(state.payments).length} payment sessions`);
   console.log('SELFTEST PASSED ✅');
   process.exit(0);

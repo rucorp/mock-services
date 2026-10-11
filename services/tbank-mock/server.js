@@ -1,23 +1,28 @@
 'use strict';
 
 /*
- * T-Bank Multisplit mock stand (wave 1: payments + notifications).
+ * T-Bank EACQ / Multisplit mock stand.
  *
- * Emulates the bank side of the EACQ Multisplit contract without the bank's
- * test contour: /v2/{Init,Confirm,Cancel,GetState,CheckOrder}, the hosted
- * payment form with test-card scenarios (PAN-driven), signed http
- * notifications to the merchant webhook with the bank retry policy, a deal
- * book (SpAccumulation) and a text admin console at /admin.
+ * Emulates the bank side of the EACQ & Multisplit contract without the bank's
+ * test contour:
+ *   - /v2/{Init,Confirm,Cancel,GetState,CheckOrder,Chargeback,Dispute}
+ *   - /e2c/v2/{Init,Payment,GetState}
+ *   - /av/v1/{payment,verification}
+ *   - /mock/time (GET/POST/PUT) — virtual clock (MOCK_VIRTUAL_CLOCK)
+ *   - /mock/scenarios (GET/POST/DELETE) — scenario API + trigger history
+ *   - Hosted payment form with test-card scenarios (PAN-driven)
+ *   - Signed HTTP notifications with bank retry policy
+ *   - End-to-end chargeback state machine: DISPUTED -> REPRESENTMENT -> ARBITRATION -> WON|LOST
  *
  * Zero npm dependencies. Config via environment, see README.md in this dir.
- * Secrets are fake by definition; never expose this service publicly.
+ * Secrets are fake by definition; never expose this service publicly without protection.
  */
 
 const http = require('http');
 const crypto = require('crypto');
 
 const core = require('../../packages/core');
-const { readBody, parseBody, send, sendJson, html, escapeHtml } = core;
+const { readBody, parseBody, send, sendJson, html, escapeHtml, checkAdminAuth } = core;
 const log = core.createLog('tbank-mock');
 // Журнал входящих запросов: интегратору видно в /admin/journal, как мок понял
 // запрос и что ответил (спека §2 — «журнал запросов»).
@@ -40,6 +45,8 @@ const {
   MOCK_PROFILE = 'plain',
   MOCK_ALLOW_DUPLICATE_ORDER_ID = 'false',
   MOCK_BLOCK_PRIVATE_WEBHOOKS = 'false',
+  MOCK_VIRTUAL_CLOCK = '',
+  MOCK_ADMIN_TOKEN = '',
 } = process.env;
 
 const TERMINAL_KEY = MOCK_TERMINAL_KEY || TBANK_TERMINAL_KEY || 'TBANKMOCKTEST';
@@ -47,16 +54,16 @@ const TERMINAL_PASSWORD = MOCK_TERMINAL_PASSWORD || TBANK_TERMINAL_PASSWORD || '
 const RETRY_MS = Math.max(1000, parseInt(MOCK_RETRY_MS, 10) || 60000);
 const MAX_ATTEMPTS = Math.max(1, parseInt(MOCK_MAX_ATTEMPTS, 10) || 24);
 const STRICT_TOKEN = String(MOCK_STRICT_TOKEN).toLowerCase() !== 'false';
-// Bank auto-confirms holds after 4-7 days; here it is accelerated to N ms
-// (0 = disabled, confirm via admin console button instead).
+// Bank auto-confirms holds after 4-7 days; here it can be accelerated via
+// MOCK_AUTO_CONFIRM_MS or tested via virtual clock (/mock/time +7d).
 const AUTO_CONFIRM_MS = Math.max(0, parseInt(MOCK_AUTO_CONFIRM_MS, 10) || 0);
+const HOLD_AUTO_CONFIRM_VIRTUAL_MS = 7 * 24 * 60 * 60 * 1000; // 7 дней по правилам банка
+const DEAL_AUTO_CANCEL_VIRTUAL_MS = 60 * 24 * 60 * 60 * 1000; // 60 дней по правилам банка
+const TDS_TIMEOUT_VIRTUAL_MS = 36 * 60 * 60 * 1000;           // 36 часов для 3DS_CHECKING
 const ALLOW_DUPLICATE_ORDER_ID = String(MOCK_ALLOW_DUPLICATE_ORDER_ID).toLowerCase() === 'true';
 // Провайдеро-нейтральность (аудит §3.1): plain — обычный эквайринг (дефолт,
-// 99% интеграций), multisplit — профиль Lovii со сделками. В plain мульти-
-// расчётные поля игнорируются, как незнакомые реальному банку без Мультирасчетов.
+// 99% интеграций), multisplit — профиль Lovii со сделками.
 const PROFILE = String(MOCK_PROFILE).toLowerCase() === 'multisplit' ? 'multisplit' : 'plain';
-// Для публичного стенда включайте принудительно: иначе мок становится
-// SSRF-прокси (NotificationURL задаёт интегратор).
 const BLOCK_PRIVATE_WEBHOOKS = String(MOCK_BLOCK_PRIVATE_WEBHOOKS).toLowerCase() === 'true';
 
 /* ------------------------------------------------------------------ store */
@@ -67,25 +74,37 @@ const restore = store.restore;
 const { state } = store;
 
 Object.assign(state, {
-  // База счётчика платежей из времени старта: состояние в памяти, и после
-  // рестарта контейнера счётчик с фиксированной базой начинал выдавать уже
-  // использованные id (unique violation в payments.provider_payment_id).
-  // Date.now()-база делает id уникальными для любого времени жизни процесса.
-  counters: state.counters || { paymentId: Date.now(), dealId: 50000, cardId: 80000, notificationId: 1, verificationId: 7000000, incomingId: 1, payoutId: 900000 },
-  payments: state.payments || {},   // paymentId -> payment
-  deals: state.deals || {},         // spAccumulationId -> deal
-  verifications: state.verifications || {}, // verificationId -> account verification round-trip
-  incoming: state.incoming || {},   // incomingId -> поступление на спец-счёт (VER-платёж МСП)
-  notifications: state.notifications || {}, // notificationId -> {payload, paymentId, attempts, nextAttemptAt, lastStatus, lastBody, dumped}
+  counters: state.counters || {
+    paymentId: Date.now(),
+    dealId: 50000,
+    cardId: 80000,
+    notificationId: 1,
+    verificationId: 7000000,
+    incomingId: 1,
+    payoutId: 900000,
+    disputeId: 30000,
+  },
+  payments: state.payments || {},             // paymentId -> payment
+  deals: state.deals || {},                   // spAccumulationId -> deal
+  verifications: state.verifications || {},   // verificationId -> account verification round-trip
+  incoming: state.incoming || {},             // incomingId -> поступление на спец-счёт (VER-платёж МСП)
+  notifications: state.notifications || {},   // notificationId -> {payload, paymentId, attempts, nextAttemptAt, lastStatus, lastBody, dumped}
   externalRequests: state.externalRequests || {}, // ExternalRequestId -> {paymentId, status}
-  payouts: state.payouts || {},     // payoutPaymentId -> выплата e2c (Б-5 репетиция; старые state.json без e2c)
+  payouts: state.payouts || {},               // payoutPaymentId -> выплата e2c
+  disputes: state.disputes || {},             // disputeId -> {disputeId, paymentId, orderId, amount, status, reasonCode, ...}
+  clockOffsetMs: state.clockOffsetMs || 0,
 });
+
+const clock = core.createVirtualClock({
+  initial: MOCK_VIRTUAL_CLOCK,
+  getStateOffset: () => state.clockOffsetMs || 0,
+  setStateOffset: (v) => { state.clockOffsetMs = v; persist(); },
+});
+
+const scenarios = core.createScenarioRegistry({ clock });
 
 /* --------------------------------------------------------------- signature */
 
-// Mirrors the bank (and lovii-core TBankSignature): values of all top-level
-// scalar parameters except Token, nested structures, null and ''; booleans in
-// lowercase; sorted by key; concatenated; terminal password appended; sha256.
 function tokenOf(payload) {
   const values = [];
   for (const [key, value] of Object.entries(payload)) {
@@ -94,9 +113,6 @@ function tokenOf(payload) {
     if (typeof value === 'object') continue; // DATA, Receipt, arrays
     values.push([key, typeof value === 'boolean' ? (value ? 'true' : 'false') : String(value)]);
   }
-  // T-Bank spec (acb0db8, doc-пример Pan < Password < PaymentId): пара с
-  // паролем участвует в сортировке наравне со всеми, пароль попадает в
-  // середину конкатенации. Должно совпадать с lovii-core TBankSignature.
   values.push(['Password', TERMINAL_PASSWORD]);
   values.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return crypto.createHash('sha256').update(values.map(([, v]) => v).join('')).digest('hex');
@@ -107,17 +123,12 @@ function verifyToken(payload) {
   const given = payload && payload.Token;
   if (!given || typeof given !== 'string') return false;
   const expected = tokenOf(payload);
-  // timingSafeEqual бросает RangeError на разной длине — голая проверка
-  // превращала «Token: abc» в 5000 «внутренняя ошибка» вместо кода 13
-  // (дефект A-5 аудита).
   if (given.length !== expected.length) return false;
   return crypto.timingSafeEqual(Buffer.from(given), Buffer.from(expected));
 }
 
 /* ------------------------------------------------------------ test cards */
 
-// Behavior keyed by PAN, mirroring the bank's test card list
-// (oplata_multisplit.pdf §7): success / challenge / insufficient / reject.
 const CARDS = {
   '2201382000000013': { scenario: 'success', label: '3DS2 frictionless — успех' },
   '2201382000000039': { scenario: 'success', label: '3DS2 attempts (A) — успех' },
@@ -136,15 +147,27 @@ const maskPan = (pan) => `${pan.slice(0, 6)}**${pan.slice(-4)}`;
 
 /* ------------------------------------------------------------ notifications */
 
-const NOTIFIED_STATUSES = new Set(['AUTHORIZED', 'CONFIRMED', 'REVERSED', 'PARTIAL_REVERSED', 'REFUNDED', 'PARTIAL_REFUNDED', 'REJECTED', 'CHARGEBACK', 'PARTIAL_CHARGEBACK']);
+const NOTIFIED_STATUSES = new Set([
+  'AUTHORIZED',
+  'CONFIRMED',
+  'REVERSED',
+  'PARTIAL_REVERSED',
+  'REFUNDED',
+  'PARTIAL_REFUNDED',
+  'REJECTED',
+  'CHARGEBACK',
+  'PARTIAL_CHARGEBACK',
+]);
 
-function scheduleNotification(payment, status, extra = {}) {
+function scheduleNotification(payment, status, extra = {}, options = {}) {
   if (!NOTIFIED_STATUSES.has(status)) return;
   const url = payment.notificationUrl || MOCK_DEFAULT_NOTIFICATION_URL;
   if (!url) {
     console.log(`[mock] ${payment.paymentId}: no notification URL, skip ${status}`);
     return;
   }
+  const suppressed = Boolean(options.suppress || payment.suppressWebhooks);
+  const duplicate = Boolean(options.duplicate || payment.duplicateWebhooks);
   const payload = {
     TerminalKey: TERMINAL_KEY,
     OrderId: payment.orderId,
@@ -163,20 +186,26 @@ function scheduleNotification(payment, status, extra = {}) {
     else payload[k] = v;
   }
   payload.Token = tokenOf(payload);
-  const id = String(state.counters.notificationId++);
-  state.notifications[id] = {
-    id,
-    paymentId: payment.paymentId,
-    url,
-    payload,
-    attempts: 0,
-    nextAttemptAt: 0,
-    lastStatus: null,
-    lastBody: null,
-    dumped: false,
-  };
+
+  const count = duplicate && !suppressed ? 2 : 1;
+  for (let i = 0; i < count; i += 1) {
+    const id = String(state.counters.notificationId++);
+    state.notifications[id] = {
+      id,
+      paymentId: payment.paymentId,
+      url,
+      payload,
+      attempts: 0,
+      nextAttemptAt: 0,
+      lastStatus: suppressed ? 'SUPPRESSED' : null,
+      lastBody: suppressed ? 'suppressed by webhook-drop scenario' : null,
+      dumped: false,
+      done: suppressed,
+      suppressed,
+    };
+    console.log(`[mock] notification ${id} ${suppressed ? 'SUPPRESSED (webhook-drop)' : 'queued'}: ${payment.paymentId} -> ${status}`);
+  }
   persist();
-  console.log(`[mock] notification ${id} queued: ${payment.paymentId} -> ${status}`);
 }
 
 function currentAmount(payment) {
@@ -184,18 +213,17 @@ function currentAmount(payment) {
   return payment.amount;
 }
 
-// Банк подтверждён, когда мерчант ответил 200 с телом «OK» (контракт).
-// После MAX_ATTEMPTS попыток нотификация уходит в dumped (видна в /admin).
 const deliveryQueue = core.createDeliveryQueue({
   entries: state.notifications,
   retryMs: RETRY_MS,
   maxAttempts: MAX_ATTEMPTS,
   persist,
   log,
+  now: () => clock.now(),
   request: (n) => ({ url: n.url, data: n.payload }),
   isOk: (res) => res.statusCode === 200 && String(res.body || '').trim() === 'OK',
   blockPrivateHosts: BLOCK_PRIVATE_WEBHOOKS,
-  due: (n) => !n.done && !n.dumped && (n.nextAttemptAt || 0) <= Date.now(),
+  due: (n) => !n.done && !n.dumped && !n.suppressed && (n.nextAttemptAt || 0) <= clock.now(),
   prepare: (n) => { n.attempts += 1; },
   onFailure: (n, status, body) => {
     n.lastStatus = status;
@@ -204,30 +232,29 @@ const deliveryQueue = core.createDeliveryQueue({
       n.dumped = true;
       log(`notification ${n.id} dumped after ${n.attempts} attempts`);
     } else {
-      n.nextAttemptAt = Date.now() + RETRY_MS;
+      n.nextAttemptAt = clock.now() + RETRY_MS;
     }
   },
 });
 
 /* -------------------------------------------------------------- helpers */
 
-// DX-слой (спека §6.2): известные коды ошибок разложены на объяснение,
-// поле, рекомендацию и ссылку на раздел официальной документации.
 const derr = core.createErrorCatalog({
   provider: 'tbank-eacq',
   docsBase: 'https://developer.tbank.ru/eacq',
   codes: {
-    7: { message: 'Обязательные параметры не заполнены или невалидны', field: 'Amount, OrderId', hint: 'Проверьте: Amount — целое число в копейках больше нуля (100000 = 1000,00 ₽), OrderId — непустая строка и уникален для каждой операции (повторный Init с тем же OrderId отклоняется — как в банке), сумма Cancel/Confirm не больше доступной суммы платежа.', doc: '/api/init' },
-    8: { message: 'Объект не найден', field: 'PaymentId | OrderId', hint: 'Платёж не найден ни по PaymentId, ни по OrderId (GetState принимает оба). Платёжные сессии живут в состоянии стенда; после рестарта с пустым MOCK_STATE_FILE старые id недоступны.', doc: '/api/getstate' },
+    4: { message: 'Объект выплаты не найден', field: 'PaymentId', hint: 'Проверьте PaymentId выплаты (/e2c/v2/Init).', doc: '/e2c' },
+    7: { message: 'Обязательные параметры не заполнены или невалидны', field: 'Amount, OrderId', hint: 'Проверьте: Amount — целое число в копейках больше нуля (100000 = 1000,00 ₽), OrderId — непустая строка и уникален для каждой операции (повторный Init с тем же OrderId отклоняется — как в банке), сумма Cancel/Confirm/Chargeback не больше доступной суммы платежа.', doc: '/api/init' },
+    8: { message: 'Объект не найден', field: 'PaymentId | OrderId | DisputeId', hint: 'Платёж или спор не найден ни по PaymentId, ни по OrderId, ни по DisputeId. Платёжные сессии живут в состоянии стенда; после рестарта с пустым MOCK_STATE_FILE старые id недоступны.', doc: '/api/getstate' },
     13: { message: 'Неверный Token (подпись) запроса', field: 'Token', hint: 'Подпись = sha256(значения всех top-level скаляров кроме Token/null/\'\' + Password, отсортированные по ключу, в нижнем регистре для boolean). Сверьте с conspectus docs/reference/tbank/02-notifications-signature.md.', doc: '/intro/to-api' },
-    32: { message: 'Операция недоступна в текущем статусе', field: 'PaymentId', hint: 'Переход запрещён машиной состояний: Confirm — только из AUTHORIZED; Cancel — из NEW (CANCELED), AUTHORIZED (REVERSED/PARTIAL_REVERSED), CONFIRMED (REFUNDED/PARTIAL_REFUNDED). История статусов платежа — в /admin.', doc: '/api/confirm' },
-    501: { message: 'Метод не поддерживается мок-стендом', hint: 'Стенд реализует волну 1: Init/Confirm/Cancel/GetState/CheckOrder + e2c/AV. Остальные методы — по мере надобности.', doc: '' },
+    32: { message: 'Операция недоступна в текущем статусе', field: 'PaymentId | DisputeId', hint: 'Переход запрещён машиной состояний: Confirm — только из AUTHORIZED; Cancel — из NEW (CANCELED), AUTHORIZED (REVERSED/PARTIAL_REVERSED), CONFIRMED (REFUNDED/PARTIAL_REFUNDED); Chargeback — только из CONFIRMED/PARTIAL_REFUNDED по цепочке DISPUTED -> REPRESENTMENT -> ARBITRATION -> WON|LOST.', doc: '/api/confirm' },
+    501: { message: 'Метод не поддерживается мок-стендом', hint: 'Стенд реализует Init/Confirm/Cancel/GetState/CheckOrder/Chargeback/Dispute + e2c/AV.', doc: '' },
     5000: { message: 'Внутренняя ошибка мок-стенда', hint: 'Смотрите лог сервиса; если воспроизводится — это дефект мока, заводите issue.', doc: '' },
   },
 });
 
-function err(code, message, details) {
-  const desc = derr(code, { message: message || undefined, details });
+function err(code, message, details, overrides = {}) {
+  const desc = derr(code, { message: message || undefined, details, ...overrides });
   return {
     Success: false,
     ErrorCode: String(code),
@@ -250,6 +277,7 @@ function baseResponse(payment) {
     Status: payment.status,
     Success: true,
     ErrorCode: '0',
+    ...(payment.disputeId ? { DisputeId: payment.disputeId, DisputeStatus: payment.disputeStatus } : {}),
   };
 }
 
@@ -258,9 +286,11 @@ function findDeal(id) {
 }
 
 function setStatus(payment, status) {
+  const nowIso = clock.iso();
   payment.status = status;
-  payment.statusHistory.push({ status, at: new Date().toISOString() });
-  payment[statusCamel(status) + 'At'] = new Date().toISOString();
+  payment.statusHistory.push({ status, at: nowIso });
+  payment[statusCamel(status) + 'At'] = nowIso;
+  payment[statusCamel(status) + 'AtMs'] = clock.now();
 }
 
 function statusCamel(s) {
@@ -271,30 +301,352 @@ function statusCamel(s) {
 
 function dealBalance(deal) {
   return Object.values(state.payments)
-    .filter((p) => p.dealId === deal.id)
+    .filter((p) => p.dealId === deal.id && ['CONFIRMED', 'PARTIAL_REFUNDED', 'PARTIAL_CHARGEBACK'].includes(p.status))
     .reduce((acc, p) => acc + currentAmount(p), 0);
+}
+
+/** Применение сценарных директив (X-Mock-Scenario / DATA.mock_scenario / правила) к платежу. */
+function applyScenarioToPayment(payment, spec) {
+  if (!spec || !spec.items || !spec.items.length) return;
+  if (spec.has('webhook-drop') || spec.has('no-webhook')) {
+    payment.suppressWebhooks = true;
+  }
+  if (spec.has('webhook-duplicate')) {
+    payment.duplicateWebhooks = true;
+  }
+  const cbAfter = spec.get('chargeback-after');
+  if (cbAfter) {
+    const delayMs = core.parseDuration(cbAfter === true ? '7d' : cbAfter);
+    if (delayMs !== null && delayMs >= 0) {
+      payment.chargebackAfterMs = delayMs;
+      if (payment.status === 'CONFIRMED') {
+        payment.scheduledChargebackAt = clock.now() + delayMs;
+      }
+    }
+  }
+  const autoConf = spec.get('auto-confirm');
+  if (autoConf) {
+    const delayMs = core.parseDuration(autoConf === true ? '7d' : autoConf);
+    if (delayMs !== null && delayMs >= 0) {
+      payment.customAutoConfirmMs = delayMs;
+    }
+  }
+  const partRefund = spec.get('partial-refund');
+  if (partRefund) {
+    payment.partialRefundSpec = partRefund === true ? '50%' : String(partRefund);
+  }
+}
+
+/** Вычисление суммы для сценария partial-refund (процент или копейки). */
+function resolvePartialAmount(rawSpec, available) {
+  if (!rawSpec || rawSpec === true) return Math.max(1, Math.floor(available / 2));
+  const s = String(rawSpec).trim();
+  if (s.endsWith('%')) {
+    const pct = parseFloat(s.slice(0, -1));
+    if (Number.isFinite(pct) && pct > 0 && pct < 100) {
+      return Math.max(1, Math.round((available * pct) / 100));
+    }
+  }
+  const kop = parseInt(s, 10);
+  if (Number.isFinite(kop) && kop > 0 && kop < available) return kop;
+  return Math.max(1, Math.floor(available / 2));
+}
+
+/* ------------------------------------------- Chargeback / Dispute machine */
+
+/*
+ * Машина состояний спора (чарджбэк Т-Банка / Lovii T-024):
+ *   DISPUTED (инициация эмитентом из CONFIRMED / PARTIAL_REFUNDED)
+ *     -> REPRESENTMENT (оспаривание мерчантом с доказательствами / ФД)
+ *     -> ARBITRATION   (передача спора в арбитраж платёжной системы)
+ *     -> WON           (спор выигран мерчантом: возврат средств в CONFIRMED / PARTIAL_REFUNDED)
+ *     -> LOST          (спор проигран/признан: финальный CHARGEBACK / PARTIAL_CHARGEBACK)
+ */
+function findPaymentByRef(body) {
+  if (body.PaymentId && state.payments[String(body.PaymentId)]) {
+    return state.payments[String(body.PaymentId)];
+  }
+  if (body.OrderId) {
+    const matches = Object.values(state.payments).filter((p) => p.orderId === String(body.OrderId));
+    if (matches.length === 1) return matches[0];
+  }
+  return null;
+}
+
+function openDispute(payment, { amount, reasonCode = '4853', comment = '', suppress = false, duplicate = false } = {}) {
+  if (!['CONFIRMED', 'PARTIAL_REFUNDED', 'PARTIAL_CHARGEBACK'].includes(payment.status)) {
+    return err(
+      32,
+      `Чарджбэк доступен только для подтверждённого платежа (CONFIRMED/PARTIAL_REFUNDED), сейчас ${payment.status}`,
+      `PaymentId=${payment.paymentId}`,
+      { field: 'PaymentId', doc: '/notifications/notification' },
+    );
+  }
+  if (payment.disputeId && state.disputes[payment.disputeId] && !['WON', 'LOST'].includes(state.disputes[payment.disputeId].status)) {
+    return err(
+      32,
+      `По платежу ${payment.paymentId} уже открыт активный спор ${payment.disputeId} в статусе ${state.disputes[payment.disputeId].status}`,
+      `DisputeId=${payment.disputeId}`,
+      { field: 'DisputeId' },
+    );
+  }
+
+  const available = currentAmount(payment);
+  let disputeAmount = available;
+  if (amount !== undefined && amount !== null && amount !== '') {
+    const parsed = parseInt(amount, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return { ...err(7, 'Некорректная сумма чарджбэка: Amount должен быть целым числом > 0'), PaymentId: payment.paymentId, OrderId: payment.orderId };
+    }
+    if (parsed > available) {
+      return {
+        ...err(7, `Сумма чарджбэка ${parsed} больше доступной суммы платежа ${available}`),
+        PaymentId: payment.paymentId,
+        OrderId: payment.orderId,
+        OriginalAmount: available,
+      };
+    }
+    disputeAmount = parsed;
+  }
+
+  const partial = disputeAmount < available;
+  const targetPaymentStatus = partial ? 'PARTIAL_CHARGEBACK' : 'CHARGEBACK';
+  const disputeId = 'DSP-' + String(++state.counters.disputeId);
+  const nowIso = clock.iso();
+
+  const dispute = {
+    disputeId,
+    paymentId: payment.paymentId,
+    orderId: payment.orderId,
+    originalAmount: available,
+    amount: disputeAmount,
+    partial,
+    reasonCode: String(reasonCode || '4853'),
+    comment: String(comment || ''),
+    status: 'DISPUTED',
+    paymentStatusBefore: payment.status,
+    evidence: null,
+    statusHistory: [{ status: 'DISPUTED', at: nowIso }],
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
+
+  state.disputes[disputeId] = dispute;
+  payment.disputeId = disputeId;
+  payment.disputeStatus = 'DISPUTED';
+  payment.remaining = available - disputeAmount;
+  setStatus(payment, targetPaymentStatus);
+  persist();
+
+  scheduleNotification(
+    payment,
+    targetPaymentStatus,
+    {
+      DisputeId: disputeId,
+      DisputeStatus: 'DISPUTED',
+      DisputeAmount: disputeAmount,
+      ReasonCode: dispute.reasonCode,
+    },
+    { suppress, duplicate },
+  );
+
+  return {
+    ...baseResponse(payment),
+    DisputeId: disputeId,
+    DisputeStatus: dispute.status,
+    DisputeAmount: disputeAmount,
+    OriginalAmount: available,
+    NewAmount: payment.remaining,
+    ReasonCode: dispute.reasonCode,
+  };
+}
+
+function transitionDispute(dispute, action, body = {}, options = {}) {
+  const act = String(action || '').toLowerCase();
+  const payment = state.payments[dispute.paymentId];
+  if (!payment) return err(8, 'Платёж спора не найден');
+  const nowIso = clock.iso();
+
+  if (act === 'representment' || act === 'challenge') {
+    if (dispute.status !== 'DISPUTED') {
+      return err(
+        32,
+        `Переход в REPRESENTMENT возможен только из статуса DISPUTED, сейчас ${dispute.status}`,
+        `DisputeId=${dispute.disputeId}`,
+        { field: 'DisputeId', hint: 'Цепочка чарджбэка: DISPUTED -> REPRESENTMENT -> ARBITRATION -> WON|LOST.' },
+      );
+    }
+    dispute.status = 'REPRESENTMENT';
+    dispute.evidence = {
+      comment: String(body.Evidence || body.Comment || 'Предъявлены чеки 54-ФЗ и подтверждение выдачи заказа'),
+      fiscalDocumentNumber: body.FiscalDocumentNumber ? String(body.FiscalDocumentNumber) : null,
+      submittedAt: nowIso,
+    };
+    dispute.updatedAt = nowIso;
+    dispute.statusHistory.push({ status: 'REPRESENTMENT', at: nowIso });
+    payment.disputeStatus = 'REPRESENTMENT';
+    payment.statusHistory.push({ status: 'REPRESENTMENT', at: nowIso });
+    persist();
+
+    scheduleNotification(
+      payment,
+      payment.status,
+      {
+        DisputeId: dispute.disputeId,
+        DisputeStatus: 'REPRESENTMENT',
+        DisputeAmount: dispute.amount,
+      },
+      options,
+    );
+  } else if (act === 'arbitration' || act === 'arb' || act === 'pre_arb') {
+    if (dispute.status !== 'REPRESENTMENT') {
+      return err(
+        32,
+        `Переход в ARBITRATION возможен только после REPRESENTMENT, сейчас ${dispute.status}`,
+        `DisputeId=${dispute.disputeId}`,
+        { field: 'DisputeId', hint: 'Сначала подайте доказательства (Action="representment"), затем переводите спор в арбитраж (Action="arbitration").' },
+      );
+    }
+    dispute.status = 'ARBITRATION';
+    dispute.updatedAt = nowIso;
+    dispute.statusHistory.push({ status: 'ARBITRATION', at: nowIso });
+    payment.disputeStatus = 'ARBITRATION';
+    payment.statusHistory.push({ status: 'ARBITRATION', at: nowIso });
+    persist();
+
+    scheduleNotification(
+      payment,
+      payment.status,
+      {
+        DisputeId: dispute.disputeId,
+        DisputeStatus: 'ARBITRATION',
+        DisputeAmount: dispute.amount,
+      },
+      options,
+    );
+  } else if (['resolve', 'win', 'won', 'lose', 'lost', 'accept'].includes(act)) {
+    if (!['DISPUTED', 'REPRESENTMENT', 'ARBITRATION'].includes(dispute.status)) {
+      return err(
+        32,
+        `Спор ${dispute.disputeId} уже завершён в статусе ${dispute.status}`,
+        `DisputeId=${dispute.disputeId}`,
+        { field: 'DisputeId' },
+      );
+    }
+    const rawOutcome = String(body.Outcome || (act === 'win' || act === 'won' ? 'WON' : (act === 'lose' || act === 'lost' || act === 'accept' ? 'LOST' : ''))).toUpperCase();
+    if (!['WON', 'LOST'].includes(rawOutcome)) {
+      return err(7, 'Для завершения спора укажите Outcome: "WON" или "LOST" (либо Action: "win"|"lose")', null, { field: 'Outcome' });
+    }
+    dispute.status = rawOutcome;
+    dispute.resolvedAt = nowIso;
+    dispute.updatedAt = nowIso;
+    dispute.statusHistory.push({ status: rawOutcome, at: nowIso });
+    payment.disputeStatus = rawOutcome;
+
+    if (rawOutcome === 'WON') {
+      // Спор выигран мерчантом: удержанная сумма возвращается в платёж/сделку
+      payment.remaining = (payment.remaining || 0) + dispute.amount;
+      const restoredStatus = payment.remaining < (payment.confirmedAmount || payment.amount)
+        ? 'PARTIAL_REFUNDED'
+        : 'CONFIRMED';
+      setStatus(payment, restoredStatus);
+      persist();
+      scheduleNotification(
+        payment,
+        restoredStatus,
+        {
+          DisputeId: dispute.disputeId,
+          DisputeStatus: 'WON',
+          DisputeAmount: dispute.amount,
+        },
+        options,
+      );
+    } else {
+      // LOST: финальное удержание чарджбэка
+      const finalStatus = dispute.partial && payment.remaining > 0 ? 'PARTIAL_CHARGEBACK' : 'CHARGEBACK';
+      setStatus(payment, finalStatus);
+      persist();
+      scheduleNotification(
+        payment,
+        finalStatus,
+        {
+          DisputeId: dispute.disputeId,
+          DisputeStatus: 'LOST',
+          DisputeAmount: dispute.amount,
+        },
+        options,
+      );
+    }
+  } else if (act === 'state' || act === 'get') {
+    // только чтение
+  } else {
+    return err(7, `Неизвестное действие по спору Action=«${action}» (допустимо: init, representment, arbitration, resolve/win/lose, state)`);
+  }
+
+  return {
+    ...baseResponse(payment),
+    DisputeId: dispute.disputeId,
+    DisputeStatus: dispute.status,
+    DisputeAmount: dispute.amount,
+    OriginalAmount: dispute.originalAmount,
+    NewAmount: currentAmount(payment),
+    ReasonCode: dispute.reasonCode,
+    Evidence: dispute.evidence || undefined,
+    StatusHistory: dispute.statusHistory,
+  };
+}
+
+function handleChargeback(body, reqHeaders = {}) {
+  const badTerminal = checkTerminalKey(body);
+  if (badTerminal) return badTerminal;
+
+  const spec = scenarios.resolve({
+    header: reqHeaders['x-mock-scenario'] || '',
+    bodyScenario: (body.DATA && body.DATA.mock_scenario) || body.MockScenario || '',
+    target: 'chargeback',
+    context: { paymentId: body.PaymentId, orderId: body.OrderId, disputeId: body.DisputeId },
+  });
+  const options = {
+    suppress: spec.has('webhook-drop') || spec.has('no-webhook'),
+    duplicate: spec.has('webhook-duplicate'),
+  };
+
+  const action = String(body.Action || 'init').toLowerCase();
+  if (action === 'init' || action === 'open') {
+    const payment = findPaymentByRef(body);
+    if (!payment) return err(8, 'Платёж для чарджбэка не найден (передайте PaymentId или OrderId)');
+    return openDispute(payment, {
+      amount: body.Amount,
+      reasonCode: body.ReasonCode || '4853',
+      comment: body.Comment || '',
+      ...options,
+    });
+  }
+
+  let dispute = body.DisputeId ? state.disputes[String(body.DisputeId)] : null;
+  if (!dispute) {
+    const payment = findPaymentByRef(body);
+    if (payment && payment.disputeId) dispute = state.disputes[payment.disputeId];
+  }
+  if (!dispute) return err(8, 'Спор (DisputeId) не найден');
+  return transitionDispute(dispute, action, body, options);
 }
 
 /* ------------------------------------------------------------- API logic */
 
 function checkTerminalKey(body) {
-  // Правильный TerminalKey — половина успешной интеграции; банк отвечает
-  // ошибкой на чужой терминал, мок раньше принимал любой (дефект A-15).
-  return body && body.TerminalKey === TERMINAL_KEY ? null : err(7, `TerminalKey «${body && body.TerminalKey}» не соответствует стенду (ожидается «${TERMINAL_KEY}»)`);
+  return body && body.TerminalKey === TERMINAL_KEY
+    ? null
+    : err(7, `TerminalKey «${body && body.TerminalKey}» не соответствует стенду (ожидается «${TERMINAL_KEY}»)`);
 }
 
-function handleInit(body) {
+function handleInit(body, reqHeaders = {}) {
   const badTerminal = checkTerminalKey(body);
   if (badTerminal) return badTerminal;
   const amount = parseInt(body.Amount, 10);
   if (!body.OrderId || !Number.isFinite(amount) || amount <= 0) {
     return err(7, 'Обязательные параметры не заполнены или невалидны (Amount, OrderId)');
   }
-  // Официальная дока Init: «OrderId… Должен быть уникальным для каждой
-  // операции». Банк отклоняет повторный Init с тем же OrderId, а мок раньше
-  // молча создавал вторую сессию (дефект A-6 аудита): CheckOrder возвращал
-  // «две попытки» там, где в бою была бы одна, и ломались идемпотентные
-  // повторы Init на ретраях сети.
   if (!ALLOW_DUPLICATE_ORDER_ID) {
     const existing = Object.values(state.payments).find((p) => p.orderId === String(body.OrderId));
     if (existing) {
@@ -304,9 +656,7 @@ function handleInit(body) {
   let dealId = null;
   const createDeal = String(body.CreateDealWithType || '').toUpperCase() === 'NN';
   if (PROFILE === 'plain' && !body.DealId && !createDeal) {
-    // plain-профиль: сделочные поля не приходят — платёж без сделки, как в
-    // классическом эквайринге. PaymentRecipientId/CreateDealWithType не
-    // являются ошибкой (банк без Мультирасчетов просто не знает этих полей).
+    // plain-профиль: платёж без сделки
   } else if (body.DealId) {
     const deal = findDeal(body.DealId);
     if (!deal || deal.status === 'closed') {
@@ -315,20 +665,21 @@ function handleInit(body) {
     dealId = deal.id;
   } else if (createDeal) {
     dealId = String(state.counters.dealId++);
-    state.deals[dealId] = { id: dealId, type: 'NN', status: 'open', createdAt: new Date().toISOString() };
+    state.deals[dealId] = { id: dealId, type: 'NN', status: 'open', createdAt: clock.iso(), createdAtMs: clock.now() };
   } else if (body.PaymentRecipientId) {
-    // Multisplit requires either an existing deal or deal creation flag.
     return err(7, 'Не переданы DealId или CreateDealWithType=NN');
   }
 
   const paymentId = String(state.counters.paymentId++);
+  const nowIso = clock.iso();
   const payment = {
     paymentId,
     orderId: String(body.OrderId),
     amount,
     status: 'NEW',
-    statusHistory: [{ status: 'NEW', at: new Date().toISOString() }],
-    createdAt: new Date().toISOString(),
+    statusHistory: [{ status: 'NEW', at: nowIso }],
+    createdAt: nowIso,
+    createdAtMs: clock.now(),
     dealId,
     recipientId: body.PaymentRecipientId || null,
     customerKey: body.CustomerKey || null,
@@ -345,7 +696,24 @@ function handleInit(body) {
     failCode: null,
     failMessage: null,
     otpAttempts: 0,
+    disputeId: null,
+    disputeStatus: null,
+    suppressWebhooks: false,
+    duplicateWebhooks: false,
+    chargebackAfterMs: null,
+    scheduledChargebackAt: null,
+    customAutoConfirmMs: null,
+    partialRefundSpec: null,
   };
+
+  const spec = scenarios.resolve({
+    header: reqHeaders['x-mock-scenario'] || '',
+    bodyScenario: (body.DATA && body.DATA.mock_scenario) || body.MockScenario || '',
+    target: 'init',
+    context: { orderId: payment.orderId, paymentId },
+  });
+  applyScenarioToPayment(payment, spec);
+
   state.payments[paymentId] = payment;
   persist();
 
@@ -366,9 +734,6 @@ function handleInit(body) {
 function handleGetState(body) {
   const badTerminal = checkTerminalKey(body);
   if (badTerminal) return badTerminal;
-  // Дока GetState допускает идентификацию платежа как PaymentId, так и
-  // OrderId; мок понимал только PaymentId, а подсказка ошибки обещала оба
-  // (дефект A-9 аудита).
   let payment = body.PaymentId ? state.payments[String(body.PaymentId)] : null;
   if (!payment && body.OrderId) {
     const found = Object.values(state.payments)
@@ -401,6 +766,7 @@ function handleCheckOrder(body) {
       PaymentId: p.paymentId,
       Amount: currentAmount(p),
       Status: p.status,
+      RRN: String(p.paymentId).slice(-12).padStart(12, '0'),
       Success: !['REJECTED', 'AUTH_FAIL', 'CANCELED', 'DEADLINE_EXPIRED'].includes(p.status),
       ErrorCode: p.status === 'REJECTED' ? String(p.failCode || '9999') : '0',
       Message: p.status === 'REJECTED' ? String(p.failMessage || 'Ошибка') : 'ok',
@@ -408,14 +774,24 @@ function handleCheckOrder(body) {
   };
 }
 
-function handleConfirm(body) {
+function finalizeConfirm(payment, amount, options = {}) {
+  setStatus(payment, 'CONFIRMING');
+  payment.confirmedAmount = amount;
+  payment.remaining = amount;
+  setStatus(payment, 'CONFIRMED');
+  if (payment.chargebackAfterMs !== null && payment.chargebackAfterMs !== undefined) {
+    payment.scheduledChargebackAt = clock.now() + payment.chargebackAfterMs;
+  }
+  persist();
+  scheduleNotification(payment, 'CONFIRMED', {}, options);
+}
+
+function handleConfirm(body, reqHeaders = {}) {
   const badTerminal = checkTerminalKey(body);
   if (badTerminal) return badTerminal;
   const payment = state.payments[String(body.PaymentId)];
   if (!payment) return err(8, 'PaymentId не найден');
   if (payment.status !== 'AUTHORIZED') {
-    // A-8: раньше здесь возвращался код 8 («объект не найден») — интегратор
-    // искал несуществующий платёж вместо нарушения порядка статусов.
     return { ...err(32, `Подтверждение доступно только из статуса AUTHORIZED, сейчас ${payment.status}`), PaymentId: payment.paymentId, OrderId: payment.orderId };
   }
   let amount = payment.amount;
@@ -428,16 +804,23 @@ function handleConfirm(body) {
       return { ...err(7, 'Сумма подтверждения больше суммы авторизации'), PaymentId: payment.paymentId };
     }
   }
-  setStatus(payment, 'CONFIRMING');
-  payment.confirmedAmount = amount;
-  payment.remaining = amount;
-  setStatus(payment, 'CONFIRMED');
-  persist();
-  scheduleNotification(payment, 'CONFIRMED');
+
+  const spec = scenarios.resolve({
+    header: reqHeaders['x-mock-scenario'] || '',
+    bodyScenario: (body.DATA && body.DATA.mock_scenario) || body.MockScenario || '',
+    target: 'confirm',
+    context: { paymentId: payment.paymentId, orderId: payment.orderId },
+  });
+  applyScenarioToPayment(payment, spec);
+
+  finalizeConfirm(payment, amount, {
+    suppress: spec.has('webhook-drop') || spec.has('no-webhook'),
+    duplicate: spec.has('webhook-duplicate'),
+  });
   return baseResponse(payment);
 }
 
-function handleCancel(body) {
+function handleCancel(body, reqHeaders = {}) {
   const badTerminal = checkTerminalKey(body);
   if (badTerminal) return badTerminal;
   const payment = state.payments[String(body.PaymentId)];
@@ -445,25 +828,25 @@ function handleCancel(body) {
 
   const externalId = body.ExternalRequestId ? String(body.ExternalRequestId) : null;
   if (externalId && state.externalRequests[externalId]) {
-    // Idempotent refund: return current state without a new operation.
     return { ...baseResponse(payment), OriginalAmount: currentAmount(payment), NewAmount: currentAmount(payment), ExternalRequestId: externalId };
   }
 
+  const spec = scenarios.resolve({
+    header: reqHeaders['x-mock-scenario'] || '',
+    bodyScenario: (body.DATA && body.DATA.mock_scenario) || body.MockScenario || '',
+    target: 'cancel',
+    context: { paymentId: payment.paymentId, orderId: payment.orderId },
+  });
+  applyScenarioToPayment(payment, spec);
+
   const before = payment.status;
   const originalAmount = currentAmount(payment);
-  if (before === 'NEW' && body.Amount !== undefined && body.Amount !== null && body.Amount !== '') {
-    // Дока /Cancel: «При отмене операции в статусе NEW поле Amount
-    // игнорируется… Отмена проводится на полную сумму» — так и делаем.
-  }
   let cancelAmount = originalAmount;
-  if (body.Amount !== undefined && body.Amount !== null && body.Amount !== '') {
+  if (before !== 'NEW' && body.Amount !== undefined && body.Amount !== null && body.Amount !== '') {
     const a = parseInt(body.Amount, 10);
     if (!Number.isFinite(a) || a <= 0) {
       return { ...err(7, 'Некорректная сумма отмены: Amount должен быть целым числом > 0'), PaymentId: payment.paymentId, OrderId: payment.orderId };
     }
-    // Раньше Amount больше суммы платежа молча игнорировался и выполнялся
-    // ПОЛНЫЙ возврат с Success=true (дефект A-7 аудита) — баг интегратора
-    // («вернули больше, чем приняли») выглядел как успешная операция.
     if (a > originalAmount) {
       return {
         ...err(7, `Сумма отмены ${a} больше доступной суммы ${originalAmount}`),
@@ -473,6 +856,10 @@ function handleCancel(body) {
       };
     }
     cancelAmount = a;
+  } else if (before !== 'NEW' && (spec.has('partial-refund') || payment.partialRefundSpec)) {
+    // Сценарий «возврат частичный» (этап 7, бриф §3.2): если Amount не передан,
+    // но активен сценарий partial-refund, удерживаем/возвращаем долю от суммы.
+    cancelAmount = resolvePartialAmount(spec.get('partial-refund') || payment.partialRefundSpec, originalAmount);
   }
   const partial = cancelAmount < originalAmount;
 
@@ -496,7 +883,10 @@ function handleCancel(body) {
   setStatus(payment, t[0]);
   payment.remaining = originalAmount - cancelAmount;
   persist();
-  scheduleNotification(payment, t[1]);
+  scheduleNotification(payment, t[1], {}, {
+    suppress: spec.has('webhook-drop') || spec.has('no-webhook'),
+    duplicate: spec.has('webhook-duplicate'),
+  });
   if (externalId) state.externalRequests[externalId] = { paymentId: payment.paymentId, status: payment.status };
   return { ...baseResponse(payment), OriginalAmount: originalAmount, NewAmount: currentAmount(payment), ExternalRequestId: externalId || undefined };
 }
@@ -532,7 +922,7 @@ function formPage(payment, errorMsg) {
   return page(`
     <span class="logo">T · мок банка</span>
     <h1>Оплата заказа</h1>
-    <div class="muted">Тестовый стенд Т-Банк Мультирасчеты · сессия ${payment.paymentId}</div>
+    <div class="muted">Тестовый стенд Т-Банк · сессия ${payment.paymentId}</div>
     <div class="sum">${(payment.amount / 100).toFixed(2).replace('.', ',')} ₽</div>
     <div class="muted">Заказ: ${esc(payment.orderId)}${payment.dealId ? ` · сделка ${esc(payment.dealId)}` : ''} · PayType ${esc(payment.payType)}</div>
     ${errorMsg ? `<div class="err">${errorMsg}</div>` : ''}
@@ -573,7 +963,7 @@ function redirectUrl(payment, kind) {
 
 function processPay(payment, pan, exp) {
   const due = payment.redirectDueDate ? Date.parse(payment.redirectDueDate) : null;
-  if (due !== null && Number.isFinite(due) && due < Date.now()) {
+  if (due !== null && Number.isFinite(due) && due < clock.now()) {
     setStatus(payment, 'DEADLINE_EXPIRED');
     persist();
     return { status: 'DEADLINE_EXPIRED' };
@@ -600,7 +990,13 @@ function processPay(payment, pan, exp) {
 function authorize(payment) {
   payment.cardId = String(state.counters.cardId++);
   setStatus(payment, payment.payType === 'O' ? 'CONFIRMED' : 'AUTHORIZED');
-  if (payment.payType === 'O') payment.confirmedAmount = payment.amount;
+  if (payment.payType === 'O') {
+    payment.confirmedAmount = payment.amount;
+    payment.remaining = payment.amount;
+    if (payment.chargebackAfterMs !== null && payment.chargebackAfterMs !== undefined) {
+      payment.scheduledChargebackAt = clock.now() + payment.chargebackAfterMs;
+    }
+  }
   persist();
   if (payment.payType === 'O') scheduleNotification(payment, 'CONFIRMED');
   else scheduleNotification(payment, 'AUTHORIZED');
@@ -624,6 +1020,78 @@ function processOtp(payment, code) {
   return { status: '3DS_CHECKING' };
 }
 
+/* ------------------------------------------------------ background ticker */
+
+function tickBank() {
+  const now = clock.now();
+  const virtualShiftActive = (state.clockOffsetMs || 0) > 0;
+
+  for (const payment of Object.values(state.payments)) {
+    // 1. Запланированный чарджбэк по сценарию chargeback-after:Nd
+    if (
+      payment.scheduledChargebackAt
+      && now >= payment.scheduledChargebackAt
+      && ['CONFIRMED', 'PARTIAL_REFUNDED'].includes(payment.status)
+    ) {
+      payment.scheduledChargebackAt = null;
+      openDispute(payment, { reasonCode: '4853', comment: 'Авто-чарджбэк по сценарию chargeback-after' });
+      console.log(`[mock] scheduled chargeback triggered for payment ${payment.paymentId}`);
+      continue;
+    }
+
+    // 2. Авто-закрытие 3DS_CHECKING старше 36 часов
+    if (payment.status === '3DS_CHECKING') {
+      const started = payment['3dsCheckingAtMs'] || Date.parse(payment.createdAt);
+      if (Number.isFinite(started) && now - started >= TDS_TIMEOUT_VIRTUAL_MS) {
+        setStatus(payment, 'DEADLINE_EXPIRED');
+        persist();
+        console.log(`[mock] 3DS session expired (>36h) for payment ${payment.paymentId}`);
+        continue;
+      }
+    }
+
+    // 3. Авто-отмена неоплаченного/незакрытого заказа через 60 дней (или по RedirectDueDate)
+    if (['NEW', 'FORM_SHOWED'].includes(payment.status)) {
+      const due = payment.redirectDueDate ? Date.parse(payment.redirectDueDate) : null;
+      const created = payment.createdAtMs || Date.parse(payment.createdAt);
+      if ((due && Number.isFinite(due) && now >= due) || (virtualShiftActive && Number.isFinite(created) && now - created >= DEAL_AUTO_CANCEL_VIRTUAL_MS)) {
+        setStatus(payment, 'DEADLINE_EXPIRED');
+        persist();
+        console.log(`[mock] payment ${payment.paymentId} expired -> DEADLINE_EXPIRED`);
+        continue;
+      }
+    }
+
+    // 4. Авто-подтверждение холда (AUTHORIZED -> CONFIRMED) через MOCK_AUTO_CONFIRM_MS,
+    //    customAutoConfirmMs или через 7 дней виртуального времени, либо авто-отмена через 60 дней
+    if (payment.status === 'AUTHORIZED') {
+      const authAt = payment.authorizedAtMs || Date.parse(payment.authorizedAt || payment.createdAt);
+      const effectiveAutoConfirmMs = payment.customAutoConfirmMs !== null && payment.customAutoConfirmMs !== undefined
+        ? payment.customAutoConfirmMs
+        : (AUTO_CONFIRM_MS > 0 ? AUTO_CONFIRM_MS : (virtualShiftActive ? HOLD_AUTO_CONFIRM_VIRTUAL_MS : 0));
+
+      if (effectiveAutoConfirmMs > 0 && Number.isFinite(authAt) && now - authAt >= effectiveAutoConfirmMs) {
+        finalizeConfirm(payment, payment.amount);
+        console.log(`[mock] auto-confirmed hold ${payment.paymentId} after ${effectiveAutoConfirmMs}ms`);
+      }
+    }
+
+    // 5. Авто-отмена незакрытой сделки через 60 дней (если сделка открыта, а платёж CONFIRMED > 60 дней без закрытия)
+    if (virtualShiftActive && payment.dealId && payment.status === 'CONFIRMED') {
+      const deal = state.deals[payment.dealId];
+      const authAt = payment.authorizedAtMs || payment.confirmedAtMs || payment.createdAtMs || Date.parse(payment.createdAt);
+      if (deal && deal.status === 'open' && Number.isFinite(authAt) && now - authAt >= DEAL_AUTO_CANCEL_VIRTUAL_MS) {
+        setStatus(payment, 'REFUNDED');
+        payment.remaining = 0;
+        deal.status = 'expired';
+        persist();
+        scheduleNotification(payment, 'REFUNDED');
+        console.log(`[mock] deal ${deal.id} / payment ${payment.paymentId} auto-refunded after 60d`);
+      }
+    }
+  }
+}
+
 /* -------------------------------------------------------------- admin */
 
 function adminPage() {
@@ -631,22 +1099,34 @@ function adminPage() {
     .sort((a, b) => b.paymentId.localeCompare(a.paymentId))
     .map((p) => {
       const deal = p.dealId ? ` · сделка ${esc(p.dealId)}` : '';
+      const disp = p.disputeId ? ` · спор <code>${esc(p.disputeId)}</code> (${esc(p.disputeStatus)})` : '';
       const actions = [];
       if (p.status === 'AUTHORIZED') {
         actions.push(btn('auto-confirm-hold', p.paymentId, 'банк подтвердил холд'));
         actions.push(btn('cancel-payment', p.paymentId, 'отмена платформой (REVERSED)'));
       }
       if (p.status === 'CONFIRMED') actions.push(btn('cancel-payment', p.paymentId, 'возврат платформой (REFUNDED)'));
-      if (p.status === 'CONFIRMED') actions.push(btn('chargeback-payment', p.paymentId, 'эмитент зафиксировал чарджбэк (CHARGEBACK)'));
+      if (p.status === 'CONFIRMED') actions.push(btn('chargeback-payment', p.paymentId, 'эмитент: чарджбэк (DISPUTED)'));
+      if (p.disputeId && p.disputeStatus === 'DISPUTED') actions.push(btn('dispute-representment', p.disputeId, 'спор: representment'));
+      if (p.disputeId && p.disputeStatus === 'REPRESENTMENT') actions.push(btn('dispute-arb', p.disputeId, 'спор: arb'));
+      if (p.disputeId && ['DISPUTED', 'REPRESENTMENT', 'ARBITRATION'].includes(p.disputeStatus)) {
+        actions.push(btn('dispute-won', p.disputeId, 'спор: WON'));
+        actions.push(btn('dispute-lost', p.disputeId, 'спор: LOST'));
+      }
       if (p.status === 'NEW') actions.push(btn('cancel-new', p.paymentId, 'отменить (NEW→CANCELED)'));
       const hist = p.statusHistory.map((h) => `${h.status}<span style="color:#bbb">@${h.at.slice(11, 19)}</span>`).join('<span style="color:#ccc"> → </span>');
-      return `<tr><td><code>${esc(p.paymentId)}</code></td><td>${esc(p.orderId)}<div style="font-size:10px;color:#888;margin-top:3px">${hist}</div></td><td>${(p.amount / 100).toFixed(2)}</td><td><b>${esc(p.status)}</b></td><td>${deal}</td><td>${actions.join(' ')}</td></tr>`;
+      return `<tr><td><code>${esc(p.paymentId)}</code></td><td>${esc(p.orderId)}<div style="font-size:10px;color:#888;margin-top:3px">${hist}</div></td><td>${(currentAmount(p) / 100).toFixed(2)}</td><td><b>${esc(p.status)}</b>${disp}</td><td>${deal}</td><td>${actions.join(' ')}</td></tr>`;
     })
     .join('') || '<tr><td colspan="6">платежей нет</td></tr>';
 
   const deals = Object.values(state.deals)
     .map((d) => `<tr><td><code>${esc(d.id)}</code></td><td>${esc(d.status)}</td><td>${(dealBalance(d) / 100).toFixed(2)} ₽</td></tr>`)
     .join('') || '<tr><td colspan="3">сделок нет</td></tr>';
+
+  const disputes = Object.values(state.disputes || {})
+    .sort((a, b) => b.disputeId.localeCompare(a.disputeId))
+    .map((d) => `<tr><td><code>${esc(d.disputeId)}</code></td><td><code>${esc(d.paymentId)}</code></td><td>${(d.amount / 100).toFixed(2)} ₽</td><td><b>${esc(d.status)}</b></td><td>${esc(d.reasonCode)}</td></tr>`)
+    .join('') || '<tr><td colspan="5">споров (чарджбэков) нет</td></tr>';
 
   const incoming = Object.values(state.incoming)
     .sort((a, b) => b.incomingId.localeCompare(a.incomingId))
@@ -662,7 +1142,7 @@ function adminPage() {
     .sort((a, b) => Number(a.id) - Number(b.id))
     .slice(-25)
     .map((n) => {
-      const st = n.dumped ? 'dumped' : n.done ? 'delivered' : `retry@${new Date(n.nextAttemptAt || Date.now()).toISOString().slice(11, 19)}`;
+      const st = n.suppressed ? 'suppressed' : n.dumped ? 'dumped' : n.done ? 'delivered' : `retry@${new Date(n.nextAttemptAt || clock.now()).toISOString().slice(11, 19)}`;
       return `<tr><td><code>${esc(n.id)}</code></td><td><code>${esc(n.paymentId)}</code></td><td>${esc(n.payload.Status)}</td><td>${n.attempts}</td><td>${esc(st)}</td><td>${esc(n.lastStatus ?? '—')} ${esc(String(n.lastBody ?? '').slice(0, 40))}</td><td>${btn('duplicate-notification', n.id, 'повторить')}</td></tr>`;
     })
     .join('') || '<tr><td colspan="7">нотификаций нет</td></tr>';
@@ -674,11 +1154,13 @@ function adminPage() {
   return page(`
     <span class="logo">T · мок банка</span>
     <h1>Консоль стенда</h1>
-    <div class="muted">TerminalKey <code>${TERMINAL_KEY}</code> · подпись ${STRICT_TOKEN ? 'строгая' : 'выключена'} · ретраи ${Math.round(RETRY_MS / 1000)}с × ${MAX_ATTEMPTS} · авто-обновление 2 с</div>
-    <div style="background:#fff8e1;border:1px solid #f0d47a;border-radius:10px;padding:8px 10px;margin-bottom:10px;font-size:13px">⚠ Платежи проводятся <b>только по тестовым картам</b> из списка ниже — любая другая карта отклоняется (решение владельца 19.09). Пресеты — на форме оплаты.</div>
-    <div class="muted">Обновлено ${new Date().toLocaleTimeString('ru-RU')}</div>
+    <div class="muted">TerminalKey <code>${TERMINAL_KEY}</code> · профиль <code>${PROFILE}</code> · подпись ${STRICT_TOKEN ? 'строгая' : 'выключена'} · ретраи ${Math.round(RETRY_MS / 1000)}с × ${MAX_ATTEMPTS} · виртуальное время <code>${esc(clock.iso())}</code></div>
+    <div style="background:#fff8e1;border:1px solid #f0d47a;border-radius:10px;padding:8px 10px;margin-bottom:10px;font-size:13px">⚠ Платежи проводятся <b>только по тестовым картам</b> из списка ниже — любая другая карта отклоняется (тестовый стенд: реальные карты не принимаются). Пресеты — на форме оплаты.</div>
+    <div class="muted">Обновлено ${new Date(clock.now()).toLocaleTimeString('ru-RU')}</div>
     <h1 style="font-size:16px">Платежи</h1>
     <table border="0" cellpadding="4" style="font-size:13px;width:100%">${payments}</table>
+    <h1 style="font-size:16px">Споры / Чарджбэки (DISPUTED → REPRESENTMENT → ARBITRATION → WON/LOST)</h1>
+    <table border="0" cellpadding="4" style="font-size:13px;width:100%">${disputes}</table>
     <h1 style="font-size:16px">Сделки (баланс = Σ списаний − Σ возвратов)</h1>
     <table border="0" cellpadding="4" style="font-size:13px;width:100%">${deals}</table>
     <h1 style="font-size:16px">Поступления на спец-счёт (VER-платежи МСП)</h1>
@@ -702,11 +1184,7 @@ function adminAction(body) {
   if (action === 'auto-confirm-hold') {
     const payment = state.payments[String(id)];
     if (payment && payment.status === 'AUTHORIZED') {
-      // Bank-side auto-confirmation of the hold (Visa Electron 4d / other 7d).
-      payment.confirmedAmount = payment.amount;
-      setStatus(payment, 'CONFIRMED');
-      persist();
-      scheduleNotification(payment, 'CONFIRMED');
+      finalizeConfirm(payment, payment.amount);
     }
   } else if (action === 'cancel-new') {
     const payment = state.payments[String(id)];
@@ -715,7 +1193,6 @@ function adminAction(body) {
       persist();
     }
   } else if (action === 'cancel-payment') {
-    // Platform calls POST /v2/Cancel: AUTHORIZED→REVERSED, CONFIRMED→REFUNDED.
     const payment = state.payments[String(id)];
     if (payment && (payment.status === 'AUTHORIZED' || payment.status === 'CONFIRMED')) {
       const target = payment.status === 'AUTHORIZED' ? 'REVERSED' : 'REFUNDED';
@@ -726,22 +1203,37 @@ function adminAction(body) {
       console.log(`[mock] platform Cancel: ${payment.paymentId} -> ${target}`);
     }
   } else if (action === 'chargeback-payment') {
-    // Эмитент/банк зафиксировал чарджбэк по подтверждённому платежу:
-    // состояние банка становится CHARGEBACK, ядро узнаёт по нотификации и
-    // переспрашивает GetState (подпись обязательна — контракт §4.2).
     const payment = state.payments[String(id)];
-    if (payment && payment.status === 'CONFIRMED') {
-      setStatus(payment, 'CHARGEBACK');
-      payment.remaining = 0;
-      persist();
-      scheduleNotification(payment, 'CHARGEBACK');
+    if (payment && ['CONFIRMED', 'PARTIAL_REFUNDED'].includes(payment.status)) {
+      openDispute(payment, { reasonCode: '4853' });
       console.log(`[mock] issuer chargeback: ${payment.paymentId} -> CHARGEBACK`);
     }
+  } else if (action === 'dispute-representment') {
+    const d = state.disputes[String(id)];
+    if (d) transitionDispute(d, 'representment');
+  } else if (action === 'dispute-arb') {
+    const d = state.disputes[String(id)];
+    if (d) transitionDispute(d, 'arbitration');
+  } else if (action === 'dispute-won') {
+    const d = state.disputes[String(id)];
+    if (d) transitionDispute(d, 'win');
+  } else if (action === 'dispute-lost') {
+    const d = state.disputes[String(id)];
+    if (d) transitionDispute(d, 'lose');
   } else if (action === 'duplicate-notification') {
     const n = state.notifications[String(id)];
     if (n) {
-      // Duplicate delivery for merchant idempotency checks.
-      const copy = { ...n, id: String(state.counters.notificationId++), attempts: 0, nextAttemptAt: 0, lastStatus: null, lastBody: null, dumped: false };
+      const copy = {
+        ...n,
+        id: String(state.counters.notificationId++),
+        attempts: 0,
+        nextAttemptAt: 0,
+        lastStatus: null,
+        lastBody: null,
+        dumped: false,
+        done: false,
+        suppressed: false,
+      };
       state.notifications[copy.id] = copy;
       persist();
     }
@@ -751,8 +1243,6 @@ function adminAction(body) {
 
 /* ------------------------------------------------------------------ http */
 
-
-/** Короткая выжимка запроса для журнала: скаляры, без подписи и вложений. */
 function bodySummary(body) {
   const out = {};
   let n = 0;
@@ -772,6 +1262,11 @@ async function route(req, res) {
   const raw = await readBody(req);
   const body = parseBody(raw, req.headers['content-type']);
 
+  // Опциональная защита /admin* по токену (A-20)
+  if (p.startsWith('/admin') && !checkAdminAuth(req, MOCK_ADMIN_TOKEN)) {
+    return sendJson(res, err(13, 'Доступ к /admin ограничен MOCK_ADMIN_TOKEN'), 401);
+  }
+
   // Журналируем только API-вызовы (не страницы формы и не поллинг /admin).
   if (/^\/(v2|e2c\/v2|av\/v1)\//.test(p)) {
     const started = Date.now();
@@ -782,11 +1277,61 @@ async function route(req, res) {
     };
   }
 
-  if (req.method === 'GET' && p === '/health') return sendJson(res, { ok: true, payments: Object.keys(state.payments).length, deals: Object.keys(state.deals).length, payouts: Object.keys(state.payouts || {}).length });
+  if (req.method === 'GET' && p === '/health') {
+    return sendJson(res, {
+      ok: true,
+      payments: Object.keys(state.payments).length,
+      deals: Object.keys(state.deals).length,
+      payouts: Object.keys(state.payouts || {}).length,
+      disputes: Object.keys(state.disputes || {}).length,
+    });
+  }
   if (req.method === 'GET' && p === '/admin/journal') return sendJson(res, { entries: journal.list() });
 
-  // Платёжное поручение МСП на сумму верификации: банк создаёт поступление
-  // на спец-счёт платформы (VER-код в назначении) и уведомляет платформу.
+  // Виртуальные часы (этап 7, бриф §3.2)
+  if (p === '/mock/time') {
+    if (req.method === 'GET') return sendJson(res, clock.snapshot());
+    if (req.method === 'POST' || req.method === 'PUT') {
+      try {
+        const snap = clock.set(body || {});
+        tickBank();
+        await deliveryQueue.tick();
+        return sendJson(res, snap);
+      } catch (e) {
+        return sendJson(res, err(7, e.message, null, { field: 'advance|offset|iso' }), 400);
+      }
+    }
+  }
+
+  // Сценарное API (этап 7, бриф §3.2)
+  if (p === '/mock/scenarios') {
+    if (req.method === 'GET') {
+      return sendJson(res, { rules: scenarios.listRules(), history: scenarios.listHistory() });
+    }
+    if (req.method === 'POST') {
+      try {
+        const rule = scenarios.addRule(body || {});
+        return sendJson(res, { ok: true, rule });
+      } catch (e) {
+        return sendJson(res, err(7, e.message, null, { field: 'scenario' }), 400);
+      }
+    }
+    if (req.method === 'DELETE') {
+      scenarios.clearRules();
+      scenarios.clearHistory();
+      return sendJson(res, { ok: true, rules: [], history: [] });
+    }
+  }
+
+  // GET /v2/Dispute/:id — быстрое чтение карточки спора
+  const disputeGetMatch = p.match(/^\/v2\/Dispute\/([A-Za-z0-9_-]+)$/);
+  if (disputeGetMatch && req.method === 'GET') {
+    const dispute = state.disputes[disputeGetMatch[1]];
+    if (!dispute) return sendJson(res, err(8, 'Спор не найден'));
+    return sendJson(res, transitionDispute(dispute, 'state'));
+  }
+
+  // Платёжное поручение МСП на сумму верификации
   if (p === '/av/v1/payment' && req.method === 'POST') {
     if (!verifyToken(body)) return sendJson(res, err(13, 'Неверный Token (подпись) запроса'));
     const code = String(body.VerificationCode || '');
@@ -804,12 +1349,11 @@ async function route(req, res) {
       amount,
       payer: { inn: payerInn, name: payerName, account, bank: 'АО «Т-Банк»' },
       status: 'RECEIVED',
-      createdAt: new Date().toISOString(),
+      createdAt: clock.iso(),
     };
     state.incoming[incomingId] = incoming;
     persist();
     console.log(`[mock] incoming ${incomingId}: ${code} ${amount}коп от ${payerInn}`);
-    // Вебхук поступления платформе — подписанный, ретраи как у нотификаций.
     const webhookUrl = String(body.NotificationURL || MOCK_DEFAULT_NOTIFICATION_URL || '');
     if (webhookUrl) {
       const payload = {
@@ -837,9 +1381,7 @@ async function route(req, res) {
     });
   }
 
-  // ── E2C-выплаты (Б-5, репетиция реестров без банка; OpenAPI Массовые выплаты)
-  // Init → Payment → GetState. Мок исполняет выплату сразу (синхронно),
-  // реквизиты получателя — прозрачно для мока (в бою это маршрут до получателя).
+  // ── E2C-выплаты (Init → Payment → GetState)
   if (p === '/e2c/v2/Init' && req.method === 'POST') {
     if (!verifyToken(body)) return sendJson(res, err(13, 'Неверный Token (подпись) запроса'));
     const amount = parseInt(body.Amount, 10);
@@ -859,8 +1401,8 @@ async function route(req, res) {
         name: String(body.RecipientName || ''),
       },
       status: 'NEW',
-      statusHistory: [{ status: 'NEW', at: new Date().toISOString() }],
-      createdAt: new Date().toISOString(),
+      statusHistory: [{ status: 'NEW', at: clock.iso() }],
+      createdAt: clock.iso(),
     };
     persist();
     console.log(`[mock] e2c Init ${payoutPaymentId}: ${amount}коп, order=${body.OrderId || ''}`);
@@ -873,7 +1415,7 @@ async function route(req, res) {
     if (!payout) return sendJson(res, err(4, 'Выплата не найдена'));
     if (payout.status !== 'NEW') return sendJson(res, err(32, 'Неверный статус выплаты: ' + payout.status));
     payout.status = 'CONFIRMED';
-    payout.statusHistory.push({ status: 'CONFIRMED', at: new Date().toISOString() });
+    payout.statusHistory.push({ status: 'CONFIRMED', at: clock.iso() });
     persist();
     console.log(`[mock] e2c Payment ${payout.paymentId}: CONFIRMED ${payout.amount}коп`);
     return sendJson(res, { Success: true, ErrorCode: '0', PaymentId: payout.paymentId, Status: 'CONFIRMED' });
@@ -893,10 +1435,7 @@ async function route(req, res) {
     });
   }
 
-  // Account verification: платформа просит банк сделать «прогон рубля» по
-  // счёту МСП — банк зачисляет Amount и сразу возвращает его (финальный
-  // статус RETURNED, деньги нигде не остаются). Синхронный контракт: ответ
-  // приходит, когда прогон уже завершён.
+  // Account verification («прогон рубля»)
   if (p === '/av/v1/verification' && req.method === 'POST') {
     if (!verifyToken(body)) return sendJson(res, err(13, 'Неверный Token (подпись) запроса'));
     const code = String(body.VerificationCode || '');
@@ -905,7 +1444,7 @@ async function route(req, res) {
       return sendJson(res, err(7, 'Обязательные параметры не заполнены (VerificationCode, Amount)'));
     }
     const verificationId = String(state.counters.verificationId++);
-    const now = () => new Date().toISOString();
+    const now = () => clock.iso();
     const verification = {
       verificationId,
       code,
@@ -937,14 +1476,22 @@ async function route(req, res) {
   const api = p.match(/^\/v2\/(\w+)$/);
   if (api && req.method === 'POST') {
     const method = api[1];
-    const handlers = { Init: handleInit, GetState: handleGetState, Confirm: handleConfirm, Cancel: handleCancel, CheckOrder: handleCheckOrder };
+    const handlers = {
+      Init: handleInit,
+      GetState: handleGetState,
+      Confirm: handleConfirm,
+      Cancel: handleCancel,
+      CheckOrder: handleCheckOrder,
+      Chargeback: handleChargeback,
+      Dispute: handleChargeback,
+    };
     const handler = handlers[method];
     if (!handler) return sendJson(res, err(501, `Метод ${method} мок-стендом пока не поддерживается`));
     if (!verifyToken(body)) {
       console.log(`[mock] ${method} token FAIL. payload:`, JSON.stringify({ ...body, Token: `<${String(body.Token || '').slice(0, 8)}…>`, expected: `<${tokenOf(body).slice(0, 8)}…>` }));
       return sendJson(res, err(13, 'Неверный Token (подпись) запроса'));
     }
-    return sendJson(res, handler(body));
+    return sendJson(res, handler(body, req.headers));
   }
 
   const formMatch = p.match(/^\/payment\/(\d+)$/);
@@ -1016,19 +1563,8 @@ const server = http.createServer((req, res) => {
 
 setInterval(() => {
   deliveryQueue.tick().catch((e) => console.error('[mock] delivery loop:', e.message));
-  if (AUTO_CONFIRM_MS > 0) {
-    const deadline = Date.now() - AUTO_CONFIRM_MS;
-    for (const payment of Object.values(state.payments)) {
-      if (payment.status !== 'AUTHORIZED' || !payment.authorizedAt || Date.parse(payment.authorizedAt) > deadline) continue;
-      payment.confirmedAmount = payment.amount;
-      payment.remaining = payment.amount;
-      setStatus(payment, 'CONFIRMED');
-      persist();
-      scheduleNotification(payment, 'CONFIRMED');
-      console.log(`[mock] auto-confirmed hold ${payment.paymentId} after ${AUTO_CONFIRM_MS}ms (bank does this in 4-7 days)`);
-    }
-  }
-}, 1000);
+  tickBank();
+}, 1000).unref();
 
 restore();
 
@@ -1040,4 +1576,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { server, state, tokenOf, CARDS, route, persist, restore, TERMINAL_KEY, TERMINAL_PASSWORD };
+module.exports = { server, state, clock, scenarios, tokenOf, CARDS, route, persist, restore, TERMINAL_KEY, TERMINAL_PASSWORD };
