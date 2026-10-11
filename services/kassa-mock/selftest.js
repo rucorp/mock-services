@@ -23,7 +23,7 @@ function check(name, cond, extra = '') {
 
 function request(method, url, body = null, headers = {}) {
   return new Promise((resolve, reject) => {
-    const data = body ? JSON.stringify(body) : null;
+    const data = body === null || body === undefined ? null : (typeof body === 'string' ? body : JSON.stringify(body));
     const req = http.request(BASE + url, {
       method,
       headers: { 'Content-Type': 'application/json', ...(data ? { 'Content-Length': Buffer.byteLength(data) } : {}), ...headers },
@@ -435,6 +435,10 @@ async function main() {
   const journalResp = (await request('GET', '/admin/journal')).json();
   check('/admin/journal содержит готовый curl-сниппет для воспроизведения',
     Array.isArray(journalResp.entries) && journalResp.entries.length > 0 && journalResp.entries[journalResp.entries.length - 1].curl.startsWith('curl '));
+  const tokenEntry = journalResp.entries.find((entry) => String(entry.path).includes('/Main/sell?token='));
+  check('#23 F-04: Kassa сохраняет query-token в сниппете только как YOUR_TOKEN',
+    Boolean(tokenEntry && tokenEntry.path.includes('token=YOUR_TOKEN') && tokenEntry.curl.includes('token=YOUR_TOKEN')
+      && !tokenEntry.path.includes(token) && !tokenEntry.curl.includes(token)));
 
   /* --- #22 (F-07/F-08): доступ к управляющей поверхности и SSRF-политика --- */
 
@@ -469,6 +473,36 @@ async function main() {
       check('#22: getToken (контракт Ferma) не требует operator-токена', Boolean(tk));
       const sell = await requestOn(child.port, 'POST', `/possystem/v1/Main/sell?token=${tk}`, validBody('auth-check-1'));
       check('#22: sell (контракт Ferma) не требует operator-токена', Boolean(sell.json() && sell.json().uuid));
+    } finally {
+      child.stop();
+    }
+  }
+
+  // #23 F-01/F-02: опасный снимок отклоняется до изменения state, а тело
+  // выше byte-limit возвращает контролируемый 413 с DX-ошибкой.
+  {
+    const child = await startKassaChild({ MOCK_OPERATOR_TOKEN: 'op-secret' });
+    const auth = { Authorization: 'Bearer op-secret' };
+    try {
+      const before = (await requestOn(child.port, 'GET', '/mock/state', null, auth)).json().state;
+      const unsafe = '{"payments":{"__proto__":{"sandbox":"f01-polluted"}}}';
+      const rejected = await requestOn(child.port, 'POST', '/mock/state', unsafe, auth);
+      const error = rejected.json() && rejected.json().error;
+      check('#23 F-01: /mock/state отклоняет __proto__ с DX-ошибкой 400',
+        rejected.status === 400 && error && error.code === 4 && error.field === 'state'
+          && String(error.text).includes('__proto__') && Boolean(error.hint));
+
+      const switchAfterReject = await requestOn(child.port, 'POST', '/mock/sandboxes', {}, auth);
+      check('#23 F-01: импорт не загрязнил Object.prototype (пустой body не переключает sandbox)',
+        switchAfterReject.status === 200 && switchAfterReject.json().current === 'default');
+      const after = (await requestOn(child.port, 'GET', '/mock/state', null, auth)).json().state;
+      check('#23 F-01: отклонённый импорт не меняет state', JSON.stringify(after) === JSON.stringify(before));
+
+      const oversized = await requestOn(child.port, 'POST', '/mock/state', ' '.repeat(5 * 1024 * 1024 + 1), auth);
+      const bodyError = oversized.json() && oversized.json().error;
+      check('#23 F-02: /mock/state отдаёт 413 + DX при лимит+1',
+        oversized.status === 413 && bodyError && bodyError.code === 4 && bodyError.field === 'body'
+          && Boolean(bodyError.hint));
     } finally {
       child.stop();
     }
@@ -652,7 +686,7 @@ function freePort() {
 /** Запрос на произвольный порт (для фазы рестарта). */
 function requestOn(port, method, url, body = null, headers = {}) {
   return new Promise((resolve, reject) => {
-    const data = body ? JSON.stringify(body) : null;
+    const data = body === null || body === undefined ? null : (typeof body === 'string' ? body : JSON.stringify(body));
     const req = http.request(`http://127.0.0.1:${port}${url}`, {
       method,
       headers: { 'Content-Type': 'application/json', ...(data ? { 'Content-Length': Buffer.byteLength(data) } : {}), ...headers },

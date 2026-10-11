@@ -977,7 +977,7 @@ const server = http.createServer(async (req, res) => {
       const parsed = (() => { try { return JSON.parse(res.__mockBody || '{}'); } catch { return {}; } })();
       journal.record({
         method: req.method,
-        path: url,
+        path: req.url || url,
         status: code,
         ms: Date.now() - started,
         body: bodySummary(parsed),
@@ -1083,8 +1083,20 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' || req.method === 'PUT') {
         const raw = await readBody(req);
         let body = {};
-        try { body = JSON.parse(raw || '{}'); } catch { return jsonRaw(res, 400, errBody(4, 'Некорректный JSON')); }
-        return sendJson(res, sandboxManager.importState(body));
+        try { body = JSON.parse(raw || '{}'); } catch {
+          return jsonRaw(res, 400, errBody(4, 'Некорректный JSON снимка состояния', {
+            field: 'state',
+            hint: 'Передайте экспорт /mock/state без редактирования опасных ключей __proto__, constructor и prototype.',
+          }));
+        }
+        try {
+          return sendJson(res, sandboxManager.importState(body));
+        } catch (e) {
+          return jsonRaw(res, 400, errBody(4, 'Недопустимый снимок состояния: ' + e.message, {
+            field: 'state',
+            hint: 'Исправьте снимок и повторите импорт; ключи __proto__, constructor и prototype запрещены на всех уровнях.',
+          }));
+        }
       }
     }
 
@@ -1578,6 +1590,12 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
 
     return jsonRaw(res, 404, errBody(404, 'Неизвестный маршрут'));
   } catch (e) {
+    if (e && e.code === 'BODY_TOO_LARGE') {
+      return jsonRaw(res, 413, errBody(4, 'Размер тела запроса превышает допустимый лимит', {
+        field: 'body',
+        hint: `Уменьшите тело запроса до ${e.maxBytes} байт или менее.`,
+      }));
+    }
     log('[kassa-mock] handler error:', e.message);
     return jsonRaw(res, 500, errBody(500, e.message));
   }

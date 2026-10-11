@@ -50,26 +50,127 @@ function flagEnabled(value, fallback = false) {
 
 /* ------------------------------------------------------------------ store */
 
-const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const isPlainObject = (v) => {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
+};
+const DANGEROUS_STATE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
+ * Снимок состояния — только JSON-дерево с безопасными словарями. Любой объект
+ * копируется в словарь без прототипа, а ключи, способные менять цепочку
+ * прототипов, отклоняются до того, как снимок попадёт в live state.
+ */
+function safeStateSnapshot(value, label = 'state', requireObjectRoot = true) {
+  if (requireObjectRoot && !isPlainObject(value)) {
+    throw new Error(`${label}: ожидается JSON-объект состояния`);
+  }
+
+  const active = new WeakSet();
+  const stack = [];
+  let root;
+
+  function allocate(node, nodePath, assign) {
+    if (node === null || typeof node === 'string' || typeof node === 'boolean'
+        || (typeof node === 'number' && Number.isFinite(node))) {
+      assign(node);
+      return;
+    }
+    if (Array.isArray(node)) {
+      const copy = new Array(node.length);
+      assign(copy);
+      stack.push({ source: node, target: copy, path: nodePath, array: true });
+      return;
+    }
+    if (isPlainObject(node)) {
+      const copy = Object.create(null);
+      assign(copy);
+      stack.push({ source: node, target: copy, path: nodePath, array: false });
+      return;
+    }
+    throw new Error(`${label}: недопустимое значение по пути ${nodePath} (ожидался JSON)`);
+  }
+
+  allocate(value, label, (copy) => { root = copy; });
+  while (stack.length) {
+    const item = stack.pop();
+    if (item.exit) {
+      active.delete(item.source);
+      continue;
+    }
+    const { source, target, path: nodePath, array } = item;
+    if (active.has(source)) throw new Error(`${label}: циклическая ссылка по пути ${nodePath}`);
+    active.add(source);
+    stack.push({ source, exit: true });
+
+    if (array) {
+      const keys = Object.keys(source);
+      if (keys.length !== source.length || keys.some((key, index) => key !== String(index))) {
+        throw new Error(`${label}: недопустимый массив по пути ${nodePath}`);
+      }
+      for (let index = 0; index < source.length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(source, String(index));
+        if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+          throw new Error(`${label}: недопустимое значение по пути ${nodePath}[${index}]`);
+        }
+        allocate(descriptor.value, `${nodePath}[${index}]`, (copy) => { target[index] = copy; });
+      }
+      continue;
+    }
+
+    for (const key of Object.keys(source)) {
+      const keyPath = `${nodePath}.${JSON.stringify(key)}`;
+      if (DANGEROUS_STATE_KEYS.has(key)) {
+        throw new Error(`${label}: запрещён опасный ключ ${JSON.stringify(key)} по пути ${keyPath}`);
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(source, key);
+      if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+        throw new Error(`${label}: недопустимое значение по пути ${keyPath}`);
+      }
+      allocate(descriptor.value, keyPath, (copy) => {
+        Object.defineProperty(target, key, {
+          value: copy,
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      });
+    }
+  }
+  return root;
+}
 
 /**
  * Слияние восстановленного состояния «на месте»: объекты, на которые уже
  * ссылаются подсистемы (очередь вебхуков держит `state.notifications`,
- * админка — `state.receipts`), должны сохранить идентичность.
- *
- * Раньше использовался Object.assign: он ПОДМЕНЯЛ вложенные объекты, и после
- * рестарта с MOCK_STATE_FILE очередь продолжала смотреть в старый (пустой)
- * объект — недоставленные вебхуки молча терялись (дефект A-2 аудита).
+ * админка — `state.receipts`), должны сохранить идентичность. Перед слиянием
+ * снимок целиком проверяется, а изменяемые state-объекты получают null-proto.
  */
-function mergeInto(target, source) {
+function mergeValidatedInto(target, source) {
+  if (Object.getPrototypeOf(target) !== null) Object.setPrototypeOf(target, null);
   for (const key of Object.keys(target)) {
-    if (!(key in source)) delete target[key];
+    if (!Object.prototype.hasOwnProperty.call(source, key)) delete target[key];
   }
   for (const [key, value] of Object.entries(source)) {
-    if (isPlainObject(target[key]) && isPlainObject(value)) mergeInto(target[key], value);
-    else target[key] = value;
+    if (Object.prototype.hasOwnProperty.call(target, key)
+        && isPlainObject(target[key]) && isPlainObject(value)) {
+      mergeValidatedInto(target[key], value);
+    } else {
+      Object.defineProperty(target, key, {
+        value,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
   }
   return target;
+}
+
+function mergeInto(target, source) {
+  const safeSource = safeStateSnapshot(source);
+  return mergeValidatedInto(target, safeSource);
 }
 
 function createStore({ stateFile = '', log = console.error } = {}) {
@@ -86,7 +187,8 @@ function createStore({ stateFile = '', log = console.error } = {}) {
   const restore = () => {
     if (!stateFile || !fs.existsSync(stateFile)) return;
     try {
-      mergeInto(state, JSON.parse(fs.readFileSync(stateFile, 'utf8')));
+      const snapshot = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+      mergeInto(state, snapshot);
       log(`state restored from ${stateFile}`);
     } catch (e) {
       log(`state restore failed: ${e.message}`);
@@ -107,13 +209,46 @@ function createLog(tag) {
 
 function readBody(req, maxBytes = 5 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', (c) => {
-      data += c;
-      if (data.length > maxBytes) reject(new Error('body too large'));
+    const byteLimit = Number.isFinite(Number(maxBytes)) ? Math.max(0, Math.floor(Number(maxBytes))) : 5 * 1024 * 1024;
+    let chunks = [];
+    let storedBytes = 0;
+    let tooLarge = false;
+    let settled = false;
+
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+
+    req.on('data', (chunk) => {
+      // После отказа продолжаем читать/дренировать поток, но больше ничего не
+      // копируем и не накапливаем — клиент может продолжать отправку тела.
+      if (tooLarge || settled) return;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const chunkBytes = Buffer.byteLength(buffer);
+      if (storedBytes + chunkBytes > byteLimit) {
+        tooLarge = true;
+        chunks = [];
+        storedBytes = 0;
+        const error = new Error(`Размер тела запроса превышает лимит ${byteLimit} байт`);
+        error.code = 'BODY_TOO_LARGE';
+        error.statusCode = 413;
+        error.maxBytes = byteLimit;
+        fail(error);
+        return;
+      }
+      chunks.push(buffer);
+      storedBytes += chunkBytes;
     });
-    req.on('end', () => resolve(data));
-    req.on('error', reject);
+    req.on('end', () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks, storedBytes).toString('utf8'));
+      chunks = [];
+    });
+    req.on('aborted', () => fail(new Error('request aborted')));
+    req.on('error', fail);
   });
 }
 
@@ -164,23 +299,59 @@ function escapeHtml(value) {
 /**
  * Генерация готовой команды curl для воспроизведения запроса из журнала (/admin).
  */
-function buildCurlCommand({ baseUrl = 'http://localhost:3100', method = 'POST', path: reqPath = '/', headers = {}, rawBody = '', body = null }) {
-  const fullUrl = `${String(baseUrl).replace(/\/$/, '')}${reqPath}`;
-  const parts = [`curl -sS -X ${method} '${fullUrl}'`];
-  parts.push("-H 'Content-Type: application/json'");
-  for (const [k, v] of Object.entries(headers || {})) {
-    if (!v) continue;
-    const low = k.toLowerCase();
-    if (low === 'x-mock-scenario' || low === 'x-mock-sandbox' || low === 'x-mock-latency') {
-      parts.push(`-H '${k}: ${String(v).replace(/'/g, "'\\''")}'`);
+const SENSITIVE_QUERY_KEYS = new Set([
+  'token', 'admintoken', 'operatortoken', 'accesstoken', 'refreshtoken',
+  'password', 'passwd', 'secret', 'clientsecret', 'apikey', 'authorization', 'signature', 'sig',
+]);
+
+function redactQuerySecrets(value) {
+  const raw = String(value || '');
+  const queryIndex = raw.indexOf('?');
+  if (queryIndex < 0) return raw;
+  const hashIndex = raw.indexOf('#', queryIndex);
+  const queryEnd = hashIndex < 0 ? raw.length : hashIndex;
+  const query = raw.slice(queryIndex + 1, queryEnd);
+  const params = new URLSearchParams(query);
+  let changed = false;
+  for (const key of new Set(params.keys())) {
+    const normalized = key.toLowerCase().replace(/[^a-z]/g, '');
+    const tokenKey = normalized.endsWith('token');
+    const sensitive = SENSITIVE_QUERY_KEYS.has(normalized) || tokenKey
+      || normalized.endsWith('password') || normalized.endsWith('secret') || normalized.endsWith('apikey');
+    if (sensitive) {
+      params.set(key, tokenKey ? 'YOUR_TOKEN' : 'REDACTED');
+      changed = true;
     }
+  }
+  if (!changed) return raw;
+  return `${raw.slice(0, queryIndex + 1)}${params.toString()}${raw.slice(queryEnd)}`;
+}
+
+const shellQuote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
+
+/**
+ * Генерация готовой команды curl для воспроизведения запроса из журнала (/admin).
+ * Все динамические части заключаются в shell single quotes; секреты query
+ * заменяются на безопасные placeholder-ы до формирования команды.
+ */
+function buildCurlCommand({ baseUrl = 'http://localhost:3100', method = 'POST', path: reqPath = '/', headers = {}, rawBody = '', body = null }) {
+  const fullUrl = redactQuerySecrets(`${String(baseUrl).replace(/\/$/, '')}${reqPath}`);
+  const parts = [`curl -sS -X ${shellQuote(method)} ${shellQuote(fullUrl)}`];
+  parts.push(`-H ${shellQuote('Content-Type: application/json')}`);
+  const allowedHeaders = new Map([
+    ['x-mock-scenario', 'X-Mock-Scenario'],
+    ['x-mock-sandbox', 'X-Mock-Sandbox'],
+    ['x-mock-latency', 'X-Mock-Latency'],
+  ]);
+  for (const [key, value] of Object.entries(headers || {})) {
+    const canonical = allowedHeaders.get(key.toLowerCase());
+    if (!canonical || value === undefined || value === null || value === '') continue;
+    parts.push(`-H ${shellQuote(`${canonical}: ${String(value)}`)}`);
   }
   const payloadStr = rawBody
     ? String(rawBody)
     : (body && Object.keys(body).length ? JSON.stringify(body) : '');
-  if (payloadStr) {
-    parts.push(`-d '${payloadStr.replace(/'/g, "'\\''")}'`);
-  }
+  if (payloadStr) parts.push(`-d ${shellQuote(payloadStr)}`);
   return parts.join(' ');
 }
 
@@ -192,15 +363,18 @@ function buildCurlCommand({ baseUrl = 'http://localhost:3100', method = 'POST', 
 function createJournal({ size = 200, baseUrl = '' } = {}) {
   const entries = [];
   function record(entry) {
+    const requestPath = entry.path || '/';
     const curl = entry.curl || buildCurlCommand({
       baseUrl: entry.baseUrl || baseUrl || 'http://localhost:3100',
       method: entry.method || 'POST',
-      path: entry.path || '/',
+      path: requestPath,
       headers: entry.headers || {},
       rawBody: entry.rawBody || '',
       body: entry.body || null,
     });
-    entries.push({ at: new Date().toISOString(), ...entry, curl });
+    const safeEntry = { ...entry, path: redactQuerySecrets(requestPath) };
+    if (safeEntry.baseUrl) safeEntry.baseUrl = redactQuerySecrets(safeEntry.baseUrl);
+    entries.push({ at: new Date().toISOString(), ...safeEntry, curl });
     if (entries.length > size) entries.splice(0, entries.length - size);
   }
   return { record, list: () => entries.slice(), clear: () => { entries.length = 0; } };
@@ -211,29 +385,118 @@ function createJournal({ size = 200, baseUrl = '' } = {}) {
  * Редиректы не отслеживаются (Node-клиент их не выполняет) — для SSRF-политики
  * это безопасное поведение по умолчанию; схема кроме http/https отклоняется.
  */
-function postJson(url, payload, timeoutMs = 10000) {
+const DEFAULT_WEBHOOK_RESPONSE_MAX_BYTES = 64 * 1024;
+const DEFAULT_WEBHOOK_DEADLINE_MS = 10000;
+const WEBHOOK_LAST_BODY_MAX_CHARS = 1024;
+
+function postJson(url, payload, timeoutMs = DEFAULT_WEBHOOK_DEADLINE_MS, options = {}) {
   return new Promise((resolve, reject) => {
     const target = new URL(url);
     if (target.protocol !== 'http:' && target.protocol !== 'https:') {
       reject(new Error(`Исходящий запрос на «${url}» отклонён: схема ${target.protocol} не поддерживается (разрешены http/https)`));
       return;
     }
+    const settings = options && typeof options === 'object' ? options : {};
+    const maxResponseBytes = Number.isFinite(Number(settings.maxResponseBytes))
+      ? Math.max(0, Math.floor(Number(settings.maxResponseBytes)))
+      : DEFAULT_WEBHOOK_RESPONSE_MAX_BYTES;
+    const deadlineMs = Number.isFinite(Number(settings.deadlineMs))
+      ? Math.max(0, Math.floor(Number(settings.deadlineMs)))
+      : (Number.isFinite(Number(timeoutMs)) ? Math.max(0, Math.floor(Number(timeoutMs))) : DEFAULT_WEBHOOK_DEADLINE_MS);
+    const inactivityTimeoutMs = Number.isFinite(Number(timeoutMs))
+      ? Math.max(0, Math.floor(Number(timeoutMs)))
+      : DEFAULT_WEBHOOK_DEADLINE_MS;
     const data = typeof payload === 'string' ? payload : JSON.stringify(payload);
     const transport = target.protocol === 'https:' ? https : http;
-    const req = transport.request({
+    let settled = false;
+    let deadlineTimer;
+    let response;
+    let responseBytes = 0;
+    const chunks = [];
+
+    const clearDeadline = () => {
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      deadlineTimer = null;
+    };
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      clearDeadline();
+      reject(error);
+    };
+    const abort = (error) => {
+      if (settled) return;
+      settled = true;
+      clearDeadline();
+      if (response && !response.destroyed) response.destroy();
+      if (req && !req.destroyed) req.destroy(error);
+      reject(error);
+    };
+
+    let req;
+    req = transport.request({
       hostname: target.hostname,
       port: target.port || (target.protocol === 'https:' ? 443 : 80),
       path: target.pathname + target.search,
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
-      timeout: timeoutMs,
+      timeout: inactivityTimeoutMs,
     }, (res) => {
-      let body = '';
-      res.on('data', (c) => { body += c; });
-      res.on('end', () => resolve({ statusCode: res.statusCode, body }));
+      response = res;
+      res.on('data', (chunk) => {
+        if (settled) return;
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        const chunkBytes = Buffer.byteLength(buffer);
+        if (responseBytes + chunkBytes > maxResponseBytes) {
+          const error = new Error(`webhook response exceeds ${maxResponseBytes} byte limit`);
+          error.code = 'WEBHOOK_RESPONSE_TOO_LARGE';
+          error.maxBytes = maxResponseBytes;
+          abort(error);
+          return;
+        }
+        responseBytes += chunkBytes;
+        chunks.push(buffer);
+      });
+      res.on('end', () => {
+        if (settled) return;
+        settled = true;
+        clearDeadline();
+        resolve({ statusCode: res.statusCode, body: Buffer.concat(chunks, responseBytes).toString('utf8') });
+      });
+      res.on('aborted', () => {
+        const error = new Error('webhook response aborted before completion');
+        error.code = 'WEBHOOK_RESPONSE_ABORTED';
+        fail(error);
+      });
+      res.on('error', fail);
+      res.on('close', () => {
+        if (!settled && !res.complete) {
+          const error = new Error('webhook response closed before completion');
+          error.code = 'WEBHOOK_RESPONSE_ABORTED';
+          fail(error);
+        }
+      });
+
+      const declaredLength = Number(res.headers['content-length']);
+      if (Number.isFinite(declaredLength) && declaredLength > maxResponseBytes) {
+        const error = new Error(`webhook response exceeds ${maxResponseBytes} byte limit`);
+        error.code = 'WEBHOOK_RESPONSE_TOO_LARGE';
+        error.maxBytes = maxResponseBytes;
+        abort(error);
+      }
     });
-    req.on('timeout', () => req.destroy(new Error('timeout')));
-    req.on('error', reject);
+    req.on('timeout', () => {
+      const error = new Error(`webhook socket inactive for ${inactivityTimeoutMs}ms`);
+      error.code = 'WEBHOOK_SOCKET_TIMEOUT';
+      abort(error);
+    });
+    req.on('error', fail);
+    deadlineTimer = setTimeout(() => {
+      const error = new Error(`webhook deadline exceeded after ${deadlineMs}ms`);
+      error.code = 'WEBHOOK_DEADLINE_EXCEEDED';
+      abort(error);
+    }, deadlineMs);
+    if (typeof deadlineTimer.unref === 'function') deadlineTimer.unref();
     req.write(data);
     req.end();
   });
@@ -374,6 +637,13 @@ async function assertPublicHost(url, { lookup = dns.promises.lookup } = {}) {
  *      слать снова»).
  *   3. Ошибка `request(entry)` (битый URL в состоянии) не роняет тик.
  */
+function webhookDiagnosticBody(value) {
+  const text = String(value ?? '');
+  if (text.length <= WEBHOOK_LAST_BODY_MAX_CHARS) return text;
+  const suffix = '… [truncated]';
+  return `${text.slice(0, WEBHOOK_LAST_BODY_MAX_CHARS - suffix.length)}${suffix}`;
+}
+
 function createDeliveryQueue({
   entries,
   retryMs,
@@ -409,17 +679,20 @@ function createDeliveryQueue({
       const { url, data } = request(entry);
       if (blockPrivateHosts) await assertPublicHost(url);
       const res = await postJson(url, data);
+      const diagnosticBody = webhookDiagnosticBody(res.body);
       entry.lastStatus = res.statusCode;
-      entry.lastBody = res.body;
+      entry.lastBody = diagnosticBody;
       if (isOk(res)) {
         onSuccess(entry, res, id);
         log(`webhook ${id} delivered -> ${url} (${entry.attempts} attempt(s))`);
       } else {
-        onFail(entry, res.statusCode, res.body, id);
+        onFail(entry, res.statusCode, diagnosticBody, id);
         log(`webhook ${id} failed status=${res.statusCode}, retry in ${retryMs}ms`);
       }
     } catch (e) {
-      onFail(entry, `ERR ${e.message}`, e.message, id);
+      const diagnostic = webhookDiagnosticBody(e.message);
+      const status = webhookDiagnosticBody(`ERR ${e.code ? `${e.code}: ` : ''}${e.message}`);
+      onFail(entry, status, diagnostic, id);
       log(`webhook ${id} error: ${e.message}, retry in ${retryMs}ms`);
     } finally {
       inFlight.delete(id);
@@ -878,27 +1151,17 @@ async function applyRequestChaos(req, scenarioSpec = null) {
  *     дефолтная песочница ('default') — 100% обратная совместимость.
  */
 function createSandboxManager({ state, persist = () => {}, initialStateFactory }) {
+  const initialSnapshot = safeStateSnapshot(state, 'initial state');
+  mergeValidatedInto(state, initialSnapshot);
   const sandboxes = new Map();
   let activeId = 'default';
 
-  const clone = (obj) => JSON.parse(JSON.stringify(obj));
+  const clone = (obj) => safeStateSnapshot(JSON.parse(JSON.stringify(obj)), 'sandbox snapshot', false);
 
   function clearAndMergeInPlace(target, source) {
-    for (const k of Object.keys(target)) {
-      if (isPlainObject(target[k]) && isPlainObject(source[k])) {
-        for (const subKey of Object.keys(target[k])) {
-          if (!(subKey in source[k])) delete target[k][subKey];
-        }
-        mergeInto(target[k], clone(source[k]));
-      } else if (!(k in source)) {
-        delete target[k];
-      } else {
-        target[k] = clone(source[k]);
-      }
-    }
-    for (const [k, v] of Object.entries(source)) {
-      if (!(k in target)) target[k] = clone(v);
-    }
+    // Валидация/копирование завершаются до первой модификации live state.
+    const safeSource = safeStateSnapshot(source, 'state snapshot');
+    mergeValidatedInto(target, safeSource);
   }
 
   function resolveSandboxId(req) {

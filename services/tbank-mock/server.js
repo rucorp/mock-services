@@ -1768,10 +1768,25 @@ async function route(req, res) {
       });
     }
     if (req.method === 'POST' || req.method === 'PUT') {
+      if (raw.trim() && String(req.headers['content-type'] || '').includes('application/json')) {
+        try { JSON.parse(raw); } catch {
+          return sendJson(res, err(7, 'Некорректный JSON снимка состояния', null, {
+            field: 'state',
+            hint: 'Передайте экспорт /mock/state без редактирования опасных ключей __proto__, constructor и prototype.',
+          }), 400);
+        }
+      }
       const targetSandbox = (body && body.sandbox) || undefined;
       const snapshot = (body && body.state) || body || {};
-      const imported = sandboxManager.importState(snapshot, targetSandbox);
-      return sendJson(res, { ok: true, sandbox: imported });
+      try {
+        const imported = sandboxManager.importState(snapshot, targetSandbox);
+        return sendJson(res, { ok: true, sandbox: imported });
+      } catch (e) {
+        return sendJson(res, err(7, 'Недопустимый снимок состояния', e.message, {
+          field: 'state',
+          hint: 'Исправьте снимок и повторите импорт; ключи __proto__, constructor и prototype запрещены на всех уровнях.',
+        }), 400);
+      }
     }
   }
 
@@ -2306,6 +2321,15 @@ async function route(req, res) {
 
 const server = http.createServer((req, res) => {
   route(req, res).catch((e) => {
+    if (e && e.code === 'BODY_TOO_LARGE') {
+      try {
+        sendJson(res, err(7, 'Размер тела запроса превышает допустимый лимит', e.message, {
+          field: 'body',
+          hint: `Уменьшите тело запроса до ${e.maxBytes} байт или менее.`,
+        }), 413);
+      } catch { /* headers sent */ }
+      return;
+    }
     console.error('[mock] request error:', e);
     try { sendJson(res, err(5000, 'Внутренняя ошибка мок-стенда')); } catch { /* headers sent */ }
   });

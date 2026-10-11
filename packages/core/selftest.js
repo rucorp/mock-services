@@ -42,6 +42,15 @@ function check(name, fn) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const listen = (srv) => new Promise((r) => srv.listen(0, '127.0.0.1', () => r(srv.address().port)));
+function withTimeout(promise, timeoutMs, message) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
 
 async function acheck(name, fn) {
   try {
@@ -72,9 +81,10 @@ async function main() {
   const queueRef = consumer.state.notifications;
   consumer.restore();
 
-  check('restore() сохраняет идентичность state.notifications (очередь видит восстановленные записи)', () => {
+  check('restore() сохраняет ссылку очереди и восстанавливает словарь без прототипа', () => {
     assert.strictEqual(consumer.state.notifications, queueRef, 'объект подменён — очередь смотрит в пустой объект');
     assert.strictEqual(consumer.state.notifications['1'].url, 'http://x/');
+    assert.strictEqual(Object.getPrototypeOf(consumer.state.notifications), null, 'state-map должен быть безопасным словарём');
   });
 
   check('restore() удаляет ключи, которых нет в файле (не тащит мусор прошлого процесса)', () => {
@@ -83,6 +93,47 @@ async function main() {
     fresh.restore();
     assert.ok(!fresh.state.notifications.ghost, 'ключ ghost должен исчезнуть');
     assert.ok(fresh.state.notifications['1'], 'запись из файла должна остаться');
+  });
+
+  {
+    const pollutedKey = `f01_restore_${process.pid}`;
+    const unsafeFile = path.join(dir, 'unsafe-state.json');
+    const logs = [];
+    fs.writeFileSync(unsafeFile, JSON.stringify({ payments: JSON.parse(`{"__proto__":{"${pollutedKey}":true}}`) }));
+    const guarded = core.createStore({ stateFile: unsafeFile, log: (message) => logs.push(message) });
+    guarded.state.payments = { keep: { id: 'keep' } };
+    const paymentsRef = guarded.state.payments;
+    guarded.restore();
+    check('restore() целиком отклоняет __proto__ до merge: прототип чист, state не изменён и есть DX-лог', () => {
+      assert.strictEqual(Object.prototype[pollutedKey], undefined);
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(Object.prototype, pollutedKey), false);
+      assert.strictEqual(guarded.state.payments, paymentsRef);
+      assert.deepStrictEqual(Object.keys(guarded.state.payments), ['keep']);
+      assert.ok(logs.some((message) => message.includes('__proto__') && message.includes('state restore failed')));
+    });
+    delete Object.prototype[pollutedKey];
+  }
+
+  check('createSandboxManager отклоняет опасные ключи без частичного импорта', () => {
+    const pollutedKey = `f01_import_${process.pid}`;
+    const state = { payments: { keep: { id: 'keep' } }, notifications: {} };
+    const paymentsRef = state.payments;
+    const manager = core.createSandboxManager({ state, initialStateFactory: () => ({ payments: {}, notifications: {} }) });
+    const unsafe = JSON.parse(`{"payments":{"__proto__":{"${pollutedKey}":true}}}`);
+    assert.throws(() => manager.importState(unsafe), /__proto__/);
+    assert.strictEqual(Object.prototype[pollutedKey], undefined);
+    assert.strictEqual(state.payments, paymentsRef);
+    assert.deepStrictEqual(Object.keys(state.payments), ['keep']);
+    delete Object.prototype[pollutedKey];
+  });
+
+  check('safe state schema rejects constructor and prototype at every nesting level', () => {
+    const manager = core.createSandboxManager({ state: { payments: {}, notifications: {} }, initialStateFactory: () => ({ payments: {}, notifications: {} }) });
+    for (const key of ['constructor', 'prototype']) {
+      const unsafe = JSON.parse(`{"payments":{"entry":{"${key}":{"polluted":true}}}}`);
+      assert.throws(() => manager.importState(unsafe), new RegExp(key));
+    }
+    assert.strictEqual(Object.prototype.polluted, undefined);
   });
 
   /* ------------------------------------------------ delivery queue */
@@ -141,6 +192,69 @@ async function main() {
     assert.ok(slowEntries.a.attempts <= hits.slow, 'attempts не может превышать число отправок');
   });
 
+  await acheck('postJson обрывает слишком большой ответ и применяет абсолютный deadline к trickle-response (F-03)', async () => {
+    const fixture = http.createServer((req, res) => {
+      req.resume();
+      if (req.url === '/large') {
+        const body = Buffer.alloc(70 * 1024, 'L');
+        res.writeHead(200, { 'Content-Length': body.length });
+        res.end(body);
+        return;
+      }
+      if (req.url === '/trickle') {
+        res.writeHead(200);
+        const timer = setInterval(() => res.write('x'), 35);
+        res.on('close', () => clearInterval(timer));
+        return;
+      }
+      if (req.url === '/medium') {
+        const body = Buffer.alloc(16 * 1024, 'M');
+        res.writeHead(500, { 'Content-Length': body.length });
+        res.end(body);
+        return;
+      }
+      res.writeHead(200);
+      res.end('OK');
+    });
+    const fixturePort = await listen(fixture);
+    try {
+      await assert.rejects(
+        () => core.postJson(`http://127.0.0.1:${fixturePort}/large`, { ping: true }, 500, { maxResponseBytes: 32, deadlineMs: 500 }),
+        (error) => error.code === 'WEBHOOK_RESPONSE_TOO_LARGE',
+      );
+      await assert.rejects(
+        () => core.postJson(`http://127.0.0.1:${fixturePort}/trickle`, { ping: true }, 1000, { maxResponseBytes: 4096, deadlineMs: 150 }),
+        (error) => error.code === 'WEBHOOK_DEADLINE_EXCEEDED',
+      );
+
+      let completed = 0;
+      let resolveCompleted;
+      const completedThreeTimes = new Promise((resolve) => { resolveCompleted = resolve; });
+      const entries = {
+        oversized: { url: `http://127.0.0.1:${fixturePort}/large`, attempts: 0, nextAttemptAt: 0 },
+        medium: { url: `http://127.0.0.1:${fixturePort}/medium`, attempts: 0, nextAttemptAt: 0 },
+        healthy: { url: `http://127.0.0.1:${fixturePort}/ok`, attempts: 0, nextAttemptAt: 0 },
+      };
+      const queue = core.createDeliveryQueue({
+        entries,
+        retryMs: 100,
+        maxAttempts: 3,
+        log: () => {},
+        persist: () => { completed += 1; if (completed === 3) resolveCompleted(); },
+        request: (entry) => ({ url: entry.url, data: { ping: true } }),
+      });
+      await queue.tick();
+      await withTimeout(completedThreeTimes, 1500, 'delivery queue не завершил callback после abort');
+      assert.strictEqual(entries.healthy.done, true, 'успешный callback после abort должен выполниться');
+      assert.ok(String(entries.oversized.lastStatus).includes('WEBHOOK_RESPONSE_TOO_LARGE'));
+      assert.ok(entries.oversized.lastBody.length <= 1024, 'error lastBody ограничен по длине');
+      assert.strictEqual(entries.medium.lastStatus, 500);
+      assert.ok(entries.medium.lastBody.length <= 1024, 'даже большой отказной body сохраняется только усечённым');
+    } finally {
+      fixture.close();
+    }
+  });
+
   /* --------------------------------------------------------- helpers */
   check('escapeHtml экранирует данные интегратора', () => {
     assert.strictEqual(core.escapeHtml('<img src=x onerror=alert(1)>'), '&lt;img src=x onerror=alert(1)&gt;');
@@ -152,6 +266,75 @@ async function main() {
     assert.deepStrictEqual(core.parseBody('{"a":1}', 'application/json'), { a: 1 });
     assert.deepStrictEqual(core.parseBody('a=1&b=%D0%B4', 'application/x-www-form-urlencoded'), { a: '1', b: 'д' });
     assert.deepStrictEqual(core.parseBody('', 'application/json'), {});
+  });
+
+  await acheck('readBody считает байты, точно принимает лимит и после 413 больше не копит chunks (F-02)', async () => {
+    const { EventEmitter } = require('events');
+    const exactReq = new EventEmitter();
+    const exactBody = core.readBody(exactReq, 4);
+    exactReq.emit('data', Buffer.from('1234'));
+    exactReq.emit('end');
+    assert.strictEqual(await exactBody, '1234');
+
+    const plusOneReq = new EventEmitter();
+    const plusOne = assert.rejects(core.readBody(plusOneReq, 4), (error) => error.code === 'BODY_TOO_LARGE' && error.statusCode === 413);
+    plusOneReq.emit('data', Buffer.from('12345'));
+    plusOneReq.emit('data', Buffer.alloc(1024 * 1024)); // данные после отказа только дренируются
+    plusOneReq.emit('end');
+    await plusOne;
+
+    const utf8Req = new EventEmitter();
+    const multibyte = assert.rejects(core.readBody(utf8Req, 3), (error) => error.code === 'BODY_TOO_LARGE');
+    utf8Req.emit('data', Buffer.from('éé', 'utf8')); // 2 code units, но 4 байта
+    utf8Req.emit('end');
+    await multibyte;
+  });
+
+  await acheck('HTTP 413 сразу отвечает и продолжает дренировать тело после отказа (F-02)', async () => {
+    const received = { bytes: 0, ended: false };
+    let resolveDrained;
+    const drained = new Promise((resolve) => { resolveDrained = resolve; });
+    const limitedServer = http.createServer((req, res) => {
+      req.on('data', (chunk) => { received.bytes += Buffer.byteLength(chunk); });
+      req.on('end', () => { received.ended = true; resolveDrained(); });
+      core.readBody(req, 8).then(
+        (body) => core.sendJson(res, { body }),
+        (error) => core.sendJson(res, { code: error.code }, error.statusCode || 500),
+      );
+    });
+    const port = await listen(limitedServer);
+    try {
+      const result = await new Promise((resolve, reject) => {
+        let req;
+        let sentAfterRefusal = false;
+        req = http.request({
+          hostname: '127.0.0.1',
+          port,
+          path: '/limited',
+          method: 'POST',
+          headers: { 'Transfer-Encoding': 'chunked' },
+        }, (res) => {
+          let body = '';
+          res.on('data', (chunk) => { body += chunk; });
+          res.on('end', () => resolve({ statusCode: res.statusCode, body, sentAfterRefusal }));
+          try {
+            req.write(Buffer.alloc(64 * 1024, 'x'));
+            req.end();
+            sentAfterRefusal = true;
+          } catch (error) { reject(error); }
+        });
+        req.on('error', reject);
+        req.write(Buffer.alloc(9, 'a'));
+      });
+      await withTimeout(drained, 1500, 'запрос не был дренирован');
+      assert.strictEqual(result.statusCode, 413);
+      assert.strictEqual(JSON.parse(result.body).code, 'BODY_TOO_LARGE');
+      assert.strictEqual(result.sentAfterRefusal, true);
+      assert.strictEqual(received.ended, true);
+      assert.strictEqual(received.bytes, 9 + 64 * 1024);
+    } finally {
+      limitedServer.close();
+    }
   });
 
   check('createErrorCatalog собирает код+поле+подсказку+ссылку (спека §6.2)', () => {
@@ -310,12 +493,34 @@ async function main() {
     assert.strictEqual(core.checkControlAccess(req({ authorization: 'Bearer ' }), opts).allowed, false);
   });
 
-  check('createJournal формирует готовый curl-сниппет для каждого запроса', () => {
+  check('createJournal формирует curl, shell-экранирует динамику и скрывает query-токены (F-04)', () => {
     const j = core.createJournal({ baseUrl: 'http://localhost:3100' });
     j.record({ method: 'POST', path: '/v2/Init', status: 200, ms: 5, body: { OrderId: 'o-1', Amount: '1000' }, headers: { 'x-mock-scenario': 'webhook-drop' } });
     const entry = j.list()[0];
-    assert.ok(entry.curl.includes("curl -sS -X POST 'http://localhost:3100/v2/Init'"));
-    assert.ok(entry.curl.includes('x-mock-scenario: webhook-drop'));
+    assert.ok(entry.curl.includes("curl -sS -X 'POST' 'http://localhost:3100/v2/Init'"));
+    assert.ok(entry.curl.includes("-H 'X-Mock-Scenario: webhook-drop'"));
+
+    const quote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
+    const maliciousPath = "/v1/'$(printf injected)";
+    const maliciousMethod = "PO'ST$(printf method)";
+    const command = core.buildCurlCommand({
+      baseUrl: 'http://example.test',
+      method: maliciousMethod,
+      path: maliciousPath,
+      headers: { 'x-mock-scenario': "drop'$(printf header)" },
+      rawBody: "{\"value\":\"'$(printf body)\"}",
+    });
+    assert.ok(command.includes(quote(maliciousMethod)), 'method должен быть shell-quoted');
+    assert.ok(command.includes(quote(`http://example.test${maliciousPath}`)), "path с ' и $() должен оставаться внутри shell quotes");
+    assert.ok(command.includes(quote("X-Mock-Scenario: drop'$(printf header)")), 'динамический header должен быть shell-quoted');
+    assert.ok(command.includes(quote("{\"value\":\"'$(printf body)\"}")), 'body должен быть shell-quoted');
+
+    const secretJournal = core.createJournal({ baseUrl: 'http://localhost:3101' });
+    secretJournal.record({ method: 'GET', path: '/possystem/v1/report/id?token=ferma-secret&view=full' });
+    const tokenEntry = secretJournal.list()[0];
+    assert.ok(tokenEntry.path.includes('token=YOUR_TOKEN'), tokenEntry.path);
+    assert.ok(tokenEntry.curl.includes('token=YOUR_TOKEN'), tokenEntry.curl);
+    assert.ok(!tokenEntry.path.includes('ferma-secret') && !tokenEntry.curl.includes('ferma-secret'));
   });
 
   check('createSandboxManager изолирует песочницы по X-Mock-Sandbox и сохраняет ссылки state', () => {
@@ -325,6 +530,7 @@ async function main() {
       state: st,
       initialStateFactory: () => ({ payments: {}, notifications: {} }),
     });
+    assert.strictEqual(Object.getPrototypeOf(st.payments), null, 'state dictionary должен быть null-prototype даже до import/restore');
     st.payments.p1 = { id: 'p1' };
     sb.switchTo('ci-run-2');
     assert.strictEqual(st.notifications, notifRef, 'идентичность ссылок должна сохраняться при переключении песочницы');
