@@ -290,16 +290,23 @@ async function main() {
     await multibyte;
   });
 
-  await acheck('HTTP 413 сразу отвечает и продолжает дренировать тело после отказа (F-02)', async () => {
+  await acheck('HTTP 413 корректно отвечает и дренирует тело, отправленное после внутреннего отказа (F-02)', async () => {
     const received = { bytes: 0, ended: false };
     let resolveDrained;
+    let resolveRefused;
     const drained = new Promise((resolve) => { resolveDrained = resolve; });
+    const refused = new Promise((resolve) => { resolveRefused = resolve; });
     const limitedServer = http.createServer((req, res) => {
       req.on('data', (chunk) => { received.bytes += Buffer.byteLength(chunk); });
       req.on('end', () => { received.ended = true; resolveDrained(); });
       core.readBody(req, 8).then(
         (body) => core.sendJson(res, { body }),
-        (error) => core.sendJson(res, { code: error.code }, error.statusCode || 500),
+        (error) => {
+          resolveRefused();
+          // Даём клиенту отправить остаток уже после reject readBody, пока
+          // ответ ещё не закрывает его write-side (поведение одинаково в Node 18+).
+          setTimeout(() => core.sendJson(res, { code: error.code }, error.statusCode || 500), 50);
+        },
       );
     });
     const port = await listen(limitedServer);
@@ -317,14 +324,16 @@ async function main() {
           let body = '';
           res.on('data', (chunk) => { body += chunk; });
           res.on('end', () => resolve({ statusCode: res.statusCode, body, sentAfterRefusal }));
+        });
+        req.on('error', reject);
+        req.write(Buffer.alloc(9, 'a'));
+        refused.then(() => {
           try {
             req.write(Buffer.alloc(64 * 1024, 'x'));
             req.end();
             sentAfterRefusal = true;
           } catch (error) { reject(error); }
-        });
-        req.on('error', reject);
-        req.write(Buffer.alloc(9, 'a'));
+        }, reject);
       });
       await withTimeout(drained, 1500, 'запрос не был дренирован');
       assert.strictEqual(result.statusCode, 413);
