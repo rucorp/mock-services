@@ -10,6 +10,7 @@ WORKDIR /app
 COPY package.json ./
 COPY packages ./packages
 COPY services ./services
+COPY scripts ./scripts
 COPY docs/integration ./docs/integration
 
 ENV NODE_ENV=production \
