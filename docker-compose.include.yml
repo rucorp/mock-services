@@ -1,7 +1,7 @@
 # © 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0
 # SPDX-License-Identifier: Apache-2.0
 #
-# Внешний compose-файл мок-контура (банк + касса + ЮKassa + АТОЛ Онлайн)
+# Внешний compose-файл мок-контура (банк + касса + ЮKassa + АТОЛ Онлайн + Альфа-Банк)
 # для подключения в приложение-потребитель
 # (например, lovii-core на dev-стенде и staging).
 #
@@ -9,9 +9,10 @@
 #   1. Все сервисы живут ТОЛЬКО в профиле `mock` — при обычном `docker compose up -d`
 #      в production (без COMPOSE_PROFILES=mock или `--profile mock`) ни один мок-контейнер
 #      не создаётся и не запускается.
-#   2. Имена сервисов фиксированы (`tbank-mock`, `kassa-mock`, `yookassa-mock`, `atol-mock`) —
-#      внутренние URL `http://tbank-mock:3100/v2`, `http://kassa-mock:3101`,
-#      `http://yookassa-mock:3102/v3` и `http://atol-mock:3103/possystem/v4` не меняются.
+#   2. Имена сервисов фиксированы (`tbank-mock`, `kassa-mock`, `yookassa-mock`, `atol-mock`,
+#      `alfa-mock`) — внутренние URL `http://tbank-mock:3100/v2`, `http://kassa-mock:3101`,
+#      `http://yookassa-mock:3102/v3`, `http://atol-mock:3103/possystem/v4` и
+#      `http://alfa-mock:3104/payment/rest` не меняются.
 #   3. Никакие домены потребителя не зашиты: Caddy-лейблы и публичные URL задаются
 #      переменными окружения (по умолчанию пустые / localhost).
 #   4. Релиз закреплён дайджестом (F-37): `MOCK_IMAGE_DIGEST` по умолчанию —
@@ -218,6 +219,59 @@ services:
     mem_limit: "${MOCK_MEM_LIMIT:-128m}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3103,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    restart: unless-stopped
+
+  alfa-mock:
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.5.0}${MOCK_IMAGE_DIGEST-@sha256:5e2b030f04672691c92b33f9e78099bed3a10616fbf7bcbc1f89668a99e30ef6}
+    profiles: ["mock"]
+    working_dir: /app
+    command: ["node", "services/alfa-mock/server.js"]
+    ports:
+      - "${MOCK_ALFA_BIND_IP:-127.0.0.1}:${MOCK_ALFA_HOST_PORT:-3104}:3104"
+    environment:
+      MOCK_HOST: "0.0.0.0"
+      MOCK_PORT: "3104"
+      MOCK_HEALTH_PATH: "/health"
+      # Дефолты — СИНТЕТИЧЕСКИЕ креды мока (ALFAMOCKTEST/mockpass123, по образцу
+      # TBANKMOCKTEST); реальные тестовые креды Альфа-Банка выдаёт индивидуально,
+      # в конфиг они не зашиваются. Свои — через эти env.
+      MOCK_ALFA_USERNAME: "${MOCK_ALFA_USERNAME:-${ALFA_USERNAME:-ALFAMOCKTEST}}"
+      MOCK_ALFA_PASSWORD: "${MOCK_ALFA_PASSWORD:-${ALFA_PASSWORD:-mockpass123}}"
+      MOCK_ALFA_CALLBACK_SECRET: "${MOCK_ALFA_CALLBACK_SECRET:-${ALFA_CALLBACK_SECRET:-mocksecret123}}"
+      MOCK_TWO_STAGE: "${MOCK_TWO_STAGE:-true}"
+      MOCK_PARTIAL_REFUND: "${MOCK_PARTIAL_REFUND:-true}"
+      MOCK_SSL_PERMITTED: "${MOCK_SSL_PERMITTED:-false}"
+      MOCK_CALLBACK_CHECKSUM: "${MOCK_CALLBACK_CHECKSUM:-true}"
+      MOCK_SESSION_TIMEOUT_SECS: "${MOCK_SESSION_TIMEOUT_SECS:-1200}"
+      MOCK_CALLBACK_RETRY_MS: "${MOCK_CALLBACK_RETRY_MS:-10000}"
+      MOCK_CALLBACK_MAX_ATTEMPTS: "${MOCK_CALLBACK_MAX_ATTEMPTS:-24}"
+      MOCK_DEFAULT_CALLBACK_URL: "${MOCK_ALFA_CALLBACK_URL:-}"
+      MOCK_PUBLIC_BASE_URL: "${MOCK_ALFA_PUBLIC_BASE_URL:-http://localhost:3104}"
+      MOCK_BLOCK_PRIVATE_WEBHOOKS: "${MOCK_BLOCK_PRIVATE_WEBHOOKS:-}"
+      MOCK_VIRTUAL_CLOCK: "${MOCK_VIRTUAL_CLOCK:-}"
+      MOCK_ADMIN_TOKEN: "${MOCK_ADMIN_TOKEN:-}"
+      MOCK_OPERATOR_TOKEN: "${MOCK_OPERATOR_TOKEN:-}"
+      MOCK_HOSTED: "${MOCK_HOSTED:-false}"
+      # RFC-001: изоляция песочниц (см. tbank-mock выше).
+      MOCK_TENANCY: "${MOCK_TENANCY:-}"
+      MOCK_SANDBOX_TOKEN: "${MOCK_SANDBOX_TOKEN:-}"
+      MOCK_SANDBOX_TTL_MS: "${MOCK_SANDBOX_TTL_MS:-}"
+      MOCK_SANDBOX_MAX: "${MOCK_SANDBOX_MAX:-}"
+      MOCK_SANDBOX_MAX_DOCUMENTS: "${MOCK_SANDBOX_MAX_DOCUMENTS:-}"
+      MOCK_SANDBOX_HOST_SUFFIX: "${MOCK_SANDBOX_HOST_SUFFIX:-}"
+      MOCK_STATE_FILE: "/data/alfa-state.json"
+    volumes:
+      - mock-services-data:/data
+    labels:
+      caddy: "${MOCK_ALFA_CADDY_DOMAIN:-}"
+      caddy.reverse_proxy: "{{upstreams 3104}}"
+    mem_limit: "${MOCK_MEM_LIMIT:-128m}"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3104,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 10s
       timeout: 3s
       retries: 3

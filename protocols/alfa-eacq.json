@@ -1,0 +1,185 @@
+{
+  "id": "alfa-eacq-rest",
+  "title": "Альфа-Банк — интернет-эквайринг (REST *.do, платформа RBS)",
+  "version": "2026.10",
+  "upstreamDocs": [
+    "docs/reference/alfa/01-payment-api.md",
+    "docs/reference/alfa/02-notifications-and-signature.md",
+    "docs/reference/alfa/03-test-contour.md"
+  ],
+  "upstreamSources": [
+    {
+      "title": "Интерфейс REST и спецификации запросов",
+      "url": "https://alfabank.ru/sme/payservice/internet-acquiring/docs/connection-options/api/rest/"
+    },
+    {
+      "title": "Описание способов взаимодействия и координаты подключения",
+      "url": "https://alfabank.ru/sme/payservice/internet-acquiring/docs/connection-options/api/general-description/"
+    },
+    {
+      "title": "Схемы интеграции",
+      "url": "https://alfabank.ru/sme/payservice/internet-acquiring/docs/connection-options/api/integration-schemes/"
+    },
+    {
+      "title": "Официальная PDF-спецификация callback-уведомлений (экспорт 11.11.2024)",
+      "url": "https://alfabank.servicecdn.ru/site-upload/d5/d0/4654/callback-uvedomleniya.pdf"
+    },
+    {
+      "title": "Официальный список тестовых карт",
+      "url": "https://alfabank.ru/sme/payservice/internet-acquiring/docs/connection-options/api/test-cards/"
+    }
+  ],
+  "baseUrls": {
+    "test": "https://alfa.rbsuat.com/payment/rest",
+    "production": "https://payment.alfabank.ru/payment/rest"
+  },
+  "productionNote": "Для части merchant-логинов/схем (без префикса, r-, i-) production URL отличается — не фиксировать до проверки merchant-координат.",
+  "transport": {
+    "method": "POST",
+    "requestFormat": "application/x-www-form-urlencoded",
+    "responseFormat": "application/json",
+    "amountUnits": "минимальные единицы валюты (для RUB — копейки)"
+  },
+  "auth": {
+    "type": "per-request",
+    "fields": ["userName", "password"],
+    "note": "Креды передаются в каждом запросе (токенов нет). Логин без префикса; r-логин и i-логин могут иметь разные координаты и инструкции."
+  },
+  "restMethods": [
+    "register.do",
+    "registerPreAuth.do",
+    "deposit.do",
+    "reverse.do",
+    "refund.do",
+    "getOrderStatus.do",
+    "getOrderStatusExtended.do"
+  ],
+  "routes": [
+    "/payment/rest/register.do",
+    "/payment/rest/registerPreAuth.do",
+    "/payment/rest/deposit.do",
+    "/payment/rest/reverse.do",
+    "/payment/rest/refund.do",
+    "/payment/rest/getOrderStatus.do",
+    "/payment/rest/getOrderStatusExtended.do"
+  ],
+  "formRoutes": [
+    "/payment/{orderId}",
+    "/payment/{orderId}/pay",
+    "/payment/{orderId}/3ds"
+  ],
+  "mockRoutes": [
+    "/health",
+    "/openapi.json",
+    "/admin",
+    "/admin/journal"
+  ],
+  "mockControlRoutes": [
+    "/mock/time",
+    "/mock/scenarios",
+    "/mock/reset",
+    "/mock/state",
+    "/sandboxes",
+    "/sandboxes/me",
+    "/sandboxes/me/reset",
+    "/sandboxes/me/reset-creds",
+    "/mock/sandboxes"
+  ],
+  "registerFields": ["userName", "password", "orderNumber", "amount", "returnUrl"],
+  "registerOptionalFields": ["failUrl", "clientId", "email", "phone", "sessionTimeoutSecs", "jsonParams", "orderBundle", "description", "currency"],
+  "registerResponse": ["orderId", "formUrl", "errorCode", "errorMessage"],
+  "orderStatuses": {
+    "0": "заказ зарегистрирован, не оплачен",
+    "1": "сумма захолдирована (двухстадийная схема)",
+    "2": "полная авторизация/оплата проведена",
+    "3": "авторизация отменена (reverse)",
+    "4": "по заказу проведён возврат",
+    "5": "начата аутентификация через ACS эмитента",
+    "6": "авторизация отклонена"
+  },
+  "orderStatusNote": "Нумерация orderStatus — общая для платформы RBS (таблица снята в docs/reference/sber/01-payment-api.md для того же семейства шлюзов; тестовый контур Альфы — alfa.rbsuat.com). В альфа-конспекте своя таблица не зафиксирована — это документированная интерпретация мока, см. services/alfa-mock/README.md («Границы и форки»).",
+  "errorCodeSemantics": "errorCode=0 — результат обработки API-вызова, не эквивалент финального статуса оплаты; после возврата браузера, таймаута или callback сверять заказ через getOrderStatus(Extended).do.",
+  "errorCodes": [0, 1, 2, 3, 4, 5, 6],
+  "errorCodeNote": "Классическая таблица кодов RBS (0—6) в альфа-конспекте не снята. Маппинг частных случаев мока (неизвестный заказ → 3, лимиты суммы deposit/refund → 5, недоступная двухстадийная схема → 5) — интерпретация по общей таблице платформы; задокументирована в README сервиса и отчёте PR.",
+  "callback": {
+    "method": "GET",
+    "params": ["mdOrder", "orderNumber", "operation", "status", "amount", "callbackCreationDate", "checksum"],
+    "statusValues": { "1": "операция успешна", "0": "операция завершилась ошибкой" },
+    "operations": ["approved", "deposited", "reversed", "refunded", "declinedByTimeout", "declinedCardpresent"],
+    "operationNote": "declinedCardpresent в опубликованном PDF перечислена без детальной семантики; мок отправляет её при отказе карточной авторизации (форма/ACS) со status=0. Сверка — getOrderStatusExtended.do (orderStatus=6, actionCode).",
+    "ack": "ровно HTTP 200 OK; любой иной код считается неуспехом",
+    "retries": "повтор до HTTP 200 либо до максимального числа подряд неуспешных попыток; число попыток и интервал в PDF НЕ указаны — мок использует собственную конфигурацию (MOCK_CALLBACK_RETRY_MS × MOCK_CALLBACK_MAX_ATTEMPTS), а не параметры Т-Банка/Сбера",
+    "unsignedNote": "callback может быть без контрольной суммы; неподписанное уведомление можно подделать — обработка обязана сверять актуальный статус через REST и не считать callback единственным источником истины.",
+    "checksum": {
+      "modes": ["symmetric", "asymmetric"],
+      "implemented": "symmetric",
+      "algorithm": [
+        "удалить checksum и sign_alias из набора параметров",
+        "отсортировать оставшиеся имена параметров в алфавитном порядке",
+        "построить строку name;value;name;value;...;",
+        "HMAC-SHA256 с общим секретным ключом, hex в верхнем регистре"
+      ],
+      "caseNote": "в Java/PHP-примерах PDF сравнение hex без учёта регистра; алгоритм HMAC в примере — SHA-256",
+      "asymmetricNote": "НЕ реализован и не домысливается: общее описание асимметричного режима говорит о SHA-256, но Java-пример (SHA512withRSA) и PHP-пример (OPENSSL_ALGO_SHA512) используют SHA-512; режим подтверждается банком по merchant-аккаунту и sign_alias. Вне области #41."
+    }
+  },
+  "testCards": [
+    "4111111111111111",
+    "5555555555555599",
+    "639002000000000003",
+    "5555555555555557",
+    "4444333322221111",
+    "5555555544444442",
+    "5432543254325430",
+    "2201382000000021",
+    "2201382000000039",
+    "2201382000000013",
+    "2201382000000047",
+    "2201382000000054",
+    "2200000000000053",
+    "2201382000000062"
+  ],
+  "acsPassword": "12345678",
+  "cardholderNote": "Владелец карты в тесте — минимум два слова латиницей.",
+  "actionCodes": [-2011, 116, 71015, 5],
+  "actionCodeNote": "-2011 — 3DS отказ PaRes=U; 116 — недостаточно средств; 71015 — «введённая информация неверна» (неверный срок/CVV либо Fail на тестовом ACS); 5 — общий отказ эмитента (мок: неизвестная валидная карта, операция без 3DS при выключенном SSL-разрешении).",
+  "sslNote": "Карта 5555555555555599 — без 3DS: отказ, но успех при включённом SSL-разрешении (env MOCK_SSL_PERMITTED; разрешение выдаёт банк).",
+  "twoStage": {
+    "envFlag": "MOCK_TWO_STAGE",
+    "default": true,
+    "note": "Доступность двухстадийной схемы (registerPreAuth.do + deposit.do) включается банком; на стенде — env-флаг."
+  },
+  "partialRefund": {
+    "envFlag": "MOCK_PARTIAL_REFUND",
+    "default": true,
+    "note": "Частичное возмещение возможно в разрешённом контуре; на стенде — env-флаг."
+  },
+  "idempotency": {
+    "field": "orderNumber",
+    "scope": "merchant",
+    "onDuplicate": "errorCode 1 «Номер заказа уже зарегистрирован»",
+    "note": "orderNumber обязан быть уникальным в пределах магазина; повтор — ошибка, а не replay."
+  },
+  "limits": {
+    "sessionTimeoutSecsDefault": 1200,
+    "sessionTimeoutNote": "Дефолт 20 минут — общая практика платформы RBS (в sber-конспекте зафиксировано для того же семейства шлюзов); в альфа-конспекте дефолт не снят. Переопределяется параметром sessionTimeoutSecs и env MOCK_SESSION_TIMEOUT_SECS.",
+    "orderNumberMaxLength": 64,
+    "orderNumberNote": "Лимит 64 символа — интерпретация мока по общей практике RBS; в конспекте не зафиксирован.",
+    "currency": 643,
+    "currencyNote": "Мок работает только в RUB (643); прочие валюты отклоняются."
+  },
+  "testCredentials": {
+    "userName": "ALFAMOCKTEST",
+    "password": "mockpass123",
+    "callbackSecret": "mocksecret123",
+    "note": "Синтетические креды мока по образцу TBANKMOCKTEST. Реальные тестовые userName/password Альфа-Банка выдаются индивидуально при подключении и в дефолтах конфига НЕ используются (docs/reference/alfa/03-test-contour.md)."
+  },
+  "outOfScope": [
+    "асимметричный checksum (неоднозначность SHA-256/SHA-512 в официальном PDF — не домысливать)",
+    "привязки карт (bindingId, создание/изменение связки)",
+    "orderBundle: принимается, но не моделируется (позиции корзины не влияют на флоу)",
+    "SberPay/СБП/Apple Pay-подобные каналы и paymentOrder.do (server-to-server проведение)",
+    "различия координат r-/i-логинов",
+    "третий банк (Сбер/ВТБ) — следующая волна"
+  ]
+}

@@ -1,6 +1,6 @@
 # © 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0
 # SPDX-License-Identifier: Apache-2.0
-# Стенд «банк + касса + ЮKassa + АТОЛ Онлайн»: docker compose up
+# Стенд «банк + касса + ЮKassa + АТОЛ Онлайн + Альфа-Банк»: docker compose up
 # Конфиг — переменными окружения (см. services/*/README.md).
 services:
   tbank-mock:
@@ -112,6 +112,37 @@ services:
     mem_limit: "${MOCK_MEM_LIMIT:-128m}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3103,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    restart: unless-stopped
+
+  alfa-mock:
+    build: .
+    image: mock-services:local
+    working_dir: /app
+    command: node services/alfa-mock/server.js
+    # Безопасный локальный default; сетевой bind включается явно.
+    ports: ["${MOCK_ALFA_BIND_IP:-127.0.0.1}:${MOCK_ALFA_HOST_PORT:-3104}:3104"]
+    environment:
+      MOCK_PORT: "3104"
+      MOCK_HEALTH_PATH: /health
+      # Персистентность между рестартами: состояние на volume ниже.
+      MOCK_STATE_FILE: /data/alfa-state.json
+      # Публичный адрес стенда — от него строится formUrl платёжной страницы.
+      MOCK_PUBLIC_BASE_URL: "http://localhost:3104"
+      # Дефолты — СИНТЕТИЧЕСКИЕ креды мока (ALFAMOCKTEST/mockpass123, по образцу
+      # TBANKMOCKTEST); реальные тестовые креды банк выдаёт индивидуально.
+      # MOCK_ALFA_USERNAME / MOCK_ALFA_PASSWORD / MOCK_ALFA_CALLBACK_SECRET
+      # Адрес приёмника GET-callback (иначе — только jsonParams.callback_url).
+      # MOCK_DEFAULT_CALLBACK_URL: ""
+      # Для публичного размещения включите защиту исходящих callback от SSRF:
+      # MOCK_BLOCK_PRIVATE_WEBHOOKS: "1"
+    volumes: ["mock-data:/data"]
+    mem_limit: "${MOCK_MEM_LIMIT:-128m}"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3104,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 10s
       timeout: 3s
       retries: 3
