@@ -18,6 +18,7 @@ const path = require('path');
 let PORT = 0;
 let CALLBACK_PORT = 0;
 let BASE = '';
+let MAIN_CHILD = null;
 // Лог дочернего стенда: нужен для проверок «секретов нет в логах» (#24, F-09).
 const SERVER_LOG = [];
 let passed = 0;
@@ -612,6 +613,8 @@ async function main() {
     check('#24: креды getToken отсутствуют в логе стенда',
       serverLog.length > 0 && !serverLog.includes(sentinelPass) && !serverLog.includes('mockpass123') && !serverLog.includes('loviitest'));
     check('#24: в логе остаётся различимый префикс логина (DX)', serverLog.includes('login=lo***'));
+    await stopChild(MAIN_CHILD);
+    MAIN_CHILD = null;
   }
 
   /* --- #22 (F-07/F-08): доступ к управляющей поверхности и SSRF-политика --- */
@@ -665,7 +668,7 @@ async function main() {
       const sell = await requestOn(child.port, 'POST', `/possystem/v1/Main/sell?token=${tk}`, validBody('auth-check-1'));
       check('#22: sell (контракт Ferma) не требует operator-токена', Boolean(sell.json() && sell.json().uuid));
     } finally {
-      child.stop();
+      await stopChild(child);
     }
   }
 
@@ -695,7 +698,7 @@ async function main() {
         oversized.status === 413 && bodyError && bodyError.code === 4 && bodyError.field === 'body'
           && Boolean(bodyError.hint));
     } finally {
-      child.stop();
+      await stopChild(child);
     }
   }
 
@@ -713,7 +716,7 @@ async function main() {
       const tk = (await requestOn(child.port, 'POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' })).json().token;
       check('#22: hosted: контракт Ferma (getToken) работает', Boolean(tk));
     } finally {
-      child.stop();
+      await stopChild(child);
     }
   }
 
@@ -746,7 +749,7 @@ async function main() {
       check('#22: =1: callback на приватный адрес заблокирован (SSRF в lastStatus)',
         hits === 0 && String(cb.lastStatus).includes('SSRF'), `hits=${hits}, lastStatus=${cb.lastStatus}`);
     } finally {
-      child.stop();
+      await stopChild(child);
       catcher.close();
     }
   }
@@ -757,7 +760,7 @@ async function main() {
       const r = await requestOn(child.port, 'POST', '/mock/verify-merchant', { url: 'http://[::1]/hook' });
       check('#22: =true тоже включает SSRF-guard', r.status === 403);
     } finally {
-      child.stop();
+      await stopChild(child);
     }
   }
 
@@ -809,7 +812,7 @@ async function main() {
       const defaultState = (await requestOn(child.port, 'GET', '/mock/state')).json().state;
       check('#8 F-13: импорт в target не изменил default', !defaultState.receipts.seed);
     } finally {
-      child.stop();
+      await stopChild(child);
     }
   }
 
@@ -868,7 +871,7 @@ async function main() {
       check('#8 F-12: reset-creds меняет пароль песочницы',
         Boolean(rotated && rotated.creds && rotated.creds.fermaPassword && rotated.creds.fermaPassword !== created.creds.fermaPassword));
     } finally {
-      child.stop();
+      await stopChild(child);
     }
   }
 
@@ -888,7 +891,7 @@ async function main() {
         } catch { return false; }
       }, { description: 'sandbox registry flush before restart' });
     } finally {
-      child1.stop();
+      await stopChild(child1);
     }
     const child2 = await startKassaChild({ MOCK_STATE_FILE: stateFile });
     try {
@@ -897,7 +900,7 @@ async function main() {
       const def = (await requestOn(child2.port, 'GET', '/mock/state')).json().state;
       check('#8 F-14: чужой state не приписывается default', !def.receipts[savedUuid]);
     } finally {
-      child2.stop();
+      await stopChild(child2);
     }
 
     const child3 = await startKassaChild({ MOCK_TENANCY: '1', MOCK_SANDBOX_TTL_MS: '800', MOCK_SANDBOX_SWEEP_MS: '1000' });
@@ -911,7 +914,7 @@ async function main() {
       }, { timeoutMs: 5000, description: 'sandbox TTL expiry' });
       check('#8 F-14: после TTL песочница недоступна', [404, 410].includes(after.status), `получено ${after.status}`);
     } finally {
-      child3.stop();
+      await stopChild(child3);
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
 
@@ -927,7 +930,89 @@ async function main() {
       check('#8 F-15: превышение квоты документов отклоняется с DX',
         Boolean(third.error) && String(third.error.text).includes('Лимит документов песочницы'), JSON.stringify(third).slice(0, 160));
     } finally {
-      child4.stop();
+      await stopChild(child4);
+    }
+
+    // PA-50 / PA-54 / PA-55: авторизация явного target, гонка TTL-sweep mid-await,
+    // закрытая default-песочница и отсутствие глобального switchActive
+    const tmpPa = fs.mkdtempSync(path.join(os.tmpdir(), 'kassa-pa50-'));
+    const sbxFile = path.join(tmpPa, 'sandboxes.json');
+    const core = require('../../packages/core');
+    fs.writeFileSync(sbxFile, JSON.stringify({
+      activeId: 'victim-b',
+      sandboxes: [
+        {
+          id: 'victim-b',
+          expiresAt: 0,
+          ownerTokenHash: core.hashSecret('victim-owner-token'),
+          state: {
+            tokens: { 'tok-victim': { login: 'v***', createdAt: Date.now() } },
+            receipts: { 'k-victim-uuid': { uuid: 'k-victim-uuid', externalId: 'VICTIM-CANARY-KASSA', group: 'Main', operation: 'sell', status: 'done', payload: {} } },
+            externalIds: {},
+            callbacks: {},
+            ofdQueue: {},
+            zReports: [],
+            cashbox: { kktState: 'Готова', checksCnt: 1 },
+            shift: { status: 'open', shiftNumber: 1, openedAtMs: Date.now() },
+            fn: { fnNumber: '9999078902001294', used: 1, capacity: 250000 },
+          },
+        },
+        {
+          id: 'attacker-a',
+          expiresAt: 0,
+          ownerTokenHash: core.hashSecret('attacker-owner-token'),
+          state: {
+            tokens: {},
+            receipts: {},
+            externalIds: {},
+            callbacks: {},
+            ofdQueue: {},
+            zReports: [],
+            cashbox: { kktState: 'Готова', checksCnt: 0 },
+            shift: { status: 'open', shiftNumber: 1, openedAtMs: Date.now() },
+            fn: { fnNumber: '9999078902001294', used: 0, capacity: 250000 },
+          },
+        },
+      ],
+    }));
+    const child5 = await startKassaChild({
+      MOCK_TENANCY: 'owned',
+      MOCK_SANDBOX_FILE: sbxFile,
+      MOCK_SANDBOX_TOKEN: 'default-owner-secret',
+      MOCK_OPERATOR_TOKEN: 'op-secret',
+      MOCK_SANDBOX_TTL_MS: '1000',
+      MOCK_SANDBOX_SWEEP_MS: '1000',
+    });
+    try {
+      const hdrA = { 'X-Mock-Sandbox': 'attacker-a', 'X-Sandbox-Token': 'attacker-owner-token' };
+      const expB = await requestOn(child5.port, 'GET', '/mock/state?sandbox=victim-b', null, hdrA);
+      check('PA-50: чужой GET /mock/state?sandbox=victim-b -> 401 без утечки', expB.status === 401 && !expB.text.includes('VICTIM-CANARY-KASSA'));
+      const impB = await requestOn(child5.port, 'POST', '/mock/state', { sandbox: 'victim-b', state: { receipts: { pwn: {} } } }, hdrA);
+      check('PA-50: чужой POST /mock/state -> 401', impB.status === 401);
+      const rstB = await requestOn(child5.port, 'POST', '/mock/reset', { sandbox: 'victim-b' }, hdrA);
+      check('PA-50: чужой POST /mock/reset -> 401', rstB.status === 401);
+      const delB = await requestOn(child5.port, 'DELETE', '/sandboxes?sandbox=victim-b', null, hdrA);
+      check('PA-50: чужой DELETE /sandboxes -> 401', delB.status === 401);
+
+      const opB = await requestOn(child5.port, 'GET', '/mock/state?sandbox=victim-b', null, { 'X-Operator-Token': 'op-secret' });
+      check('PA-50: оператор читает /mock/state?sandbox=victim-b', opB.status === 200 && opB.text.includes('VICTIM-CANARY-KASSA'));
+
+      const defReceipt = await requestOn(child5.port, 'GET', '/receipts/k-victim-uuid');
+      check('PA-54: страница чека защищённой default без токена -> 401', defReceipt.status === 401);
+      const pubHealth = (await requestOn(child5.port, 'GET', '/healthz')).json();
+      check('PA-54: публичный /healthz на защищённой default не раскрывает checks', pubHealth.checks === undefined);
+
+      const r = (await requestOn(child5.port, 'POST', '/sandboxes', { id: 'race-tenant' })).json();
+      const raceResp = await requestOn(child5.port, 'GET', '/possystem/v1/Main/report/k-victim-uuid?token=tok-victim', null, {
+        'X-Mock-Sandbox': r.id,
+        'X-Sandbox-Token': r.ownerToken,
+        'X-Mock-Latency': '1700',
+      });
+      check('PA-50 §7.2: истёкшая во время await песочница -> 410 без утечки',
+        raceResp.status === 410 && !raceResp.text.includes('VICTIM-CANARY-KASSA'), `status=${raceResp.status}`);
+    } finally {
+      await stopChild(child5);
+      fs.rmSync(tmpPa, { recursive: true, force: true });
     }
   }
 
@@ -939,12 +1024,13 @@ async function main() {
 
 /** Дочерний стенд кассы на свободном порту с ожиданием healthz. */
 async function startKassaChild(env = {}) {
-  const proc = spawn('node', [path.join(__dirname, 'server.js')], {
+  const proc = spawn('node', ['--max-old-space-size=48', path.join(__dirname, 'server.js')], {
     env: {
       ...process.env,
       MOCK_HOST: '127.0.0.1',
       MOCK_PORT: '0',
       MOCK_STATE_FILE: '',
+      MOCK_SANDBOX_FILE: '',
       MOCK_PROCESS_MS: '0',
       MOCK_CALLBACK_RETRY_MS: '1000',
       MOCK_ADMIN_TOKEN: '',
@@ -954,6 +1040,7 @@ async function startKassaChild(env = {}) {
       MOCK_TENANCY: '',
       MOCK_SANDBOX_TOKEN: '',
       MOCK_SANDBOX_TTL_MS: '',
+      MOCK_SANDBOX_SWEEP_MS: '',
       MOCK_SANDBOX_MAX: '',
       MOCK_SANDBOX_MAX_DOCUMENTS: '',
       MOCK_SANDBOX_RETENTION_MS: '',
@@ -987,7 +1074,7 @@ async function startKassaChild(env = {}) {
     proc.stderr.on('data', (data) => process.stderr.write(String(data)));
     proc.once('exit', (code, signal) => finish(new Error(`kassa-mock exited before listen (${code ?? signal}): ${output.slice(-500)}`)));
   });
-  return { proc, port, stop: () => { try { proc.kill('SIGKILL'); } catch { /* ignore */ } } };
+  return { proc, port, stop: () => stopChild(proc) };
 }
 
 async function stopChild(child) {
@@ -1120,6 +1207,7 @@ async function runSelftest() {
       catcher.listen(0, '127.0.0.1', () => resolve(catcher.address().port));
     });
     child = await startKassaChild({ MOCK_PROCESS_MS: '500', MOCK_CALLBACK_RETRY_MS: '1000' });
+    MAIN_CHILD = child;
     PORT = child.port;
     BASE = `http://127.0.0.1:${PORT}`;
     code = await main();

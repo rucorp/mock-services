@@ -159,7 +159,7 @@ function checkProviderError(name, r, { status, code = 'invalid_request', paramet
 const hitsFor = (id, event) => RECEIVER_HITS.filter((h) => h.id === id && (!event || h.event === event));
 
 function startChild(env = {}) {
-  const proc = spawn('node', [path.join(__dirname, 'server.js')], {
+  const proc = spawn('node', ['--max-old-space-size=48', path.join(__dirname, 'server.js')], {
     env: {
       ...process.env,
       MOCK_HOST: '127.0.0.1',
@@ -171,8 +171,10 @@ function startChild(env = {}) {
       MOCK_HOSTED: '',
       MOCK_BLOCK_PRIVATE_WEBHOOKS: '',
       MOCK_TENANCY: '',
+      MOCK_SANDBOX_FILE: '',
       MOCK_SANDBOX_TOKEN: '',
       MOCK_SANDBOX_TTL_MS: '',
+      MOCK_SANDBOX_SWEEP_MS: '',
       MOCK_SANDBOX_MAX: '',
       MOCK_SANDBOX_MAX_DOCUMENTS: '',
       MOCK_SANDBOX_RETENTION_MS: '',
@@ -197,7 +199,12 @@ function startChild(env = {}) {
       proc.once('exit', (code) => { clearInterval(poll); clearTimeout(timer); reject(new Error(`дочерний стенд завершился с кодом ${code}: ${fullLog.slice(0, 300)}`)); });
     }
   });
-  return { proc, port, output: () => fullLog, stop: () => { try { proc.kill('SIGKILL'); } catch { /* ignore */ } } };
+  const stop = () => new Promise((resolve) => {
+    if (!proc || proc.exitCode !== null || proc.signalCode !== null) { resolve(); return; }
+    proc.once('exit', () => resolve());
+    try { proc.kill('SIGKILL'); } catch { resolve(); }
+  });
+  return { proc, port, output: () => fullLog, stop };
 }
 
 function payload(overrides = {}) {
@@ -699,10 +706,10 @@ async function main() {
     const adminPage = await request(port, 'GET', '/admin');
     check('admin: HTML-консоль', adminPage.statusCode === 200 && adminPage.body.includes('Консоль стенда'));
 
-    // Песочницы: изоляция state.
+    // Песочницы: изоляция state (PA-55: POST /sandboxes создаёт песочницу, но без селектора запрос идёт в default).
     const sw = await request(port, 'POST', '/sandboxes', { sandbox: 'iso-a' }, { 'Content-Type': 'application/json' });
-    check('переключение на песочницу iso-a', sw.statusCode === 200 && sw.json().current === 'iso-a');
-    const isoCreate = await api(port, 'POST', '/v3/payments', payload(), { key: 'iso-1' });
+    check('создание/выбор песочницы iso-a', sw.statusCode === 200 && sw.json().current === 'iso-a');
+    const isoCreate = await api(port, 'POST', '/v3/payments', payload(), { key: 'iso-1', headers: { 'X-Mock-Sandbox': 'iso-a' } });
     const isoId = isoCreate.json().id;
     const swBack = await request(port, 'POST', '/sandboxes', { sandbox: 'default' }, { 'Content-Type': 'application/json' });
     check('возврат на default', swBack.statusCode === 200 && swBack.json().current === 'default');
@@ -744,7 +751,7 @@ async function main() {
       await new Promise((resolve) => { child.proc.once('exit', resolve); child.proc.kill('SIGTERM'); });
       child = null;
     } finally {
-      if (child) child.stop();
+      if (child) await child.stop();
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
 
@@ -765,7 +772,7 @@ async function main() {
       const bizOpen = await api(tPort, 'GET', '/v3/payments', undefined, { key: '' });
       check('/v3 не требует control-токенов (Basic Auth)', bizOpen.statusCode === 200);
     } finally {
-      tokenChild.stop();
+      await tokenChild.stop();
     }
 
     // Стартовый лог печатает дефолтные креды (issue: «печатать в стартовом логе»).
@@ -777,7 +784,7 @@ async function main() {
       const okLog = logText.includes('basic auth: shopId=YOOKASSAMOCKTEST') && logText.includes('mockpass123');
       check('стартовый лог печатает креды', okLog, logText.slice(0, 300));
     } finally {
-      logChild.stop();
+      await logChild.stop();
     }
 
     // Отложенный возврат (MOCK_REFUND_DELAY_MS>0): pending -> succeeded по тику.
@@ -800,7 +807,88 @@ async function main() {
       await waitForCondition(() => hitsFor(dRid, 'refund.succeeded').length >= 1, { timeoutMs: 8000, description: 'webhook refund.succeeded (async)' });
       check('webhook refund.succeeded после финализации', true);
     } finally {
-      delayChild.stop();
+      await delayChild.stop();
+    }
+
+    // PA-50 / PA-54 / PA-55: авторизация явного target, гонка TTL-sweep mid-await,
+    // закрытая default-песочница и сохранение ?sandbox= в формах покупателя
+    const tmpPa = fs.mkdtempSync(path.join(os.tmpdir(), 'yookassa-pa50-'));
+    const sbxFile = path.join(tmpPa, 'sandboxes.json');
+    const core = require('../../packages/core');
+    fs.writeFileSync(sbxFile, JSON.stringify({
+      activeId: 'victim-b',
+      sandboxes: [
+        {
+          id: 'victim-b',
+          expiresAt: 0,
+          ownerTokenHash: core.hashSecret('victim-owner-token'),
+          state: {
+            payments: {
+              'yoo-victim-pay': {
+                id: 'yoo-victim-pay',
+                status: 'succeeded',
+                paid: true,
+                amount: { value: '100.00', currency: 'RUB' },
+                description: 'VICTIM-CANARY-YOO',
+                created_at: new Date().toISOString(),
+                metadata: {},
+              },
+            },
+            refunds: {},
+            idempotency: {},
+            notifications: {},
+          },
+        },
+        {
+          id: 'attacker-a',
+          expiresAt: 0,
+          ownerTokenHash: core.hashSecret('attacker-owner-token'),
+          state: { payments: {}, refunds: {}, idempotency: {}, notifications: {} },
+        },
+      ],
+    }));
+    const paChild = startChild({
+      MOCK_TENANCY: 'owned',
+      MOCK_SANDBOX_FILE: sbxFile,
+      MOCK_SANDBOX_TOKEN: 'default-owner-secret',
+      MOCK_OPERATOR_TOKEN: 'op-secret',
+      MOCK_SANDBOX_TTL_MS: '1000',
+      MOCK_SANDBOX_SWEEP_MS: '1000',
+    });
+    try {
+      const pPort = await paChild.port;
+      const hdrA = { 'X-Mock-Sandbox': 'attacker-a', 'X-Sandbox-Token': 'attacker-owner-token', 'Content-Type': 'application/json' };
+      const expB = await request(pPort, 'GET', '/mock/state?sandbox=victim-b', undefined, hdrA);
+      check('PA-50: чужой GET /mock/state?sandbox=victim-b -> 401 без утечки', expB.statusCode === 401 && !expB.body.includes('VICTIM-CANARY-YOO'));
+      const impB = await request(pPort, 'POST', '/mock/state', { sandbox: 'victim-b', state: { payments: { pwn: {} } } }, hdrA);
+      check('PA-50: чужой POST /mock/state -> 401', impB.statusCode === 401);
+      const rstB = await request(pPort, 'POST', '/mock/reset', { sandbox: 'victim-b' }, hdrA);
+      check('PA-50: чужой POST /mock/reset -> 401', rstB.statusCode === 401);
+      const delB = await request(pPort, 'DELETE', '/sandboxes?sandbox=victim-b', undefined, hdrA);
+      check('PA-50: чужой DELETE /sandboxes -> 401', delB.statusCode === 401);
+
+      const opB = await request(pPort, 'GET', '/mock/state?sandbox=victim-b', undefined, { 'X-Operator-Token': 'op-secret' });
+      check('PA-50: оператор читает /mock/state?sandbox=victim-b', opB.statusCode === 200 && opB.body.includes('VICTIM-CANARY-YOO'));
+
+      const defForm = await request(pPort, 'GET', '/payment/yoo-victim-pay');
+      check('PA-54: форма защищённой default без токена -> 401', defForm.statusCode === 401);
+      const pubHealth = (await request(pPort, 'GET', '/health')).json();
+      check('PA-54: публичный /health на защищённой default не раскрывает payments', pubHealth.payments === undefined);
+
+      const r = (await request(pPort, 'POST', '/sandboxes', { id: 'race-tenant' }, { 'Content-Type': 'application/json' })).json();
+      const raceResp = await api(pPort, 'GET', '/v3/payments/yoo-victim-pay', undefined, {
+        key: '',
+        headers: {
+          'X-Mock-Sandbox': r.id,
+          'X-Sandbox-Token': r.ownerToken,
+          'X-Mock-Latency': '1700',
+        },
+      });
+      check('PA-50 §7.2: истёкшая во время await песочница -> 410 без утечки',
+        raceResp.statusCode === 410 && !raceResp.body.includes('VICTIM-CANARY-YOO'), `status=${raceResp.statusCode}`);
+    } finally {
+      await paChild.stop();
+      fs.rmSync(tmpPa, { recursive: true, force: true });
     }
 
     console.log(`\nИТОГ: ${passed} passed, ${failed} failed · вебхуков доставлено: ${RECEIVER_HITS.length}`);

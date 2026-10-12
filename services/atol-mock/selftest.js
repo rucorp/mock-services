@@ -178,7 +178,7 @@ function checkError(name, r, { code, field, status = 200 } = {}) {
 }
 
 function startChild(env = {}) {
-  const proc = spawn('node', [path.join(__dirname, 'server.js')], {
+  const proc = spawn('node', ['--max-old-space-size=48', path.join(__dirname, 'server.js')], {
     env: {
       ...process.env,
       MOCK_HOST: '127.0.0.1',
@@ -192,8 +192,10 @@ function startChild(env = {}) {
       MOCK_HOSTED: '',
       MOCK_BLOCK_PRIVATE_WEBHOOKS: '',
       MOCK_TENANCY: '',
+      MOCK_SANDBOX_FILE: '',
       MOCK_SANDBOX_TOKEN: '',
       MOCK_SANDBOX_TTL_MS: '',
+      MOCK_SANDBOX_SWEEP_MS: '',
       MOCK_SANDBOX_MAX: '',
       MOCK_SANDBOX_MAX_DOCUMENTS: '',
       MOCK_SANDBOX_RETENTION_MS: '',
@@ -218,7 +220,12 @@ function startChild(env = {}) {
       proc.once('exit', (code) => { clearInterval(poll); clearTimeout(timer); reject(new Error(`дочерний стенд завершился с кодом ${code}: ${fullLog.slice(0, 300)}`)); });
     }
   });
-  return { proc, port, output: () => fullLog, stop: () => { try { proc.kill('SIGKILL'); } catch { /* ignore */ } } };
+  const stop = () => new Promise((resolve) => {
+    if (!proc || proc.exitCode !== null || proc.signalCode !== null) { resolve(); return; }
+    proc.once('exit', () => resolve());
+    try { proc.kill('SIGKILL'); } catch { resolve(); }
+  });
+  return { proc, port, output: () => fullLog, stop };
 }
 
 /* ------------------------------------------------------------------- main */
@@ -415,7 +422,7 @@ async function main() {
       check('отчёт в чужой группе — документ не найден (code 10)',
         (await request(mPort, 'GET', `/possystem/v4/Shop-2/report/${g1.json().uuid}`, undefined, { Token: mToken })).json().error.code === 10);
     } finally {
-      childMulti.stop();
+      await childMulti.stop();
     }
     check('песочница default не изменилась от дочернего прогона', state.documents === beforeGroups);
 
@@ -656,9 +663,12 @@ async function main() {
       && adminPage.body.includes('АТОЛ Онлайн direct API v4') && adminPage.body.includes('Callback'));
 
     const sw = await request(port, 'POST', '/sandboxes', { sandbox: 'iso-a' });
-    check('переключение на песочницу iso-a', sw.statusCode === 200 && sw.json().current === 'iso-a');
-    const isoToken = (await getToken(port)).token;
-    const isoSell = await request(port, 'POST', `/possystem/v4/${GROUP}/sell`, doc('st-iso-1'), { Token: isoToken });
+    check('создание/выбор песочницы iso-a', sw.statusCode === 200 && sw.json().current === 'iso-a');
+    const isoTokenResp = await request(port, 'POST', '/possystem/v4/getToken',
+      { login: 'v4-online-atol-ru', pass: 'iGFFuihss' }, { 'X-Mock-Sandbox': 'iso-a' });
+    const isoToken = isoTokenResp.json().token;
+    const isoSell = await request(port, 'POST', `/possystem/v4/${GROUP}/sell`, doc('st-iso-1'),
+      { Token: isoToken, 'X-Mock-Sandbox': 'iso-a' });
     check('документ создан в песочнице iso-a', isoSell.statusCode === 200 && Boolean(isoSell.json().uuid));
     const isoUuid = isoSell.json().uuid;
     await request(port, 'POST', '/sandboxes', { sandbox: 'default' });
@@ -706,7 +716,7 @@ async function main() {
       await new Promise((resolve) => { child.proc.once('exit', resolve); child.proc.kill('SIGTERM'); });
       child = null;
     } finally {
-      if (child) child.stop();
+      if (child) await child.stop();
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
 
@@ -727,7 +737,7 @@ async function main() {
       const bizOpen = await request(tPort, 'POST', `/possystem/v4/${GROUP}/sell`, doc('st-cp-1'), { Token: tToken });
       check('/possystem/v4 не требует control-токенов (нужен только Token)', bizOpen.statusCode === 200 && Boolean(bizOpen.json().uuid));
     } finally {
-      tokenChild.stop();
+      await tokenChild.stop();
     }
 
     // Hosted-режим (tenancy=owned): у песочницы свои креды АТОЛ и своя группа.
@@ -777,7 +787,7 @@ async function main() {
       check('hosted: владелец удаляет свою песочницу', removed.statusCode === 200 && removed.json().removed === 't1',
         removed.body.slice(0, 120));
     } finally {
-      hostedChild.stop();
+      await hostedChild.stop();
     }
 
     // Стартовый лог печатает публичные тестовые реквизиты v4.
@@ -791,7 +801,7 @@ async function main() {
         logText.slice(0, 300));
       check('стартовый лог отмечает, что v5/маркировка вне области', logText.includes('вне области'));
     } finally {
-      logChild.stop();
+      await logChild.stop();
     }
 
     // MOCK_DEFAULT_CALLBACK_URL: приёмник по умолчанию, если в запросе нет
@@ -811,7 +821,7 @@ async function main() {
       check('MOCK_DEFAULT_CALLBACK_URL: результат ушёл на приёмник по умолчанию',
         hitsFor(dUuid).length >= 1 && hitsFor(dUuid)[0].path === '/hook', `доставок: ${hitsFor(dUuid).length}`);
     } finally {
-      defaultCbChild.stop();
+      await defaultCbChild.stop();
     }
 
     /* ------------------------------------------- истечение токена (24 ч) */
@@ -831,7 +841,75 @@ async function main() {
       const afterFresh = await request(cPort, 'GET', `/possystem/v4/${GROUP}/report/whatever`, undefined, { Token: freshToken });
       check('новый getToken после истечения работает', afterFresh.json().error.code === 10);
     } finally {
-      ttlChild.stop();
+      await ttlChild.stop();
+    }
+
+    // PA-50 / PA-54 / PA-55: авторизация явного target, гонка TTL-sweep mid-await и закрытая default-песочница
+    const tmpPa = fs.mkdtempSync(path.join(os.tmpdir(), 'atol-pa50-'));
+    const sbxFile = path.join(tmpPa, 'sandboxes.json');
+    const core = require('../../packages/core');
+    fs.writeFileSync(sbxFile, JSON.stringify({
+      activeId: 'victim-b',
+      sandboxes: [
+        {
+          id: 'victim-b',
+          expiresAt: 0,
+          ownerTokenHash: core.hashSecret('victim-owner-token'),
+          state: {
+            tokens: { 'tok-victim': { login: 'v***', createdAt: Date.now() } },
+            documents: { 'atol-victim-uuid': { uuid: 'atol-victim-uuid', externalId: 'VICTIM-CANARY-ATOL', group: GROUP, operation: 'sell', status: 'done', payload: {} } },
+            externalIds: {},
+            callbacks: {},
+          },
+        },
+        {
+          id: 'attacker-a',
+          expiresAt: 0,
+          ownerTokenHash: core.hashSecret('attacker-owner-token'),
+          state: { tokens: {}, documents: {}, externalIds: {}, callbacks: {} },
+        },
+      ],
+    }));
+    const paChild = startChild({
+      MOCK_TENANCY: 'owned',
+      MOCK_SANDBOX_FILE: sbxFile,
+      MOCK_SANDBOX_TOKEN: 'default-owner-secret',
+      MOCK_OPERATOR_TOKEN: 'op-secret',
+      MOCK_SANDBOX_TTL_MS: '1000',
+      MOCK_SANDBOX_SWEEP_MS: '1000',
+    });
+    try {
+      const pPort = await paChild.port;
+      const hdrA = { 'X-Mock-Sandbox': 'attacker-a', 'X-Sandbox-Token': 'attacker-owner-token' };
+      const expB = await request(pPort, 'GET', '/mock/state?sandbox=victim-b', undefined, hdrA);
+      check('PA-50: чужой GET /mock/state?sandbox=victim-b -> 401 без утечки', expB.statusCode === 401 && !expB.body.includes('VICTIM-CANARY-ATOL'));
+      const impB = await request(pPort, 'POST', '/mock/state', { sandbox: 'victim-b', state: { documents: { pwn: {} } } }, hdrA);
+      check('PA-50: чужой POST /mock/state -> 401', impB.statusCode === 401);
+      const rstB = await request(pPort, 'POST', '/mock/reset', { sandbox: 'victim-b' }, hdrA);
+      check('PA-50: чужой POST /mock/reset -> 401', rstB.statusCode === 401);
+      const delB = await request(pPort, 'DELETE', '/sandboxes?sandbox=victim-b', undefined, hdrA);
+      check('PA-50: чужой DELETE /sandboxes -> 401', delB.statusCode === 401);
+
+      const opB = await request(pPort, 'GET', '/mock/state?sandbox=victim-b', undefined, { 'X-Operator-Token': 'op-secret' });
+      check('PA-50: оператор читает /mock/state?sandbox=victim-b', opB.statusCode === 200 && opB.body.includes('VICTIM-CANARY-ATOL'));
+
+      const defReceipt = await request(pPort, 'GET', '/receipts/atol-victim-uuid');
+      check('PA-54: страница чека защищённой default без токена -> 401', defReceipt.statusCode === 401);
+      const pubHealth = (await request(pPort, 'GET', '/health')).json();
+      check('PA-54: публичный /health на защищённой default не раскрывает documents', pubHealth.documents === undefined);
+
+      const r = (await request(pPort, 'POST', '/sandboxes', { id: 'race-tenant' })).json();
+      const raceResp = await request(pPort, 'GET', `/possystem/v4/${GROUP}/report/atol-victim-uuid`, undefined, {
+        Token: 'tok-victim',
+        'X-Mock-Sandbox': r.id,
+        'X-Sandbox-Token': r.ownerToken,
+        'X-Mock-Latency': '1700',
+      });
+      check('PA-50 §7.2: истёкшая во время await песочница -> 410 без утечки',
+        raceResp.statusCode === 410 && !raceResp.body.includes('VICTIM-CANARY-ATOL'), `status=${raceResp.statusCode}`);
+    } finally {
+      await paChild.stop();
+      fs.rmSync(tmpPa, { recursive: true, force: true });
     }
 
     console.log(`\nИТОГ: ${passed} passed, ${failed} failed · callback-доставок: ${HITS.length}`);

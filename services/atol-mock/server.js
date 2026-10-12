@@ -1004,15 +1004,16 @@ function controlSurface(p) {
 }
 
 /**
- * Политика admission по маршруту (F-11/F-12): какие запросы требуют контекст
- * песочницы и owner-token в hosted-режиме.
+ * Политика admission по маршруту (F-11/F-12, PA-54): какие запросы требуют
+ * контекст песочницы и owner-token в hosted-режиме. Неописанный маршрут
+ * трактуется fail-closed как 'business'.
  */
 function atolSandboxPolicy(p) {
-  if (p.startsWith('/sandboxes')) return 'public';
+  if (p === '/health' || p === '/openapi.json' || p === '/sandboxes' || p.startsWith('/sandboxes/')) return 'public';
   if (p.startsWith('/admin') || p.startsWith('/mock/')) return 'control';
   if (p.startsWith('/possystem/')) return 'business';
   if (p.startsWith('/receipts/')) return 'form';
-  return 'public';
+  return 'business';
 }
 
 /** DX-ответ на ошибку admission песочницы (F-12): знание ID ≠ доступ. */
@@ -1069,7 +1070,7 @@ async function handleSandboxApi(req, res, parsedUrl, admission) {
   if (req.method === 'POST' || req.method === 'DELETE') {
     try { body = JSON.parse((await readBody(req)) || '{}'); } catch { body = {}; }
   }
-  const operator = sandboxRuntime.isOperatorToken(sandboxRuntime.ownerTokenOf(req));
+  const operator = sandboxRuntime.isOperatorRequest(req);
   if (req.method === 'GET') {
     if (TENANCY === 'owned' && !operator) {
       const own = sandboxRuntime.recordByOwnerToken(req);
@@ -1123,8 +1124,13 @@ async function handleSandboxApi(req, res, parsedUrl, admission) {
     if (TENANCY === 'owned' && !operator && !sandboxRuntime.recordAuthorized(record, req)) {
       return jsonRaw(res, 401, aerrBody(11, `Удалить песочницу «${target}» может её владелец (owner-token) или оператор`));
     }
-    const result = sandboxRuntime.remove(target);
-    if (!result.ok) return jsonRaw(res, 400, aerrBody(4, `Песочницу «${target}» удалить нельзя (default-стенд)`));
+    const result = sandboxRuntime.remove(target, req);
+    if (!result.ok) {
+      if (result.error === 'unauthorized') {
+        return jsonRaw(res, 401, aerrBody(11, `Удалить песочницу «${target}» может её владелец (owner-token) или оператор`));
+      }
+      return jsonRaw(res, 400, aerrBody(4, `Песочницу «${target}» удалить нельзя (default-стенд)`));
+    }
     return sendJson(res, { ok: true, removed: result.removed });
   }
   return jsonRaw(res, 405, aerrBody(4, `Метод ${req.method} для /sandboxes не поддерживается`));
@@ -1147,17 +1153,17 @@ async function handleSandboxMe(req, res, p) {
     return sendJson(res, { ok: true, mode: TENANCY, sandbox: sandboxRuntime.describe(record), creds: record.creds || null });
   }
   if (p === '/sandboxes/me/reset' && req.method === 'POST') {
-    const result = sandboxRuntime.reset(record.id);
+    const result = sandboxRuntime.reset(record.id, req);
     return sendJson(res, { ok: true, sandbox: result.sandbox });
   }
   if (p === '/sandboxes/me/reset-creds' && req.method === 'POST') {
     // Смена кредов: owner-token не меняется, иначе интегратор потеряет доступ.
     const creds = generateSandboxCreds(body || {});
-    sandboxRuntime.updateCreds(record.id, creds);
+    sandboxRuntime.updateCreds(record.id, creds, req);
     return sendJson(res, { ok: true, sandbox: record.id, creds, ownerTokenChanged: false });
   }
   if (p === '/sandboxes/me' && req.method === 'DELETE') {
-    const result = sandboxRuntime.remove(record.id);
+    const result = sandboxRuntime.remove(record.id, req);
     if (!result.ok) return jsonRaw(res, 400, aerrBody(4, 'default-песочницу стенда удалить нельзя'));
     return sendJson(res, { ok: true, removed: result.removed });
   }
@@ -1282,6 +1288,7 @@ const server = http.createServer((req, res) => {
   const admission = sandboxRuntime.admit(req, atolSandboxPolicy(url));
   if (!admission.ok) return sendSandboxError(res, admission);
   return sandboxRuntime.run(admission, async () => {
+    try {
     if (url.startsWith('/possystem/')) {
       const started = Date.now();
       const originalWriteHead = res.writeHead.bind(res);
@@ -1305,6 +1312,7 @@ const server = http.createServer((req, res) => {
       // эти сценарии и проверяют поведение интегратора на таком сбое.
       const chaosSpec = parseScenarioSpec(req.headers['x-mock-scenario'] || '');
       const chaosResult = await applyRequestChaos(req, chaosSpec);
+      sandboxRuntime.current(); // PA-50 §7.2: fail-closed при истечении/удалении песочницы во время await
       if (chaosResult.abortStatus) {
         return jsonRaw(res, chaosResult.abortStatus, aerrBody(500, chaosResult.abortMessage, {
           type: 'system',
@@ -1314,11 +1322,12 @@ const server = http.createServer((req, res) => {
       }
     }
 
-    try {
       /* ------------------------------------------- управляющая поверхность */
       const surface = controlSurface(url);
-      const ownerSurface = surface === 'operator' && Boolean(sandboxRuntime.recordByOwnerToken(req));
-      if (surface && admission.via !== 'owner' && !ownerSurface) {
+    const ownerRec = sandboxRuntime.recordByOwnerToken(req);
+    const ownerSurface = surface === 'operator'
+      && Boolean(ownerRec && admission.record && ownerRec.id === admission.record.id);
+    if (surface && admission.via !== 'owner' && !ownerSurface) {
         const access = checkControlAccess(req, {
           adminToken: MOCK_ADMIN_TOKEN,
           operatorToken: OPERATOR_TOKEN,
@@ -1353,7 +1362,7 @@ const server = http.createServer((req, res) => {
           tokenTtlHours: Math.round(TOKEN_TTL_MS / 3600000),
           processMs: PROCESS_MS,
         };
-        if (TENANCY !== 'owned' || admission.record.isDefault) {
+        if (TENANCY !== 'owned' || (admission.record.isDefault && !admission.record.ownerTokenHash) || admission.via === 'owner' || admission.via === 'operator') {
           Object.assign(health, {
             documents: Object.keys(state.documents).length,
             waiting: Object.values(state.documents).filter((d) => d.status === 'wait').length,
@@ -1376,12 +1385,15 @@ const server = http.createServer((req, res) => {
       }
 
       if (url === '/mock/reset' && req.method === 'POST') {
-        // F-11/F-13: сбрасываем ровно ту песочницу, в контексте которой пришёл запрос.
+        // F-11/F-13/PA-50: сбрасываем ровно ту песочницу, на которую авторизован запрос.
         const raw = await readBody(req);
         let body = {};
         try { body = JSON.parse(raw || '{}'); } catch { body = {}; }
         const target = (body && body.sandbox) || admission.record.id;
-        const result = sandboxRuntime.reset(target);
+        const result = sandboxRuntime.reset(target, req);
+        if (!result.ok) {
+          return sendSandboxError(res, { ok: false, kind: result.error || 'unauthorized', sandbox: result.sandbox || target });
+        }
         scenarios.clearRules();
         scenarios.clearHistory();
         journal.clear();
@@ -1391,7 +1403,10 @@ const server = http.createServer((req, res) => {
       if (url === '/mock/state') {
         if (req.method === 'GET') {
           const targetSandbox = parsedUrl.searchParams.get('sandbox') || undefined;
-          const snapshot = targetSandbox ? sandboxRuntime.exportState(targetSandbox) : sandboxRuntime.exportState();
+          const snapshot = targetSandbox ? sandboxRuntime.exportState(targetSandbox, req) : sandboxRuntime.exportState(null, req);
+          if (snapshot && snapshot.ok === false) {
+            return sendSandboxError(res, { ok: false, kind: snapshot.error || 'unauthorized', sandbox: snapshot.sandbox || targetSandbox || admission.record.id });
+          }
           return sendJson(res, { ...snapshot, current: admission.record.id });
         }
         if (req.method === 'POST' || req.method === 'PUT') {
@@ -1404,7 +1419,12 @@ const server = http.createServer((req, res) => {
             }));
           }
           try {
-            return sendJson(res, sandboxRuntime.importState(body, body.sandbox || undefined));
+            const targetSandbox = (body && body.sandbox) || admission.record.id;
+            const imported = sandboxRuntime.importState(body, targetSandbox, req);
+            if (!imported.ok) {
+              return sendSandboxError(res, { ok: false, kind: imported.error || 'unauthorized', sandbox: imported.sandbox || targetSandbox });
+            }
+            return sendJson(res, imported);
           } catch (e) {
             return jsonRaw(res, 400, aerrBody(4, `Недопустимый снимок состояния: ${e.message}`, {
               field: 'state',
@@ -1636,6 +1656,9 @@ const server = http.createServer((req, res) => {
 
       return jsonRaw(res, 404, aerrBody(404, 'Неизвестный маршрут'));
     } catch (e) {
+      if (e && e.code === 'SANDBOX_EXPIRED') {
+        return sendSandboxError(res, { ok: false, kind: 'expired', sandbox: e.sandbox || admission.record.id });
+      }
       if (e && e.code === 'BODY_TOO_LARGE') {
         return jsonRaw(res, 413, aerrBody(4, 'Размер тела запроса превышает допустимый лимит', {
           field: 'body',

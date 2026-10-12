@@ -225,7 +225,7 @@ async function fullFlow(port, {
 }
 
 function startChild(env = {}) {
-  const proc = spawn('node', [path.join(__dirname, 'server.js')], {
+  const proc = spawn('node', ['--max-old-space-size=48', path.join(__dirname, 'server.js')], {
     env: {
       ...process.env,
       MOCK_HOST: '127.0.0.1',
@@ -240,8 +240,10 @@ function startChild(env = {}) {
       MOCK_HOSTED: '',
       MOCK_BLOCK_PRIVATE_WEBHOOKS: '',
       MOCK_TENANCY: '',
+      MOCK_SANDBOX_FILE: '',
       MOCK_SANDBOX_TOKEN: '',
       MOCK_SANDBOX_TTL_MS: '',
+      MOCK_SANDBOX_SWEEP_MS: '',
       MOCK_SANDBOX_MAX: '',
       MOCK_SANDBOX_MAX_DOCUMENTS: '',
       MOCK_SANDBOX_RETENTION_MS: '',
@@ -271,7 +273,12 @@ function startChild(env = {}) {
       proc.once('exit', (code) => { clearInterval(poll); clearTimeout(timer); reject(new Error(`дочерний стенд завершился с кодом ${code}: ${fullLog.slice(0, 300)}`)); });
     }
   });
-  return { proc, port, output: () => fullLog, stop: () => { try { proc.kill('SIGKILL'); } catch { /* ignore */ } } };
+  const stop = () => new Promise((resolve) => {
+    if (!proc || proc.exitCode !== null || proc.signalCode !== null) { resolve(); return; }
+    proc.once('exit', () => resolve());
+    try { proc.kill('SIGKILL'); } catch { resolve(); }
+  });
+  return { proc, port, output: () => fullLog, stop };
 }
 
 /** Проверка provider-shaped ошибки: HTTP 200 + {errorCode, errorMessage} + DX hint/doc. */
@@ -862,7 +869,7 @@ async function main() {
       childTwo.output().split('\n').find((l) => l.includes('creds')) || '');
     check('стартовый лог отмечает границы: асимметричный checksum вне области',
       childTwo.output().includes('асимметричный checksum'));
-    childTwo.stop();
+    await childTwo.stop();
 
     const childSsl = startChild({ MOCK_SSL_PERMITTED: 'true' });
     children.push(childSsl);
@@ -870,7 +877,7 @@ async function main() {
     const flowSslOn = await fullFlow(portSsl, { pan: CARD_SSL, callbackUrl: HOOK_URL, amount: 1300 });
     check('MOCK_SSL_PERMITTED=true: карта без 3DS успешна (orderStatus=2)', flowSslOn.status.orderStatus === 2,
       JSON.stringify({ st: flowSslOn.status.orderStatus, ac: flowSslOn.status.actionCode }));
-    childSsl.stop();
+    await childSsl.stop();
 
     const childPartial = startChild({ MOCK_PARTIAL_REFUND: 'false' });
     children.push(childPartial);
@@ -882,7 +889,7 @@ async function main() {
       String((partialBlocked.json() || {}).hint || '').includes('MOCK_PARTIAL_REFUND'));
     const fullRefundOk = await rest(portPartial, 'refund.do', { ...CREDS, orderId: flowPartial.orderId, amount: '5000' });
     check('полный возврат при запрете частичных: errorCode=0', (fullRefundOk.json() || {}).errorCode === 0);
-    childPartial.stop();
+    await childPartial.stop();
 
     const childNoChecksum = startChild({ MOCK_CALLBACK_CHECKSUM: 'false' });
     children.push(childNoChecksum);
@@ -896,7 +903,7 @@ async function main() {
       cbNoCs.query.checksum === undefined && cbNoCs.query.mdOrder === flowNoCs.orderId && cbNoCs.query.operation === 'deposited',
       JSON.stringify(cbNoCs.query));
     check('неподписанный callback: статус сверяется через REST (orderStatus=2)', flowNoCs.status.orderStatus === 2);
-    childNoChecksum.stop();
+    await childNoChecksum.stop();
 
     /* --------------------------------------- owned-песочницы (дочерний процесс) */
     console.log('— песочницы (owned): свои userName/password/callbackSecret, ownerToken, изоляция');
@@ -975,7 +982,7 @@ async function main() {
     const goneA = await rest(portOwned, 'register.do', { ...newCreds, orderNumber: nextOrderNumber('sbxA-gone'), amount: '100', returnUrl: 'https://shop.test/ok' }, { 'X-Sandbox-Token': sbxAJson.ownerToken, 'X-Mock-Sandbox': sbxAJson.id });
     check('после удаления песочница не найдена: 404 + hint «POST /sandboxes»',
       goneA.statusCode === 404 && String((goneA.json() || {}).hint || '').includes('POST /sandboxes'));
-    childOwned.stop();
+    await childOwned.stop();
 
     /* ----------------------------------- control-plane (дочерний процесс) */
     console.log('— control-plane: MOCK_ADMIN_TOKEN / MOCK_OPERATOR_TOKEN, hosted fail-closed');
@@ -998,7 +1005,7 @@ async function main() {
     check('бизнес-маршруты *.do токенов не требуют', (businessOpen.json() || {}).errorCode === 0);
     const healthOpen = await request(portControl, 'GET', '/health');
     check('/health открыт', healthOpen.statusCode === 200 && healthOpen.json().ok === true);
-    childControl.stop();
+    await childControl.stop();
 
     const childHosted = startChild({ MOCK_HOSTED: '1' });
     children.push(childHosted);
@@ -1010,7 +1017,7 @@ async function main() {
     check('hosted: /health открыт', hostedHealth.statusCode === 200);
     const hostedReg = await rest(portHosted, 'register.do', { ...CREDS, orderNumber: nextOrderNumber('hosted'), amount: '100', returnUrl: 'https://shop.test/ok' });
     check('hosted: бизнес-регистрация работает', (hostedReg.json() || {}).errorCode === 0);
-    childHosted.stop();
+    await childHosted.stop();
 
     /* --------------------------------------- персистентность (MOCK_STATE_FILE) */
     console.log('— персистентность: рестарт с MOCK_STATE_FILE сохраняет заказы');
@@ -1022,7 +1029,7 @@ async function main() {
     const flowPersist = await fullFlow(portPersist, { pan: CARD_3DS2_FRICTIONLESS, callbackUrl: null, amount: 4321 });
     check('до рестарта: заказ оплачен (orderStatus=2)', flowPersist.status.orderStatus === 2);
     await waitForCondition(() => fs.existsSync(stateFile), { description: 'state-файл записан' });
-    childPersist1.stop();
+    await childPersist1.stop();
     const childPersist2 = startChild({ MOCK_STATE_FILE: stateFile });
     children.push(childPersist2);
     const portPersist2 = await childPersist2.port;
@@ -1032,9 +1039,91 @@ async function main() {
       stPersist.body.slice(0, 140));
     const dupAfterRestart = await rest(portPersist2, 'register.do', { ...CREDS, orderNumber: flowPersist.orderNumber, amount: '100', returnUrl: 'https://shop.test/ok' });
     check('уникальность orderNumber переживает рестарт (errorCode 1)', (dupAfterRestart.json() || {}).errorCode === 1);
-    childPersist2.stop();
+    await childPersist2.stop();
+
+    /* ---------- PA-50 / PG-03 / PG-10 / PA-54 / PA-55: авторизация песочниц и гонка TTL ---------- */
+    console.log('— PA-50 / PG-03 / PG-10 / PA-54 / PA-55: авторизация явного target и гонка TTL-sweep');
+    const tmpPa = fs.mkdtempSync(path.join(os.tmpdir(), 'alfa-pa50-'));
+    const sbxFile = path.join(tmpPa, 'sandboxes.json');
+    const core = require('../../packages/core');
+    fs.writeFileSync(sbxFile, JSON.stringify({
+      activeId: 'victim-b',
+      sandboxes: [
+        {
+          id: 'victim-b',
+          expiresAt: 0,
+          ownerTokenHash: core.hashSecret('victim-owner-token'),
+          creds: { userName: 'ALFAVICTIM', password: 'victim-password', callbackSecret: 'victim-cb-secret' },
+          state: {
+            orders: {
+              'alfa-victim-order': {
+                orderId: 'alfa-victim-order',
+                orderNumber: 'VICTIM-CANARY-ALFA',
+                status: 2,
+                amountK: 12345,
+                depositedK: 12345,
+                currency: '643',
+                createdAtMs: Date.now(),
+              },
+            },
+            orderNumbers: { 'VICTIM-CANARY-ALFA': 'alfa-victim-order' },
+            callbacks: {},
+          },
+        },
+        {
+          id: 'attacker-a',
+          expiresAt: 0,
+          ownerTokenHash: core.hashSecret('attacker-owner-token'),
+          creds: { userName: 'ALFAATTACK', password: 'attacker-password', callbackSecret: 'attacker-cb-secret' },
+          state: { orders: {}, orderNumbers: {}, callbacks: {} },
+        },
+      ],
+    }));
+    const childPa = startChild({
+      MOCK_TENANCY: 'owned',
+      MOCK_SANDBOX_FILE: sbxFile,
+      MOCK_SANDBOX_TOKEN: 'default-owner-secret',
+      MOCK_OPERATOR_TOKEN: 'op-secret',
+      MOCK_SANDBOX_TTL_MS: '1000',
+      MOCK_SANDBOX_SWEEP_MS: '1000',
+    });
+    children.push(childPa);
+    try {
+      const portPa = await childPa.port;
+      const hdrA = { 'X-Mock-Sandbox': 'attacker-a', 'X-Sandbox-Token': 'attacker-owner-token' };
+      const expB = await request(portPa, 'GET', '/mock/state?sandbox=victim-b', undefined, hdrA);
+      check('PA-50 / PG-03: чужой GET /mock/state?sandbox=victim-b -> 401 без утечки',
+        expB.statusCode === 401 && !expB.body.includes('VICTIM-CANARY-ALFA'));
+      const impB = await request(portPa, 'POST', '/mock/state', { sandbox: 'victim-b', state: { orders: { pwn: {} } } }, hdrA);
+      check('PA-50 / PG-03: чужой POST /mock/state -> 401', impB.statusCode === 401);
+      const rstB = await request(portPa, 'POST', '/mock/reset', { sandbox: 'victim-b' }, hdrA);
+      check('PA-50 / PG-03: чужой POST /mock/reset -> 401', rstB.statusCode === 401);
+      const delB = await request(portPa, 'DELETE', '/sandboxes?sandbox=victim-b', undefined, hdrA);
+      check('PA-50 / PG-03: чужой DELETE /sandboxes -> 401', delB.statusCode === 401);
+
+      const opB = await request(portPa, 'GET', '/mock/state?sandbox=victim-b', undefined, { 'X-Operator-Token': 'op-secret' });
+      check('PA-50 / PG-03: оператор читает /mock/state?sandbox=victim-b',
+        opB.statusCode === 200 && opB.body.includes('VICTIM-CANARY-ALFA'));
+
+      const defForm = await request(portPa, 'GET', '/payment/alfa-victim-order');
+      check('PA-54: форма защищённой default без токена -> 401', defForm.statusCode === 401);
+      const pubHealth = (await request(portPa, 'GET', '/health')).json();
+      check('PA-54: публичный /health на защищённой default не раскрывает orders', pubHealth.orders === undefined);
+
+      const r = (await request(portPa, 'POST', '/sandboxes', { id: 'race-tenant' })).json();
+      const raceResp = await rest(portPa, 'getOrderStatus.do', { ...CREDS, orderId: 'alfa-victim-order' }, {
+        'X-Mock-Sandbox': r.id,
+        'X-Sandbox-Token': r.ownerToken,
+        'X-Mock-Latency': '1700',
+      });
+      check('PA-50 §7.2 / PG-10: истёкшая во время await песочница -> 410 без утечки',
+        raceResp.statusCode === 410 && !raceResp.body.includes('VICTIM-CANARY-ALFA'), `status=${raceResp.statusCode}`);
+    } finally {
+      await childPa.stop();
+      fs.rmSync(tmpPa, { recursive: true, force: true });
+    }
   } finally {
-    for (const child of children) child.stop();
+    for (const child of children) await child.stop();
     for (const f of tmpFiles) { try { fs.rmSync(f, { force: true }); } catch { /* ignore */ } }
     try { receiver.close(); } catch { /* ignore */ }
     try { server.close(); } catch { /* ignore */ }

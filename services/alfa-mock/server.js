@@ -1391,7 +1391,7 @@ function generateSandboxCreds() {
 }
 
 function handleSandboxApi(req, res, url, body, admission) {
-  const operator = sandboxRuntime.isOperatorToken(sandboxRuntime.ownerTokenOf(req));
+  const operator = sandboxRuntime.isOperatorRequest(req);
   if (req.method === 'GET') {
     if (TENANCY === 'owned' && !operator) {
       const own = sandboxRuntime.recordByOwnerToken(req);
@@ -1444,8 +1444,13 @@ function handleSandboxApi(req, res, url, body, admission) {
     if (TENANCY === 'owned' && !operator && !sandboxRuntime.recordAuthorized(record, req)) {
       return jsonRaw(res, 401, aerrBody(2, `Удалить песочницу «${target}» может её владелец (owner-token) или оператор`));
     }
-    const result = sandboxRuntime.remove(target);
-    if (!result.ok) return jsonRaw(res, 400, aerrBody(5, `Песочницу «${target}» удалить нельзя (default-стенд)`));
+    const result = sandboxRuntime.remove(target, req);
+    if (!result.ok) {
+      if (result.error === 'unauthorized') {
+        return jsonRaw(res, 401, aerrBody(2, `Удалить песочницу «${target}» может её владелец (owner-token) или оператор`));
+      }
+      return jsonRaw(res, 400, aerrBody(5, `Песочницу «${target}» удалить нельзя (default-стенд)`));
+    }
     return sendJson(res, { ok: true, removed: result.removed });
   }
   return jsonRaw(res, 405, aerrBody(6, `Метод ${req.method} для /sandboxes не поддерживается`));
@@ -1464,30 +1469,30 @@ function handleSandboxMe(req, res, p, body) {
     return sendJson(res, { ok: true, mode: TENANCY, sandbox: sandboxRuntime.describe(record), creds: record.creds || null });
   }
   if (p === '/sandboxes/me/reset' && req.method === 'POST') {
-    const result = sandboxRuntime.reset(record.id);
+    const result = sandboxRuntime.reset(record.id, req);
     return sendJson(res, { ok: true, sandbox: result.sandbox });
   }
   if (p === '/sandboxes/me/reset-creds' && req.method === 'POST') {
     // Смена кредов: owner-token не меняется, иначе арендатор потеряет доступ.
     const creds = generateSandboxCreds();
-    sandboxRuntime.updateCreds(record.id, creds);
+    sandboxRuntime.updateCreds(record.id, creds, req);
     return sendJson(res, { ok: true, sandbox: record.id, creds, ownerTokenChanged: false });
   }
   if (p === '/sandboxes/me' && req.method === 'DELETE') {
-    const result = sandboxRuntime.remove(record.id);
+    const result = sandboxRuntime.remove(record.id, req);
     if (!result.ok) return jsonRaw(res, 400, aerrBody(5, 'default-песочницу стенда удалить нельзя'));
     return sendJson(res, { ok: true, removed: result.removed });
   }
   return jsonRaw(res, 405, aerrBody(6, `Метод ${req.method} для ${p} не поддерживается`));
 }
 
-/** Политика admission по маршруту (F-11/F-12). */
+/** Политика admission по маршруту (F-11/F-12, PA-54): неописанный маршрут — fail-closed 'business'. */
 function alfaSandboxPolicy(p) {
-  if (p.startsWith('/sandboxes')) return 'public';
+  if (p === '/health' || p === '/openapi.json' || p === '/sandboxes' || p.startsWith('/sandboxes/')) return 'public';
   if (p.startsWith('/admin') || p.startsWith('/mock/')) return 'control';
   if (p.startsWith('/payment/rest/')) return 'business';
   if (p.startsWith('/payment/')) return 'form';
-  return 'public';
+  return 'business';
 }
 
 /** DX-ответ на ошибку admission песочницы (F-12): знание ID ≠ доступ. */
@@ -1661,9 +1666,11 @@ async function route(req, res) {
 }
 
 async function routeRequest(req, res, url, p, raw, body, admission) {
-  // Единый access-control управляющей поверхности (F-07).
+  // Единый access-control управляющей поверхности (F-07, PA-50).
   const surface = controlSurface(p);
-  const ownerSurface = surface === 'operator' && Boolean(sandboxRuntime.recordByOwnerToken(req));
+  const ownerRec = sandboxRuntime.recordByOwnerToken(req);
+  const ownerSurface = surface === 'operator'
+    && Boolean(ownerRec && admission.record && ownerRec.id === admission.record.id);
   if (surface && admission.via !== 'owner' && !ownerSurface) {
     const access = checkControlAccess(req, {
       adminToken: MOCK_ADMIN_TOKEN,
@@ -1708,6 +1715,7 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
     // Сетевые сбои ядра: X-Mock-Latency / X-Mock-Scenario: latency, http-500, http-504.
     const chaosSpec = parseScenarioSpec(req.headers['x-mock-scenario'] || '');
     const chaosResult = await applyRequestChaos(req, chaosSpec);
+    sandboxRuntime.current(); // PA-50 §7.2 / PG-10: fail-closed при истечении/удалении песочницы во время await
     if (chaosResult.abortStatus) {
       return jsonRaw(res, chaosResult.abortStatus, aerrBody(6, chaosResult.abortMessage, {
         hint: 'Сценарий X-Mock-Scenario: http-500|http-504 (сетевой сбой до бизнес-логики). Выдержите паузу и повторите; сверка состояния — getOrderStatusExtended.do.',
@@ -1734,7 +1742,7 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
       checksum: CHECKSUM_ENABLED ? 'HMAC-SHA256' : 'off',
       sessionTimeoutSecs: SESSION_TIMEOUT_SECS,
     };
-    if (TENANCY !== 'owned' || admission.record.isDefault) {
+    if (TENANCY !== 'owned' || (admission.record.isDefault && !admission.record.ownerTokenHash) || admission.via === 'owner' || admission.via === 'operator') {
       Object.assign(health, {
         orders: Object.keys(state.orders).length,
         awaiting: Object.values(state.orders).filter((o) => o.status === 0 || o.status === 5).length,
@@ -1756,8 +1764,11 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
 
   if (p === '/mock/reset' && req.method === 'POST') {
     const target = (body && body.sandbox) || admission.record.id;
-    const resetName = sandboxRuntime.reset(target);
+    const resetName = sandboxRuntime.reset(target, req);
     if (!resetName.ok) {
+      if (resetName.error && resetName.error !== 'not-found') {
+        return sendSandboxError(res, { ok: false, kind: resetName.error, sandbox: resetName.sandbox || target });
+      }
       return jsonRaw(res, 404, aerrBody(3, `Песочница «${target}» не найдена`, {
         hint: 'Сбросить можно существующую песочницу: список — GET /sandboxes.',
       }));
@@ -1771,7 +1782,10 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
   if (p === '/mock/state') {
     if (req.method === 'GET') {
       const targetSandbox = url.searchParams.get('sandbox') || undefined;
-      const snapshot = targetSandbox ? sandboxRuntime.exportState(targetSandbox) : sandboxRuntime.exportState();
+      const snapshot = targetSandbox ? sandboxRuntime.exportState(targetSandbox, req) : sandboxRuntime.exportState(null, req);
+      if (snapshot && snapshot.ok === false) {
+        return sendSandboxError(res, { ok: false, kind: snapshot.error || 'unauthorized', sandbox: snapshot.sandbox || targetSandbox || admission.record.id });
+      }
       return sendJson(res, { sandbox: snapshot.sandbox || admission.record.id, state: snapshot.state ? snapshot.state : snapshot });
     }
     if (req.method === 'POST' || req.method === 'PUT') {
@@ -1786,7 +1800,10 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
       const targetSandbox = (body && body.sandbox) || admission.record.id;
       const snapshot = (body && body.state) || body || {};
       try {
-        const imported = sandboxRuntime.importState(snapshot, targetSandbox);
+        const imported = sandboxRuntime.importState(snapshot, targetSandbox, req);
+        if (!imported.ok) {
+          return sendSandboxError(res, { ok: false, kind: imported.error || 'unauthorized', sandbox: imported.sandbox || targetSandbox });
+        }
         return sendJson(res, { ok: true, sandbox: imported.sandbox });
       } catch (e) {
         return jsonRaw(res, 400, aerrBody(6, `Недопустимый снимок состояния: ${e.message}`, {
@@ -2017,6 +2034,10 @@ async function handleRest(req, res, p, body) {
 
 const server = http.createServer((req, res) => {
   route(req, res).catch((e) => {
+    if (e && e.code === 'SANDBOX_EXPIRED') {
+      try { sendSandboxError(res, { ok: false, kind: 'expired', sandbox: e.sandbox || 'default' }); } catch { /* headers sent */ }
+      return;
+    }
     if (e && e.code === 'BODY_TOO_LARGE') {
       try {
         jsonRaw(res, 413, aerrBody(6, 'Размер тела запроса превышает допустимый лимит', {

@@ -168,7 +168,7 @@ async function registerPartner(port, descriptor, inn = '7701234567') {
  */
 function startChild(env = {}) {
   const { spawn } = require('child_process');
-  const proc = spawn('node', [path.join(__dirname, 'server.js')], {
+  const proc = spawn('node', ['--max-old-space-size=48', path.join(__dirname, 'server.js')], {
     env: {
       ...process.env,
       MOCK_HOST: '127.0.0.1',
@@ -181,8 +181,10 @@ function startChild(env = {}) {
       MOCK_HOSTED: '',
       MOCK_BLOCK_PRIVATE_WEBHOOKS: '',
       MOCK_TENANCY: '',
+      MOCK_SANDBOX_FILE: '',
       MOCK_SANDBOX_TOKEN: '',
       MOCK_SANDBOX_TTL_MS: '',
+      MOCK_SANDBOX_SWEEP_MS: '',
       MOCK_SANDBOX_MAX: '',
       MOCK_SANDBOX_MAX_DOCUMENTS: '',
       MOCK_SANDBOX_RETENTION_MS: '',
@@ -203,7 +205,7 @@ function startChild(env = {}) {
     proc.stderr.on('data', (d) => { buf += String(d); });
     proc.on('exit', (code) => { clearTimeout(timer); reject(new Error(`дочерний стенд завершился с кодом ${code}: ${buf.slice(0, 300)}`)); });
   });
-  return { proc, port, stop: () => { try { proc.kill('SIGKILL'); } catch { /* ignore */ } } };
+  return { proc, port, stop: () => stopChild(proc) };
 }
 
 async function stopChild(child) {
@@ -554,7 +556,7 @@ process.env.MOCK_RETRY_MS = '1000';
     const plainHook = WEBHOOK_HITS.map((h) => { try { return JSON.parse(h.body); } catch { return null; } }).filter(Boolean).find((n) => n.PaymentId === plainParsed.PaymentId);
     assert.ok(plainHook, 'plain платёж должен уведомлять мерчанта');
     assert.strictEqual(plainHook.SpAccumulationId, undefined, 'в plain-нотификации не должно быть SpAccumulationId');
-    } finally { plainChild.stop(); }
+    } finally { await stopChild(plainChild); }
   }
 
   /* --- Этап 6–7 (бриф 2026-10-11): чарджбэки e2e, сценарии, виртуальные часы, e2c/AV --- */
@@ -1195,7 +1197,7 @@ process.env.MOCK_RETRY_MS = '1000';
       const initChild = await request(childPort, 'POST', '/v2/Init', { ...initPayload, Token: tokenOf(initPayload) });
       assert.strictEqual(JSON.parse(initChild.body).Success, true, 'платёжный API не должен требовать operator-токен');
     } finally {
-      child.stop();
+      await stopChild(child);
     }
   }
 
@@ -1215,7 +1217,7 @@ process.env.MOCK_RETRY_MS = '1000';
       const initHosted = await request(childPort, 'POST', '/v2/Init', { ...(() => { const p = { TerminalKey: TERMINAL, Amount: '1500', OrderId: 'hosted-1' }; return { ...p, Token: tokenOf(p) }; })() });
       assert.strictEqual(JSON.parse(initHosted.body).Success, true, 'платёжный API работает и в hosted-режиме');
     } finally {
-      child.stop();
+      await stopChild(child);
     }
   }
 
@@ -1245,7 +1247,7 @@ process.env.MOCK_RETRY_MS = '1000';
       assert.ok(String(notif.lastStatus).startsWith('ERR'), `доставка на приватный адрес должна быть заблокирована, lastStatus=${notif.lastStatus}`);
       assert.ok(String(notif.lastStatus).includes('SSRF'), 'причина отказа должна быть явной (SSRF)');
     } finally {
-      child.stop();
+      await stopChild(child);
     }
   }
 
@@ -1258,7 +1260,7 @@ process.env.MOCK_RETRY_MS = '1000';
       const r = await request(childPort, 'POST', '/mock/verify-merchant', { url: notificationUrl });
       assert.strictEqual(r.statusCode, 403, 'MOCK_BLOCK_PRIVATE_WEBHOOKS=true тоже должен включать guard');
     } finally {
-      child.stop();
+      await stopChild(child);
     }
     assert.ok(WEBHOOK_HITS.length > 0, 'локальный режим без флага продолжает доставлять вебхуки на localhost');
   }
@@ -1394,7 +1396,7 @@ process.env.MOCK_RETRY_MS = '1000';
       assert.strictEqual(importedState.payouts['P-9'].panMask, '220077**5676');
       assert.ok(!(await request(childPort, 'GET', '/mock/state')).body.includes('2200770012345676'), 'в экспорте после импорта PAN нет');
     } finally {
-      child.stop();
+      await stopChild(child);
       try { fs.unlinkSync(legacyFile); } catch { /* уже удалён */ }
     }
   }
@@ -1745,7 +1747,7 @@ process.env.MOCK_RETRY_MS = '1000';
       const meReset = JSON.parse((await request(childPort, 'POST', '/sandboxes/me/reset', {}, owner)).body);
       assert.strictEqual(meReset.sandbox, created.id, 'reset работает по owner-token');
     } finally {
-      child.stop();
+      await stopChild(child);
     }
   }
 
@@ -1785,7 +1787,7 @@ process.env.MOCK_RETRY_MS = '1000';
       const found = JSON.parse((await request(port2, 'POST', '/v2/GetState', { ...ref, Token: tokenOf(ref) }, { 'X-Mock-Sandbox': 'persist-a' })).body);
       assert.strictEqual(found.PaymentId, savedPaymentId, 'GetState по OrderId находит платёж из восстановленного снимка (F-15)');
     } finally {
-      child2.stop();
+      await stopChild(child2);
     }
 
     const child3 = startChild({ MOCK_TENANCY: '1', MOCK_SANDBOX_TTL_MS: '800', MOCK_SANDBOX_SWEEP_MS: '1000' });
@@ -1800,7 +1802,7 @@ process.env.MOCK_RETRY_MS = '1000';
       }, { timeoutMs: 5000, description: 'sandbox TTL expiry' });
       assert.ok([404, 410].includes(after.statusCode), `после TTL песочница недоступна (получено ${after.statusCode})`);
     } finally {
-      child3.stop();
+      await stopChild(child3);
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   }
@@ -1821,7 +1823,7 @@ process.env.MOCK_RETRY_MS = '1000';
       assert.strictEqual(third.ErrorCode, '7');
       assert.ok(String(third.Message).includes('Лимит документов песочницы'), `DX должен называть квоту: ${third.Message}`);
     } finally {
-      child.stop();
+      await stopChild(child);
     }
   }
 
@@ -1856,8 +1858,91 @@ process.env.MOCK_RETRY_MS = '1000';
       const orders = JSON.parse((await request(childPort, 'POST', '/v2/CheckOrder', { ...check, Token: tokenOf(check) }, inSandbox)).body);
       assert.strictEqual((orders.Payments || []).length, 1, 'CheckOrder по OrderId работает после импорта');
     } finally {
-      child.stop();
+      await stopChild(child);
     }
+  }
+
+  // 49. PA-50 / PA-54 / PA-55: авторизация явного target, гонка TTL-sweep mid-await,
+  //     защита default-песочницы (MOCK_SANDBOX_TOKEN) и отсутствие глобального switchActive
+  {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tbank-pa50-'));
+    const sbxFile = path.join(tmpDir, 'sandboxes.json');
+    const core = require('../../packages/core');
+    fs.writeFileSync(sbxFile, JSON.stringify({
+      activeId: 'victim-b',
+      sandboxes: [
+        {
+          id: 'victim-b',
+          expiresAt: 0,
+          ownerTokenHash: core.hashSecret('victim-owner-token'),
+          state: {
+            payments: { 'PA-VICTIM-42': { paymentId: 'PA-VICTIM-42', orderId: 'VICTIM-CANARY-TBANK', amount: 12345, status: 'CONFIRMED', statusHistory: [] } },
+            orderIndex: { 'VICTIM-CANARY-TBANK': 'PA-VICTIM-42' },
+          },
+        },
+        {
+          id: 'attacker-a',
+          expiresAt: 0,
+          ownerTokenHash: core.hashSecret('attacker-owner-token'),
+          state: { payments: {}, orderIndex: {} },
+        },
+      ],
+    }));
+    const child = startChild({
+      MOCK_TENANCY: 'owned',
+      MOCK_SANDBOX_FILE: sbxFile,
+      MOCK_SANDBOX_TOKEN: 'default-owner-secret',
+      MOCK_OPERATOR_TOKEN: 'op-secret',
+      MOCK_SANDBOX_TTL_MS: '1000',
+      MOCK_SANDBOX_SWEEP_MS: '1000',
+    });
+    const childPort = await child.port;
+    try {
+      const hdrA = { 'X-Mock-Sandbox': 'attacker-a', 'X-Sandbox-Token': 'attacker-owner-token' };
+
+      // PA-50: чужой export/import/reset/delete из контекста A отклоняется (401)
+      const expB = await request(childPort, 'GET', '/mock/state?sandbox=victim-b', undefined, hdrA);
+      assert.strictEqual(expB.statusCode, 401, 'PA-50: чужой GET /mock/state?sandbox=victim-b -> 401');
+      assert.ok(!expB.body.includes('VICTIM-CANARY-TBANK'), 'PA-50: канарка жертвы не утекает');
+      const impB = await request(childPort, 'POST', '/mock/state', { sandbox: 'victim-b', state: { payments: { pwn: {} } } }, hdrA);
+      assert.strictEqual(impB.statusCode, 401, 'PA-50: чужой POST /mock/state -> 401');
+      const rstB = await request(childPort, 'POST', '/mock/reset', { sandbox: 'victim-b' }, hdrA);
+      assert.strictEqual(rstB.statusCode, 401, 'PA-50: чужой POST /mock/reset -> 401');
+      const delB = await request(childPort, 'DELETE', '/sandboxes?sandbox=victim-b', undefined, hdrA);
+      assert.strictEqual(delB.statusCode, 401, 'PA-50: чужой DELETE /sandboxes -> 401');
+
+      // Свой export/import/reset и оператор работают
+      const opStateB = await request(childPort, 'GET', '/mock/state?sandbox=victim-b', undefined, { 'X-Operator-Token': 'op-secret' });
+      assert.strictEqual(opStateB.statusCode, 200, 'PA-50: оператор читает /mock/state?sandbox=victim-b');
+      assert.ok(opStateB.body.includes('VICTIM-CANARY-TBANK'), 'PA-50: состояние жертвы не повреждено');
+
+      // PA-54: закрытая default-песочница не открывается через form и не светит счётчики в /health
+      const defForm = await request(childPort, 'GET', '/payment/PA-VICTIM-42');
+      assert.strictEqual(defForm.statusCode, 401, 'PA-54: форма защищённой default без токена -> 401');
+      const pubHealth = JSON.parse((await request(childPort, 'GET', '/health')).body);
+      assert.strictEqual(pubHealth.payments, undefined, 'PA-54: публичный /health на защищённой default не раскрывает счётчики');
+
+      // PA-50 §7.2: гонка TTL-sweep во время in-flight запроса с валидным ownerToken -> 410 без утечки victim-b
+      const r = JSON.parse((await request(childPort, 'POST', '/sandboxes', { id: 'race-tenant' })).body);
+      const gsPayload = { TerminalKey: TERMINAL, PaymentId: 'PA-VICTIM-42' };
+      gsPayload.Token = tokenOf(gsPayload);
+      const raceResp = await request(childPort, 'POST', '/v2/GetState', gsPayload, {
+        'X-Mock-Sandbox': r.id,
+        'X-Sandbox-Token': r.ownerToken,
+        'X-Mock-Latency': '1700',
+      });
+      assert.strictEqual(raceResp.statusCode, 410, `PA-50 §7.2: истёкшая во время await песочница -> 410 (получено ${raceResp.statusCode})`);
+      assert.ok(!raceResp.body.includes('VICTIM-CANARY-TBANK'), 'PA-50 §7.2: канарка чужой песочницы не утекает при TTL-sweep');
+    } finally {
+      await stopChild(child);
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+
+    // PA-55: POST /sandboxes в namespaces не переключает глобальный fallback для запросов без селектора
+    const sw = JSON.parse((await request(mockPort, 'POST', '/sandboxes', { sandbox: 'ci-worker-b' })).body);
+    assert.strictEqual(sw.current, 'ci-worker-b');
+    const healthNoSel = JSON.parse((await request(mockPort, 'GET', '/health')).body);
+    assert.strictEqual(healthNoSel.sandbox, 'default', 'PA-55: запрос без селектора остаётся в default');
   }
 
   console.log(`selftest: ${WEBHOOK_HITS.length} webhook deliveries, ${Object.keys(state.payments).length} payment sessions`);
