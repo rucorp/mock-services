@@ -10,8 +10,8 @@
  * сверяет декларативные манифесты протоколов (`protocols/*.json`),
  * спецификации OpenAPI 3.1 (`docs/openapi/*.openapi.json`),
  * эталонные выжимки документации (`docs/reference/**`) и фактическую
- * реализацию в `services/tbank-mock/server.js`, `services/kassa-mock/server.js`
- * и `services/atol-mock/server.js`.
+ * реализацию в `services/tbank-mock/server.js`, `services/kassa-mock/server.js`,
+ * `services/atol-mock/server.js` и `services/alfa-mock/server.js`.
  *
  * Запуск:
  *   node scripts/check-protocol-drift.js [--json]
@@ -217,6 +217,111 @@ function main() {
     assertCheck('atol:polling-guide', `${key}=${value}`, inGuide, inGuide ? 'значение есть в docs/integration/atol.md' : 'гайд не упоминает рекомендацию v4');
   }
 
+  // 4. Проверка Альфа-Банк (alfa-eacq.json <-> server.js <-> alfa-mock.openapi.json <-> docs/integration/alfa.md)
+  const alfaManifest = readJson('protocols/alfa-eacq.json');
+  const alfaServerCode = readText('services/alfa-mock/server.js');
+  const alfaOpenApi = readJson('docs/openapi/alfa-mock.openapi.json');
+  const alfaGuide = readText('docs/integration/alfa.md');
+
+  for (const docPath of alfaManifest.upstreamDocs || []) {
+    const exists = fs.existsSync(path.join(ROOT, docPath));
+    assertCheck('alfa:docs', docPath, exists, exists ? 'эталонный документ найден' : 'эталонный документ отсутствует');
+  }
+
+  for (const method of alfaManifest.restMethods || []) {
+    const inServer = alfaServerCode.includes(`'${method}'`);
+    const inOpenApi = Boolean(alfaOpenApi.paths && alfaOpenApi.paths[`/payment/rest/${method}`]);
+    assertCheck('alfa:rest-method', `/payment/rest/${method}`, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+
+  // Параметрические form-маршруты ищутся по устойчивой части пути: в коде они
+  // регулярные выражения (^\/payment\/([A-Za-z0-9-]+)\/pay$ и т.п.).
+  const alfaNeedle = (route) => route
+    .replace('/payment/{orderId}/pay', '/pay')
+    .replace('/payment/{orderId}/3ds', '/3ds')
+    .replace('/payment/{orderId}', '/payment/');
+
+  for (const route of [...(alfaManifest.routes || []), ...(alfaManifest.formRoutes || []), ...(alfaManifest.mockRoutes || [])]) {
+    const needle = alfaNeedle(route);
+    const inServer = alfaServerCode.includes(needle);
+    const inOpenApi = Boolean(alfaOpenApi.paths && alfaOpenApi.paths[route]);
+    assertCheck('alfa:route', route, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+
+  for (const route of alfaManifest.mockControlRoutes || []) {
+    const inServer = alfaServerCode.includes(route);
+    const inOpenApi = Boolean(alfaOpenApi.paths && alfaOpenApi.paths[route]);
+    assertCheck('alfa:control-route', route, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+
+  for (const st of Object.keys(alfaManifest.orderStatuses || {})) {
+    const inServer = alfaServerCode.includes(`${st}: '`);
+    const inOpenApi = JSON.stringify((alfaOpenApi.components || {}).schemas || {}).includes(`${st} — `);
+    assertCheck('alfa:order-status', st, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+
+  for (const code of alfaManifest.errorCodes || []) {
+    const inServer = code === 0
+      ? alfaServerCode.includes('errorCode: 0')
+      : alfaServerCode.includes(`${code}: {`);
+    assertCheck('alfa:error-code', String(code), inServer, inServer ? 'код ошибки в каталоге DX' : 'кода нет в каталоге');
+  }
+
+  for (const op of (alfaManifest.callback || {}).operations || []) {
+    const inServer = alfaServerCode.includes(`'${op}'`);
+    const inOpenApi = JSON.stringify((alfaOpenApi.components || {}).schemas || {}).includes(op);
+    assertCheck('alfa:callback-operation', op, inServer && inOpenApi, `server=${inServer}, openapi=${inServer}`);
+  }
+
+  for (const pan of alfaManifest.testCards || []) {
+    const inServer = alfaServerCode.includes(pan);
+    assertCheck('alfa:test-card', pan, inServer, inServer ? 'тестовая карта поддержана' : 'карта не найдена в server.js');
+  }
+
+  for (const actionCode of alfaManifest.actionCodes || []) {
+    const inServer = alfaServerCode.includes(String(actionCode));
+    assertCheck('alfa:action-code', String(actionCode), inServer, inServer ? 'шлюзовой код поддержан' : 'кода нет в server.js');
+  }
+
+  // Инварианты контракта Альфа-Банка, отличающие его от Т-Банка и ЮKassa.
+  const alfaInvariants = [
+    ['alfa:invariant', 'callback: HTTP GET с query-параметрами (не POST)', alfaServerCode.includes("method: 'GET'") && alfaServerCode.includes('mdOrder')],
+    ['alfa:invariant', 'checksum: симметричный HMAC-SHA256, hex в верхнем регистре', alfaServerCode.includes("createHmac('sha256'") && alfaServerCode.includes('.toUpperCase()')],
+    ['alfa:invariant', 'checksum-строка name;value;…; без checksum/sign_alias', alfaServerCode.includes('${name};${params[name]};') && alfaServerCode.includes("name !== 'checksum' && name !== 'sign_alias'")],
+    ['alfa:invariant', 'ACK callback — ровно HTTP 200', alfaServerCode.includes('res.statusCode === 200')],
+    ['alfa:invariant', 'асимметричный checksum вне области (не домысливается)', alfaServerCode.includes('асимметрич') && alfaServerCode.includes('SHA-512')],
+    ['alfa:invariant', 'дефолтные креды — синтетические (не банковские)', alfaServerCode.includes(alfaManifest.testCredentials.userName) && alfaServerCode.includes('синтетич')],
+    ['alfa:invariant', 'orderNumber уникален: повтор -> errorCode 1 (не replay)', alfaServerCode.includes('aerr(1,') && alfaServerCode.includes('state.orderNumbers')],
+    ['alfa:invariant', 'amount — копейки, строгий парсер (F-24)', alfaServerCode.includes('parseMoneyKopeks')],
+    ['alfa:invariant', 'PAN не хранится: только маска first6**last4 (F-10)', alfaServerCode.includes('maskPan') && alfaServerCode.includes('first6**last4')],
+    ['alfa:invariant', 'двухстадийная схема — env-флаг MOCK_TWO_STAGE', alfaServerCode.includes('MOCK_TWO_STAGE')],
+    ['alfa:invariant', `ACS-пароль тестового контура ${alfaManifest.acsPassword}`, alfaServerCode.includes(alfaManifest.acsPassword)],
+    ['alfa:invariant', 'ретраи callback — mock-конфиг (PDF параметры не задаёт)', alfaServerCode.includes('MOCK_CALLBACK_RETRY_MS') && alfaServerCode.includes('MOCK_CALLBACK_MAX_ATTEMPTS')],
+    ['alfa:invariant', 'errorCode=0 — не эквивалент финального статуса оплаты', alfaServerCode.includes('не эквивалент финального статуса оплаты')],
+    ['alfa:invariant', 'sessionTimeoutSecs -> declinedByTimeout по виртуальным часам', alfaServerCode.includes('sessionTimeoutSecs') && alfaServerCode.includes('declinedByTimeout')],
+  ];
+  for (const [category, item, ok] of alfaInvariants) {
+    assertCheck(category, item, Boolean(ok), ok ? 'инвариант соблюдён' : 'инвариант нарушен в server.js');
+  }
+
+  // Ключевые оговорки конспекта обязаны доехать до публичного гайда.
+  const alfaGuidePoints = [
+    ['register.do', 'регистрация заказа'],
+    ['getOrderStatusExtended.do', 'серверная сверка статуса'],
+    ['mdOrder', 'параметр callback'],
+    ['HMAC-SHA256', 'алгоритм симметричного checksum'],
+    ['sign_alias', 'оговорка асимметричного режима'],
+    ['12345678', 'ACS-пароль тестового контура'],
+    ['declinedByTimeout', 'операция отказа по таймауту'],
+    ['1200', 'дефолт sessionTimeoutSecs'],
+    ['ALFAMOCKTEST', 'синтетические креды стенда'],
+    ['SHA-512', 'оговорка: асимметричный режим вне области'],
+  ];
+  for (const [needle, label] of alfaGuidePoints) {
+    const inGuide = alfaGuide.includes(needle);
+    assertCheck('alfa:guide-point', `${label} (${needle})`, inGuide, inGuide ? 'есть в docs/integration/alfa.md' : 'гайд не упоминает оговорку');
+  }
+
   const summary = {
     ok: driftIssues.length === 0,
     checkedAt: new Date().toISOString(),
@@ -229,7 +334,7 @@ function main() {
   if (jsonOutput) {
     console.log(JSON.stringify(summary, null, 2));
   } else {
-    console.log(`\n== Protocol Drift Check (tbank-eacq + ferma-ofd + atol-online) ==`);
+    console.log(`\n== Protocol Drift Check (tbank-eacq + ferma-ofd + atol-online + alfa-eacq) ==`);
     console.log(`Проверено инвариантов контракта: ${summary.totalChecks}, пройдено: ${summary.passedChecks}, расхождений: ${summary.driftCount}`);
     if (driftIssues.length > 0) {
       console.error('\nОбнаружены расхождения (drift):');

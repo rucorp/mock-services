@@ -9,6 +9,79 @@
 ## [Unreleased]
 
 ### Added
+- **Второй внешний банк-адаптер: Альфа-Банк интернет-эквайринг REST (Stage 2, #41).**
+  - `services/alfa-mock` — независимый zero-dep мок REST-интерфейса шлюза
+    Альфа-Банка (платформа RBS, тестовый контур `alfa.rbsuat.com/payment/rest`)
+    на :3104: `POST /payment/rest/{register,registerPreAuth,deposit,reverse,refund,
+    getOrderStatus,getOrderStatusExtended}.do` с `application/x-www-form-urlencoded`
+    (креды `userName`/`password` в каждом запросе, суммы в копейках, уникальный
+    `orderNumber`), ответ регистрации `{orderId, formUrl}`, платёжная страница
+    `/payment/{orderId}` с официальными тестовыми картами (3DS1/3DS2
+    challenge+frictionless, МИР 18 цифр, отказы `-2011` PaRes=U и `116`
+    недостаточно средств) и тестовым ACS (пароль `12345678`, Fail/неверные
+    срок-CVV-пароль → `71015`); дефолты — **синтетические** креды
+    `ALFAMOCKTEST`/`mockpass123` по образцу TBANKMOCKTEST (реальные тестовые
+    креды банк выдаёт индивидуально — в конфиг не зашиваются), печатаются в
+    стартовом логе;
+  - машина состояний `orderStatus 0…6` (общая нумерация платформы RBS —
+    документированная интерпретация): двухстадийная схема `registerPreAuth` →
+    холд (1) → `deposit` ≤ авторизованной суммы (частичное подтверждение
+    допустимо) → 2; `reverse` из 1/2 → 3; полный/частичный `refund` из 2/4 → 4
+    с накоплением `refundedAmount`; отказ карты/истечение `sessionTimeoutSecs`
+    → 6 с `actionCode`; `getOrderStatusExtended.do` различает состояние, суммы
+    авторизации/списания/возврата и код шлюза; `errorCode=0` — результат
+    API-вызова, не факт оплаты (DX-hint в ответе регистрации и в гайде);
+  - **callback — HTTP GET с query-параметрами** (`mdOrder`, `orderNumber`,
+    `operation` — `approved`/`deposited`/`reversed`/`refunded`/`declinedByTimeout`/
+    `declinedCardpresent`, `status` 1/0, `amount`, `callbackCreationDate`) через
+    core-очередь: **ACK ровно HTTP 200** (204 — неуспех), ретраи
+    (`MOCK_CALLBACK_RETRY_MS` × `MOCK_CALLBACK_MAX_ATTEMPTS` — mock-конфиг: PDF
+    параметры повторов не задаёт), `webhook-drop`/`webhook-duplicate`, повтор
+    кнопкой в `/admin`; **симметричный checksum HMAC-SHA256**: без
+    `checksum`/`sign_alias`, имена параметров алфавитно, строка `name;value;…;`,
+    hex в верхнем регистре; режим без checksum (`MOCK_CALLBACK_CHECKSUM=false`)
+    эмулирует оговорку PDF — неподписанное уведомление можно подделать, сверка
+    через REST;
+  - ошибки в форме шлюза `{errorCode, errorMessage}` (классическая таблица RBS
+    1—6; протокольные ошибки с HTTP 200, инфраструктурные — с честными
+    404/405/413/500/504) + DX-слой мока (`field`/`hint`/`doc`); негативы: чужие
+    креды (2), повтор `orderNumber` (1), неизвестный заказ (3), операции не в
+    том статусе (4), `deposit` > холда и `refund` > списанного, дробные копейки,
+    битый `returnUrl`/`jsonParams`, валюта ≠ 643 (5);
+  - слои ядра переиспользованы по паттерну yookassa/atol: сценарный реестр
+    (`fail`/`hang`/`webhook-*`/`latency`/`http-500|504` + `/mock/scenarios`),
+    виртуальные часы (`/mock/time`: истечение `sessionTimeoutSecs` →
+    `declinedByTimeout`, ретраи callback), журнал `/payment/rest` с curl
+    (form-urlencoded) и редакцией секретов/PII — форма не журналируется, PAN не
+    хранится (только маска `first6**last4`, F-10), control-plane токены, sandbox
+    runtime RFC-001 (собственные `userName`/`password`/`callbackSecret`
+    песочницы), флаги контура `MOCK_TWO_STAGE`/`MOCK_PARTIAL_REFUND`/
+    `MOCK_SSL_PERMITTED`;
+  - ядро расширено **аддитивно**: `createDeliveryQueue`/`postJson` поддержали
+    исходящий `GET` без тела (`request(entry).method`) — для GET-callback
+    Альфа-Банка; POST-доставка существующих адаптеров не изменилась (core
+    selftest 41 → **42**: регресс GET-доставки);
+  - контракт описан декларативно: манифест `protocols/alfa-eacq.json` и OpenAPI
+    3.1 `docs/openapi/alfa-mock.openapi.json` (`GET /openapi.json`),
+    `scripts/check-protocol-drift.js` дополнен четвёртой секцией
+    (221 → **316** инвариантов: маршруты и методы `*.do`, статусы, операции
+    callback, тестовые карты, коды ошибок и `actionCode`, инварианты «GET +
+    HMAC-SHA256 uppercase», «ACK ровно 200», «асимметричный режим вне области»,
+    «синтетические креды», оговорки конспекта в гайде);
+  - `selftest.js` (**287** проверок) включён в `npm test` (`test:alfa`), CI-шаг
+    и прогон внутри образа; compose: сервис `alfa-mock :3104` с healthcheck в
+    обоих compose-файлах, black-box сценарий (секция 6) в
+    `scripts/compose-selftest.js` (43 → **65** проверок), `start:alfa`, `smoke`
+    и `EXPOSE 3104` в Dockerfile; документация: `services/alfa-mock/README.md`,
+    гайд `docs/integration/alfa.md`, обновлён корневой README;
+  - **вне области #41**: асимметричный checksum (официальный PDF противоречив:
+    описание — SHA-256, примеры Java/PHP — SHA-512; режим подтверждается банком,
+    не домысливается), привязки карт (`bindingId`), моделирование `orderBundle`,
+    `paymentOrder.do` и различия координат r-/i-логинов; таблицы `orderStatus` и
+    `errorCode` в альфа-конспекте не зафиксированы — взяты общие таблицы
+    платформы RBS с явной пометкой в README («Границы и форки») и отчёте PR;
+  - контракты `tbank-mock`, `kassa-mock`, `yookassa-mock` и `atol-mock` не
+    менялись (selftest: 48 / 129 / 227 / 202).
 - **Первый внешний касса-адаптер: АТОЛ Онлайн direct API v4 (Stage 2, #34).**
   - `services/atol-mock` — независимый zero-dep мок прямого API АТОЛ Онлайн версии v4
     (ФФД 1.05) на :3103: `POST /possystem/v4/getToken` (`{login, pass}` → токен,

@@ -1,0 +1,586 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "alfa-mock — Альфа-Банк интернет-эквайринг REST (Мок-стенд)",
+    "version": "0.5.0",
+    "description": "Мок-стенд интернет-эквайринга Альфа-Банка (REST-интерфейс шлюза, платформа RBS): POST /payment/rest/*.do с form-параметрами, креды userName/password в каждом запросе, суммы в копейках, уникальный orderNumber, ответ регистрации {orderId, formUrl}, платёжная страница с тестовыми картами и ACS (3DS1/3DS2, пароль 12345678), статусы заказа getOrderStatus(Extended).do, двухстадийная схема (registerPreAuth → deposit ≤ авторизации), reverse, полный/частичный refund, callback-уведомления HTTP GET с query-параметрами и симметричным checksum HMAC-SHA256 (ACK — ровно HTTP 200). errorCode=0 — результат API-вызова, не эквивалент финального статуса оплаты. Асимметричный режим checksum (SHA-256/SHA-512 в официальном PDF неоднозначны) и привязки карт вне области стенда."
+  },
+  "servers": [
+    { "url": "http://localhost:3104", "description": "Локальный стенд alfa-mock" },
+    { "url": "https://alfa.rbsuat.com/payment/rest", "description": "Тестовый контур Альфа-Банка (для сравнения контракта; мок его не замещает)" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "providerCreds": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "userName",
+        "description": "Фактически креды шлюза передаются form-параметрами userName/password в теле каждого *.do-запроса (токенов нет). Дефолты стенда — СИНТЕТИЧЕСКИЕ (ALFAMOCKTEST/mockpass123, по образцу TBANKMOCKTEST); реальные тестовые креды банк выдаёт индивидуально, в дефолтах мока они не используются."
+      },
+      "operatorToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Operator-Token",
+        "description": "Токен управляющей поверхности (MOCK_OPERATOR_TOKEN; также Authorization: Bearer или ?operator_token=). Если токены не заданы, локальный стенд открыт; при MOCK_HOSTED=1 без секрета маршрут закрыт (fail-closed)."
+      },
+      "adminToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Admin-Token",
+        "description": "Токен админки /admin* (MOCK_ADMIN_TOKEN)."
+      },
+      "sandboxToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Sandbox-Token",
+        "description": "Owner-token песочницы (RFC-001): выдаётся один раз при POST /sandboxes; также Authorization: Bearer <ownerToken> или ?sandbox_token=. В режиме MOCK_TENANCY=owned знание id песочницы без owner-token доступа не даёт."
+      }
+    },
+    "parameters": {
+      "XMockScenario": {
+        "name": "X-Mock-Scenario",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string" },
+        "description": "Сценарий управления поведением: fail (системная ошибка, errorCode 6), hang (ответ не приходит), webhook-drop/no-callback (callback подавлен), webhook-duplicate/callback-duplicate (две копии callback), latency:<dur>, http-500, http-504 (сетевой сбой до бизнес-логики)."
+      },
+      "XMockSandbox": {
+        "name": "X-Mock-Sandbox",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string" },
+        "description": "Имя изолированной песочницы для параллельных CI-воркеров (по умолчанию default)."
+      },
+      "XMockLatency": {
+        "name": "X-Mock-Latency",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string" },
+        "description": "Искусственная задержка ответа (например, 500ms или 2s)."
+      }
+    },
+    "schemas": {
+      "ProviderError": {
+        "type": "object",
+        "description": "Ошибка шлюза RBS: errorCode + errorMessage, HTTP-статус при этом 200 (инфраструктурные сбои 404/405/413/500/504 — исключение, там errorCode 6 идёт с честным HTTP-кодом). Поля field/hint/doc — DX-слой мока, не часть протокола.",
+        "properties": {
+          "errorCode": {
+            "type": "integer",
+            "enum": [1, 2, 3, 4, 5, 6],
+            "description": "Классическая таблица RBS: 1 — номер заказа уже зарегистрирован; 2 — merchant-логин не найден/неверный пароль; 3 — номер заказа некорректен; 4 — состояние заказа некорректно; 5 — операция отклонена; 6 — системная ошибка. Таблица в альфа-конспекте не зафиксирована — маппинг частных случаев см. services/alfa-mock/README.md («Границы и форки»)."
+          },
+          "errorMessage": { "type": "string" },
+          "field": { "type": "string", "description": "DX мока: проблемное поле запроса." },
+          "hint": { "type": "string", "description": "DX мока: что поправить." },
+          "doc": { "type": "string", "description": "DX мока: ссылка на раздел документации Альфа-Банка." }
+        }
+      },
+      "RegisterResponse": {
+        "type": "object",
+        "description": "Успешная регистрация заказа.",
+        "properties": {
+          "errorCode": { "type": "integer", "enum": [0], "description": "0 — вызов обработан. НЕ эквивалент финального статуса оплаты." },
+          "errorMessage": { "type": "string" },
+          "orderId": { "type": "string", "format": "uuid", "description": "Идентификатор заказа в шлюзе (в callback — mdOrder)." },
+          "formUrl": { "type": "string", "format": "uri", "description": "Платёжная страница: перенаправьте покупателя сюда." },
+          "hint": { "type": "string", "description": "DX мока: напоминание, что errorCode=0 не доказывает оплату." }
+        }
+      },
+      "OperationResponse": {
+        "type": "object",
+        "description": "Ответ deposit/reverse/refund: {errorCode:0, errorMessage:''} либо ProviderError.",
+        "properties": {
+          "errorCode": { "type": "integer" },
+          "errorMessage": { "type": "string" },
+          "field": { "type": "string" },
+          "hint": { "type": "string" },
+          "doc": { "type": "string" }
+        }
+      },
+      "OrderStatus": {
+        "type": "integer",
+        "enum": [0, 1, 2, 3, 4, 5, 6],
+        "description": "Состояние заказа (общая нумерация платформы RBS): 0 — заказ зарегистрирован, не оплачен; 1 — сумма захолдирована (двухстадийная схема); 2 — полная авторизация/оплата проведена; 3 — авторизация отменена (reverse); 4 — по заказу проведён возврат; 5 — начата аутентификация через ACS эмитента; 6 — авторизация отклонена."
+      },
+      "OrderStatusResponse": {
+        "type": "object",
+        "description": "getOrderStatus.do: состояние заказа и код ответа шлюза.",
+        "properties": {
+          "errorCode": { "type": "integer", "enum": [0] },
+          "errorMessage": { "type": "string" },
+          "orderId": { "type": "string", "format": "uuid" },
+          "orderNumber": { "type": "string" },
+          "orderStatus": { "$ref": "#/components/schemas/OrderStatus" },
+          "actionCode": { "type": "integer", "description": "Код ответа шлюза: 0 — одобрено; -2011 — 3DS PaRes=U; 116 — недостаточно средств; 71015 — введённая информация неверна; 5 — отказ эмитента." },
+          "actionCodeDescription": { "type": "string" },
+          "amount": { "type": "integer", "description": "Сумма заказа в копейках." },
+          "date": { "type": "integer", "description": "Дата создания заказа, epoch-миллисекунды." },
+          "maskPan": { "type": "string", "description": "Маска карты first6**last4 (PAN не хранится)." },
+          "cardAuthCode": { "type": "string" },
+          "terminalId": { "type": "string" },
+          "orderDescription": { "type": "string" }
+        }
+      },
+      "OrderStatusExtendedResponse": {
+        "type": "object",
+        "description": "getOrderStatusExtended.do: состояние, суммы авторизации/списания/возврата и код шлюза. Состав полей — интерпретация мока по требованию конспекта (docs/reference/alfa/01-payment-api.md).",
+        "allOf": [
+          { "$ref": "#/components/schemas/OrderStatusResponse" },
+          {
+            "type": "object",
+            "properties": {
+              "authorizedAmount": { "type": "integer", "description": "Авторизовано (холд), копейки." },
+              "depositedAmount": { "type": "integer", "description": "Списано, копейки." },
+              "refundedAmount": { "type": "integer", "description": "Возвращено, копейки." },
+              "authDate": { "type": "integer", "description": "epoch-ms авторизации." },
+              "depositDate": { "type": "integer", "description": "epoch-ms списания." },
+              "reverseDate": { "type": "integer", "description": "epoch-ms отмены." },
+              "refundDate": { "type": "integer", "description": "epoch-ms последнего возврата." },
+              "declinedDate": { "type": "integer", "description": "epoch-ms отказа." }
+            }
+          }
+        ]
+      },
+      "CallbackParams": {
+        "type": "object",
+        "description": "Исходящий callback стенда: HTTP GET, параметры в query. Приём обязан отвечать ровно HTTP 200, иначе банк повторяет доставку (число попыток/интервал PDF не задаёт). Проверка checksum: удалить checksum и sign_alias, отсортировать имена алфавитно, строка name;value;name;value;…;, HMAC-SHA256 с общим секретом, hex в верхнем регистре. Callback может прийти БЕЗ checksum — неподписанное уведомление можно подделать, сверяйте статус через getOrderStatusExtended.do.",
+        "properties": {
+          "mdOrder": { "type": "string", "description": "orderId заказа." },
+          "orderNumber": { "type": "string", "description": "Номер заказа магазина." },
+          "operation": {
+            "type": "string",
+            "enum": ["approved", "deposited", "reversed", "refunded", "declinedByTimeout", "declinedCardpresent"],
+            "description": "Операция: approved — холд, deposited — списание, reversed — отмена, refunded — возврат, declinedByTimeout — истёк срок оплаты, declinedCardpresent — отказ карточной авторизации (семантика в PDF не раскрыта; мок отправляет её при отказе на форме/ACS со status=0)."
+          },
+          "status": { "type": "string", "enum": ["1", "0"], "description": "1 — операция успешна, 0 — завершилась ошибкой." },
+          "amount": { "type": "string", "description": "Сумма операции в копейках." },
+          "callbackCreationDate": { "type": "string", "description": "Дата создания уведомления, epoch-миллисекунды (формат — выбор мока)." },
+          "checksum": { "type": "string", "description": "HMAC-SHA256, hex в верхнем регистре. Отключается MOCK_CALLBACK_CHECKSUM=false." },
+          "sign_alias": { "type": "string", "description": "Признак асимметричного режима (вне области стенда — не отправляется)." }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "sandbox": { "type": "string" },
+          "tenancy": { "type": "string" },
+          "api": { "type": "string", "enum": ["rest"] },
+          "base": { "type": "string" },
+          "twoStage": { "type": "boolean" },
+          "partialRefund": { "type": "boolean" },
+          "sslPermitted": { "type": "boolean" },
+          "checksum": { "type": "string" },
+          "sessionTimeoutSecs": { "type": "integer" },
+          "orders": { "type": "integer" },
+          "awaiting": { "type": "integer" },
+          "callbacks": { "type": "integer" }
+        }
+      }
+    },
+    "requestBodies": {
+      "RegisterForm": {
+        "required": true,
+        "content": {
+          "application/x-www-form-urlencoded": {
+            "schema": {
+              "type": "object",
+              "required": ["userName", "password", "orderNumber", "amount", "returnUrl"],
+              "properties": {
+                "userName": { "type": "string", "description": "Merchant-логин (дефолт стенда — синтетический ALFAMOCKTEST)." },
+                "password": { "type": "string", "description": "Пароль (дефолт стенда — синтетический)." },
+                "orderNumber": { "type": "string", "maxLength": 64, "description": "Номер заказа магазина; уникален в пределах магазина (повтор — errorCode 1)." },
+                "amount": { "type": "string", "description": "Сумма в копейках (целое число > 0)." },
+                "returnUrl": { "type": "string", "format": "uri", "description": "Куда вернуть покупателя после оплаты (обязателен)." },
+                "failUrl": { "type": "string", "format": "uri", "description": "Куда вернуть при отказе (без него — returnUrl)." },
+                "clientId": { "type": "string" },
+                "email": { "type": "string" },
+                "phone": { "type": "string" },
+                "sessionTimeoutSecs": { "type": "string", "description": "Срок жизни заказа/платёжной сессии в секундах (дефолт стенда 1200 = 20 минут); по истечении — orderStatus 6 и callback declinedByTimeout." },
+                "jsonParams": { "type": "string", "description": "JSON-объект строкой. Mock-расширение: {\"callback_url\":\"https://…\"} — приёмник GET-callback для заказа." },
+                "orderBundle": { "type": "string", "description": "Корзина заказа: принимается, но не моделируется (вне области стенда)." },
+                "description": { "type": "string", "description": "Описание заказа (эхо в orderDescription)." },
+                "currency": { "type": "string", "description": "Только 643 (RUB); прочие валюты стенд отклоняет." }
+              }
+            }
+          }
+        }
+      },
+      "OrderRefForm": {
+        "required": true,
+        "content": {
+          "application/x-www-form-urlencoded": {
+            "schema": {
+              "type": "object",
+              "required": ["userName", "password"],
+              "properties": {
+                "userName": { "type": "string" },
+                "password": { "type": "string" },
+                "orderId": { "type": "string", "format": "uuid", "description": "orderId из ответа регистрации — либо orderNumber (достаточно одного)." },
+                "orderNumber": { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "AmountForm": {
+        "required": true,
+        "content": {
+          "application/x-www-form-urlencoded": {
+            "schema": {
+              "type": "object",
+              "required": ["userName", "password", "amount"],
+              "properties": {
+                "userName": { "type": "string" },
+                "password": { "type": "string" },
+                "orderId": { "type": "string", "format": "uuid" },
+                "orderNumber": { "type": "string" },
+                "amount": { "type": "string", "description": "Копейки: deposit ≤ авторизованной суммы; refund ≤ остатка списанного." }
+              }
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "ProviderError200": {
+        "description": "Протокольная ошибка: HTTP 200 + errorCode (как отвечает шлюз RBS).",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProviderError" } } }
+      }
+    }
+  },
+  "paths": {
+    "/payment/rest/register.do": {
+      "post": {
+        "tags": ["Платёжный API"],
+        "summary": "Регистрация заказа (одностадийная оплата)",
+        "description": "Ответ: {orderId, formUrl}. Перенаправьте покупателя на formUrl; итог сверяйте через getOrderStatusExtended.do — errorCode=0 не доказывает оплату.",
+        "parameters": [
+          { "$ref": "#/components/parameters/XMockScenario" },
+          { "$ref": "#/components/parameters/XMockSandbox" },
+          { "$ref": "#/components/parameters/XMockLatency" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/RegisterForm" },
+        "responses": {
+          "200": {
+            "description": "Результат регистрации (errorCode=0) либо ProviderError (1/2/3/5/6).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegisterResponse" } } }
+          }
+        }
+      }
+    },
+    "/payment/rest/registerPreAuth.do": {
+      "post": {
+        "tags": ["Платёжный API"],
+        "summary": "Регистрация заказа с холдом (двухстадийная схема)",
+        "description": "Доступность двухстадийной схемы включается банком; на стенде — MOCK_TWO_STAGE (по умолчанию включена). После успешной оплаты сумма холдируется (orderStatus=1), завершение — deposit.do.",
+        "parameters": [
+          { "$ref": "#/components/parameters/XMockScenario" },
+          { "$ref": "#/components/parameters/XMockSandbox" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/RegisterForm" },
+        "responses": {
+          "200": {
+            "description": "Результат регистрации либо ProviderError (при выключенной двухстадийной схеме — errorCode 5).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegisterResponse" } } }
+          }
+        }
+      }
+    },
+    "/payment/rest/deposit.do": {
+      "post": {
+        "tags": ["Платёжный API"],
+        "summary": "Завершение холда (сумма ≤ авторизованной)",
+        "parameters": [{ "$ref": "#/components/parameters/XMockScenario" }],
+        "requestBody": { "$ref": "#/components/requestBodies/AmountForm" },
+        "responses": {
+          "200": {
+            "description": "errorCode=0 либо ProviderError: 4 (не холд/повтор), 5 (сумма больше авторизации).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationResponse" } } }
+          }
+        }
+      }
+    },
+    "/payment/rest/reverse.do": {
+      "post": {
+        "tags": ["Платёжный API"],
+        "summary": "Отмена холда/оплаты до окончательного расчёта",
+        "parameters": [{ "$ref": "#/components/parameters/XMockScenario" }],
+        "requestBody": { "$ref": "#/components/requestBodies/OrderRefForm" },
+        "responses": {
+          "200": {
+            "description": "errorCode=0 (orderStatus=3) либо ProviderError 4 (состояние не позволяет).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationResponse" } } }
+          }
+        }
+      }
+    },
+    "/payment/rest/refund.do": {
+      "post": {
+        "tags": ["Платёжный API"],
+        "summary": "Возврат списанного (полный/частичный)",
+        "description": "Частичные возвраты возможны в разрешённом контуре (на стенде — MOCK_PARTIAL_REFUND, по умолчанию разрешены). Сумма ≤ depositedAmount − refundedAmount.",
+        "parameters": [{ "$ref": "#/components/parameters/XMockScenario" }],
+        "requestBody": { "$ref": "#/components/requestBodies/AmountForm" },
+        "responses": {
+          "200": {
+            "description": "errorCode=0 (orderStatus=4) либо ProviderError: 4 (нет списания), 5 (сумма больше остатка).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationResponse" } } }
+          }
+        }
+      }
+    },
+    "/payment/rest/getOrderStatus.do": {
+      "post": {
+        "tags": ["Платёжный API"],
+        "summary": "Статус заказа (серверная сверка)",
+        "parameters": [{ "$ref": "#/components/parameters/XMockScenario" }],
+        "requestBody": { "$ref": "#/components/requestBodies/OrderRefForm" },
+        "responses": {
+          "200": {
+            "description": "Состояние заказа либо ProviderError 3 (заказ не найден/не передан идентификатор).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrderStatusResponse" } } }
+          }
+        }
+      }
+    },
+    "/payment/rest/getOrderStatusExtended.do": {
+      "post": {
+        "tags": ["Платёжный API"],
+        "summary": "Расширенный статус: состояние, суммы авторизации/списания/возврата, код шлюза",
+        "description": "Основной инструмент сверки: errorCode=0 у прочих методов не эквивалентен финальному статусу оплаты.",
+        "parameters": [{ "$ref": "#/components/parameters/XMockScenario" }],
+        "requestBody": { "$ref": "#/components/requestBodies/OrderRefForm" },
+        "responses": {
+          "200": {
+            "description": "Расширенное состояние заказа либо ProviderError 3.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrderStatusExtendedResponse" } } }
+          }
+        }
+      }
+    },
+    "/payment/{orderId}": {
+      "get": {
+        "tags": ["Платёжная страница"],
+        "summary": "Платёжная страница (formUrl): тестовые карты, ACS 3DS1/3DS2",
+        "description": "HTML-форма: пресеты тестовых карт (3DS1/3DS2, отказы -2011/116), ACS-пароль 12345678, владелец карты — минимум два слова латиницей. Данные карт не хранятся (только маска first6**last4). Страница не журналируется.",
+        "parameters": [
+          { "name": "orderId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "$ref": "#/components/parameters/XMockScenario" }
+        ],
+        "responses": {
+          "200": { "description": "HTML: форма оплаты, страница ACS или страница состояния заказа.", "content": { "text/html": { "schema": { "type": "string" } } } },
+          "404": { "description": "Заказ не найден." }
+        }
+      }
+    },
+    "/payment/{orderId}/pay": {
+      "post": {
+        "tags": ["Платёжная страница"],
+        "summary": "Отправка данных карты (эмуляция формы)",
+        "parameters": [{ "name": "orderId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "pan": { "type": "string", "description": "13–19 цифр; проходят только тестовые карты стенда." },
+                  "exp": { "type": "string", "description": "MMYY." },
+                  "cvv": { "type": "string", "description": "3 цифры." },
+                  "cardholder": { "type": "string", "description": "Минимум два слова латиницей (требование тестового контура)." }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Страница ACS (3DS) либо форма с ошибкой валидации.", "content": { "text/html": { "schema": { "type": "string" } } } },
+          "302": { "description": "Редирект на returnUrl (успех) или failUrl (отказ).", "headers": { "Location": { "schema": { "type": "string" } } } },
+          "404": { "description": "Платёжная сессия не найдена или завершена." }
+        }
+      }
+    },
+    "/payment/{orderId}/3ds": {
+      "post": {
+        "tags": ["Платёжная страница"],
+        "summary": "Тестовый ACS: пароль 12345678 либо Fail",
+        "parameters": [{ "name": "orderId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "password": { "type": "string", "description": "Пароль ACS тестового контура: 12345678." },
+                  "action": { "type": "string", "enum": ["fail"], "description": "fail — эмуляция отказа ACS (шлюзовой код 71015)." }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Страница ACS с ошибкой.", "content": { "text/html": { "schema": { "type": "string" } } } },
+          "302": { "description": "Редирект на returnUrl/failUrl после финализации.", "headers": { "Location": { "schema": { "type": "string" } } } },
+          "404": { "description": "Сессия 3DS не найдена или завершена." }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": ["Служебные"],
+        "summary": "Живость стенда и счётчики",
+        "responses": { "200": { "description": "ok:true + конфигурация и счётчики.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HealthResponse" } } } } }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": ["Служебные"],
+        "summary": "Эта спецификация",
+        "responses": { "200": { "description": "OpenAPI 3.1 JSON." } }
+      }
+    },
+    "/admin": {
+      "get": {
+        "tags": ["Служебные"],
+        "summary": "Консоль стенда: заказы, callback, журнал",
+        "security": [{ "adminToken": [] }],
+        "responses": { "200": { "description": "HTML-консоль.", "content": { "text/html": { "schema": { "type": "string" } } } }, "401": { "description": "Требуется MOCK_ADMIN_TOKEN (fail-closed при MOCK_HOSTED=1)." } }
+      }
+    },
+    "/admin/journal": {
+      "get": {
+        "tags": ["Служебные"],
+        "summary": "Журнал /payment/rest-запросов (JSON) с curl-сниппетами",
+        "description": "Креды (userName/password) и PII в журнале редактируются ядром; платёжная страница не журналируется — PAN в журнал не попадает.",
+        "security": [{ "adminToken": [] }],
+        "responses": { "200": { "description": "{entries:[…]}" }, "401": { "description": "Требуется токен." } }
+      }
+    },
+    "/mock/time": {
+      "get": {
+        "tags": ["Управление"],
+        "summary": "Снимок виртуальных часов",
+        "security": [{ "operatorToken": [] }],
+        "responses": { "200": { "description": "offsetMs/now/iso." } }
+      },
+      "post": {
+        "tags": ["Управление"],
+        "summary": "Ускорение времени (sessionTimeoutSecs, ретраи callback)",
+        "security": [{ "operatorToken": [] }],
+        "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "advance": { "type": "string", "description": "Например +30m, +1h30m." }, "offset": { "type": "integer", "description": "Смещение в мс." }, "iso": { "type": "string" }, "reset": { "type": "boolean" } } } } } },
+        "responses": { "200": { "description": "Новый снимок часов; автопереходы (declinedByTimeout) и тик доставки callback выполняются сразу." } }
+      }
+    },
+    "/mock/scenarios": {
+      "get": {
+        "tags": ["Управление"],
+        "summary": "Правила сценариев и история срабатываний",
+        "security": [{ "operatorToken": [] }],
+        "responses": { "200": { "description": "{rules, history}." } }
+      },
+      "post": {
+        "tags": ["Управление"],
+        "summary": "Добавить правило негативного сценария",
+        "security": [{ "operatorToken": [] }],
+        "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "scenario": { "type": "string" }, "target": { "type": "string", "description": "*, register, registerpreauth, deposit, reverse, refund, getorderstatus, getorderstatusextended, pay, 3ds." }, "match": { "type": "object" }, "times": { "type": "integer" }, "persistent": { "type": "boolean" } } } } } },
+        "responses": { "200": { "description": "{ok, rule}." } }
+      },
+      "delete": {
+        "tags": ["Управление"],
+        "summary": "Сбросить правила и историю",
+        "security": [{ "operatorToken": [] }],
+        "responses": { "200": { "description": "{ok, rules:[], history:[]}." } }
+      }
+    },
+    "/mock/reset": {
+      "post": {
+        "tags": ["Управление"],
+        "summary": "Сброс состояния песочницы, сценариев и журнала",
+        "security": [{ "operatorToken": [] }],
+        "responses": { "200": { "description": "{ok, sandbox, current}." } }
+      }
+    },
+    "/mock/state": {
+      "get": {
+        "tags": ["Управление"],
+        "summary": "Экспорт состояния (?sandbox=<id>)",
+        "security": [{ "operatorToken": [] }],
+        "responses": { "200": { "description": "{sandbox, state}." } }
+      },
+      "post": {
+        "tags": ["Управление"],
+        "summary": "Импорт состояния (ключи __proto__/constructor/prototype запрещены)",
+        "security": [{ "operatorToken": [] }],
+        "responses": { "200": { "description": "{ok, sandbox}." }, "400": { "description": "Недопустимый снимок." } }
+      }
+    },
+    "/sandboxes": {
+      "get": {
+        "tags": ["Песочницы (RFC-001)"],
+        "summary": "Список песочниц",
+        "responses": { "200": { "description": "{mode, current, sandboxes}." }, "401": { "description": "В owned-режиме — только владелец/оператор." } }
+      },
+      "post": {
+        "tags": ["Песочницы (RFC-001)"],
+        "summary": "Создать песочницу: id, свои креды (userName/password/callbackSecret) и ownerToken",
+        "responses": { "201": { "description": "{ok, id, url, ownerToken, creds, expiresAt}." }, "409": { "description": "Уже существует." }, "429": { "description": "Лимит создания." } }
+      },
+      "delete": {
+        "tags": ["Песочницы (RFC-001)"],
+        "summary": "Удалить песочницу (?sandbox=<id>)",
+        "security": [{ "sandboxToken": [] }],
+        "responses": { "200": { "description": "{ok, removed}." }, "401": { "description": "Чужая песочница." } }
+      }
+    },
+    "/sandboxes/me": {
+      "get": {
+        "tags": ["Песочницы (RFC-001)"],
+        "summary": "Своя песочница по owner-token (включая креды)",
+        "security": [{ "sandboxToken": [] }],
+        "responses": { "200": { "description": "{ok, sandbox, creds}." }, "401": { "description": "Без owner-token." } }
+      },
+      "delete": {
+        "tags": ["Песочницы (RFC-001)"],
+        "summary": "Удалить свою песочницу",
+        "security": [{ "sandboxToken": [] }],
+        "responses": { "200": { "description": "{ok, removed}." }, "400": { "description": "default удалить нельзя." } }
+      }
+    },
+    "/sandboxes/me/reset": {
+      "post": {
+        "tags": ["Песочницы (RFC-001)"],
+        "summary": "Сбросить состояние своей песочницы",
+        "security": [{ "sandboxToken": [] }],
+        "responses": { "200": { "description": "{ok, sandbox}." } }
+      }
+    },
+    "/sandboxes/me/reset-creds": {
+      "post": {
+        "tags": ["Песочницы (RFC-001)"],
+        "summary": "Перевыпустить креды песочницы (ownerToken сохраняется)",
+        "security": [{ "sandboxToken": [] }],
+        "responses": { "200": { "description": "{ok, sandbox, creds, ownerTokenChanged:false}." } }
+      }
+    },
+    "/mock/sandboxes": {
+      "get": {
+        "tags": ["Песочницы (RFC-001)"],
+        "summary": "Алиас /sandboxes (GET)",
+        "responses": { "200": { "description": "См. /sandboxes." } }
+      },
+      "post": {
+        "tags": ["Песочницы (RFC-001)"],
+        "summary": "Алиас /sandboxes (POST)",
+        "responses": { "201": { "description": "См. /sandboxes." } }
+      },
+      "delete": {
+        "tags": ["Песочницы (RFC-001)"],
+        "summary": "Алиас /sandboxes (DELETE)",
+        "responses": { "200": { "description": "См. /sandboxes." } }
+      }
+    }
+  }
+}

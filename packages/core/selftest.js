@@ -255,6 +255,43 @@ async function main() {
     }
   });
 
+  /* ------------------------------------------------------- GET-доставка */
+  await acheck('delivery queue доставляет GET-callback без тела (request(entry).method — для Альфа-Банка)', async () => {
+    const seen = [];
+    const fixture = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        seen.push({ method: req.method, url: req.url, body, contentType: req.headers['content-type'] || null });
+        res.writeHead(200);
+        res.end('OK');
+      });
+    });
+    const fixturePort = await listen(fixture);
+    try {
+      const entries = {
+        g: { url: `http://127.0.0.1:${fixturePort}/callback?mdOrder=abc&checksum=DEADBEEF`, attempts: 0, nextAttemptAt: 0 },
+      };
+      const queue = core.createDeliveryQueue({
+        entries,
+        retryMs: 100,
+        maxAttempts: 2,
+        log: () => {},
+        request: (e) => ({ url: e.url, method: 'GET' }),
+      });
+      await queue.tick();
+      await sleep(250);
+      assert.strictEqual(entries.g.done, true, 'GET-доставка не помечена done');
+      assert.strictEqual(seen.length, 1, `ожидался ровно один GET, получено ${seen.length}`);
+      assert.strictEqual(seen[0].method, 'GET');
+      assert.strictEqual(seen[0].url, '/callback?mdOrder=abc&checksum=DEADBEEF', 'query-параметры должны сохраниться');
+      assert.strictEqual(seen[0].body, '', 'GET обязан отправляться без тела');
+      assert.strictEqual(seen[0].contentType, null, 'GET без Content-Type: application/json');
+    } finally {
+      fixture.close();
+    }
+  });
+
   /* --------------------------------------------------------- helpers */
   check('escapeHtml экранирует данные интегратора', () => {
     assert.strictEqual(core.escapeHtml('<img src=x onerror=alert(1)>'), '&lt;img src=x onerror=alert(1)&gt;');

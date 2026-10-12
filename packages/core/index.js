@@ -714,9 +714,13 @@ function createJournal({ size = 200, baseUrl = '', maxEntryChars = JOURNAL_LIMIT
 }
 
 /**
- * POST JSON наружу (вебхук); http/https выбирается по схеме URL.
+ * POST/GET JSON наружу (вебхук/callback); http/https выбирается по схеме URL.
  * Редиректы не отслеживаются (Node-клиент их не выполняет) — для SSRF-политики
  * это безопасное поведение по умолчанию; схема кроме http/https отклоняется.
+ *
+ * `options.method = 'GET'` — исходящий GET БЕЗ тела (callback Альфа-Банка:
+ * HTTP GET с query-параметрами и checksum, docs/reference/alfa/02-notifications-and-signature.md).
+ * Дефолт — POST: поведение существующих адаптеров не меняется.
  */
 const DEFAULT_WEBHOOK_RESPONSE_MAX_BYTES = 64 * 1024;
 const DEFAULT_WEBHOOK_DEADLINE_MS = 10000;
@@ -730,6 +734,11 @@ function postJson(url, payload, timeoutMs = DEFAULT_WEBHOOK_DEADLINE_MS, options
       return;
     }
     const settings = options && typeof options === 'object' ? options : {};
+    const method = String(settings.method || 'POST').toUpperCase();
+    if (method !== 'POST' && method !== 'GET') {
+      reject(new Error(`Исходящий запрос на «${url}» отклонён: метод ${method} не поддерживается очередью доставки (разрешены POST/GET)`));
+      return;
+    }
     const maxResponseBytes = Number.isFinite(Number(settings.maxResponseBytes))
       ? Math.max(0, Math.floor(Number(settings.maxResponseBytes)))
       : DEFAULT_WEBHOOK_RESPONSE_MAX_BYTES;
@@ -739,7 +748,9 @@ function postJson(url, payload, timeoutMs = DEFAULT_WEBHOOK_DEADLINE_MS, options
     const inactivityTimeoutMs = Number.isFinite(Number(timeoutMs))
       ? Math.max(0, Math.floor(Number(timeoutMs)))
       : DEFAULT_WEBHOOK_DEADLINE_MS;
-    const data = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    const data = method === 'GET'
+      ? null
+      : (typeof payload === 'string' ? payload : JSON.stringify(payload));
     const transport = target.protocol === 'https:' ? https : http;
     let settled = false;
     let deadlineTimer;
@@ -771,8 +782,10 @@ function postJson(url, payload, timeoutMs = DEFAULT_WEBHOOK_DEADLINE_MS, options
       hostname: target.hostname,
       port: target.port || (target.protocol === 'https:' ? 443 : 80),
       path: target.pathname + target.search,
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+      method,
+      headers: method === 'GET'
+        ? {}
+        : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
       timeout: inactivityTimeoutMs,
     }, (res) => {
       response = res;
@@ -830,7 +843,7 @@ function postJson(url, payload, timeoutMs = DEFAULT_WEBHOOK_DEADLINE_MS, options
       abort(error);
     }, deadlineMs);
     if (typeof deadlineTimer.unref === 'function') deadlineTimer.unref();
-    req.write(data);
+    if (data !== null) req.write(data);
     req.end();
   });
 }
@@ -1013,7 +1026,9 @@ async function assertPublicHost(url, { lookup = dns.promises.lookup } = {}) {
  *   entries         — map в состоянии сервиса (переживает рестарт с MOCK_STATE_FILE)
  *   retryMs         — пауза между попытками
  *   maxAttempts     — предел попыток (после него запись уходит onFailure с attempts >= max)
- *   request(entry)  — {url, data} для отправки (data — строка или объект)
+ *   request(entry)  — {url, data, method?} для отправки (data — строка или объект;
+ *                     method 'GET' — доставка GET без тела, например callback
+ *                     Альфа-Банка с query-параметрами; дефолт — POST)
  *   isOk(res)       — критерий доставки (у Т-Банка: 200 + тело «OK»)
  *   prepare(entry)  — вызывается перед отправкой записи (инкремент attempts)
  *   onSuccess/onFailure(entry, res|error, id) — реакция адаптера
@@ -1081,9 +1096,12 @@ function createDeliveryQueue({
     if (inFlight.has(id)) return;
     inFlight.add(id);
     try {
-      const { url, data } = request(entry);
+      // `request(entry)` может вернуть {url, data, method}: method='GET' — для
+      // callback, которые доставляются GET-ом с query-параметрами (Альфа-Банк);
+      // без method остаётся POST (поведение существующих адаптеров не меняется).
+      const { url, data, method } = request(entry);
       if (blockPrivateHosts) await assertPublicHost(url);
-      const res = await postJson(url, data);
+      const res = await postJson(url, data, DEFAULT_WEBHOOK_DEADLINE_MS, method ? { method } : {});
       const diagnosticBody = webhookDiagnosticBody(res.body);
       entry.lastStatus = res.statusCode;
       entry.lastBody = diagnosticBody;

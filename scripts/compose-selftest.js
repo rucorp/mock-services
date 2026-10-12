@@ -5,13 +5,16 @@
 /*
  * Black-box selftest против поднятого стенда (docker compose / внешние контейнеры).
  * Проверяет сервисы (tbank-mock на :3100, kassa-mock на :3101, yookassa-mock на :3102,
- * atol-mock на :3103) снаружи по HTTP:
+ * atol-mock на :3103, alfa-mock на :3104) снаружи по HTTP:
  *   1. Healthchecks (/health, /healthz, /health)
  *   2. Т-Банк: Init -> форма оплаты -> Confirm -> Chargeback (DISPUTED -> REPRESENTMENT -> ARBITRATION -> WON) -> виртуальные часы /mock/time -> /admin/journal
  *   3. Ferma (54-ФЗ): getToken -> sell (предоплата с расчётным НДС vat20_120) -> sell (зачёт предоплаты) -> buy (расход) -> маркировка -> очередь ОФД -> печать с ускорением через /mock/time -> /receipts/:uuid
  *   4. ЮKassa: POST /v3/payments -> confirmation-страница -> оплата -> succeeded -> POST /v3/refunds -> списки
  *   5. АТОЛ Онлайн v4: getToken -> sell (wait -> done, payload с ФД) -> повтор external_id (тот же uuid)
  *      -> sell_refund -> buy -> негативы (группа/реквизиты/токен) -> страница чека
+ *   6. Альфа-Банк REST: register.do -> форма (3DS2 frictionless) -> getOrderStatusExtended (orderStatus=2)
+ *      -> registerPreAuth -> холд -> deposit ≤ авторизации -> partial refund -> reverse -> негативы
+ *      (креды, дубль orderNumber, дробный amount, неизвестный заказ)
  *
  * F-33: прогон выполняется в одноразовой песочнице (X-Mock-Sandbox, в hosted —
  * через POST /sandboxes с owner-token) и убирает её в finally, чтобы повторные
@@ -29,6 +32,7 @@ const TBANK_BASE = (process.env.MOCK_TBANK_URL || 'http://127.0.0.1:3100').repla
 const KASSA_BASE = (process.env.MOCK_KASSA_URL || 'http://127.0.0.1:3101').replace(/\/$/, '');
 const YOOKASSA_BASE = (process.env.MOCK_YOOKASSA_URL || 'http://127.0.0.1:3102').replace(/\/$/, '');
 const ATOL_BASE = (process.env.MOCK_ATOL_URL || 'http://127.0.0.1:3103').replace(/\/$/, '');
+const ALFA_BASE = (process.env.MOCK_ALFA_URL || 'http://127.0.0.1:3104').replace(/\/$/, '');
 const TERMINAL_KEY = process.env.MOCK_TERMINAL_KEY || 'TBANKMOCKTEST';
 const TERMINAL_PASSWORD = process.env.MOCK_TERMINAL_PASSWORD || 'mockpass123';
 const FERMA_LOGIN = process.env.MOCK_FERMA_LOGIN || 'loviitest';
@@ -40,6 +44,10 @@ const YOOKASSA_AUTH = `Basic ${Buffer.from(`${YOOKASSA_SHOP_ID}:${YOOKASSA_SECRE
 const ATOL_LOGIN = process.env.MOCK_ATOL_LOGIN || process.env.ATOL_LOGIN || 'v4-online-atol-ru';
 const ATOL_PASSWORD = process.env.MOCK_ATOL_PASSWORD || process.env.ATOL_PASSWORD || 'iGFFuihss';
 const ATOL_GROUP = process.env.MOCK_ATOL_GROUP || process.env.ATOL_GROUP || 'v4-online-atol-ru_4179';
+// СИНТЕТИЧЕСКИЕ креды alfa-mock (дефолты образа; реальные тестовые креды
+// Альфа-Банка выдаёт индивидуально — в конфиге стенда их нет).
+const ALFA_USERNAME = process.env.MOCK_ALFA_USERNAME || process.env.ALFA_USERNAME || 'ALFAMOCKTEST';
+const ALFA_PASSWORD = process.env.MOCK_ALFA_PASSWORD || process.env.ALFA_PASSWORD || 'mockpass123';
 
 /*
  * F-33 (RFC-001 §8): прогон идёт в одноразовой песочнице, чтобы не накапливать
@@ -56,8 +64,9 @@ const SANDBOX = {
   [KASSA_BASE]: { id: SANDBOX_ID, token: '', creds: null },
   [YOOKASSA_BASE]: { id: SANDBOX_ID, token: '', creds: null },
   [ATOL_BASE]: { id: SANDBOX_ID, token: '', creds: null },
+  [ALFA_BASE]: { id: SANDBOX_ID, token: '', creds: null },
 };
-const ALL_BASES = [TBANK_BASE, KASSA_BASE, YOOKASSA_BASE, ATOL_BASE];
+const ALL_BASES = [TBANK_BASE, KASSA_BASE, YOOKASSA_BASE, ATOL_BASE, ALFA_BASE];
 
 /** Заголовки песочницы прогона; вызов может переопределить их (например, default). */
 function sandboxHeaders(baseUrl) {
@@ -132,6 +141,17 @@ function tbankApi(method, body, headers = {}) {
   const sbxCreds = SANDBOX[TBANK_BASE].creds || {};
   const payload = { TerminalKey: sbxCreds.terminalKey || TERMINAL_KEY, ...body };
   return httpReq(TBANK_BASE, 'POST', `/v2/${method}`, { ...payload, Token: tokenOf(payload) }, headers);
+}
+
+/** POST /payment/rest/{method} с form-параметрами и кредами песочницы (Альфа-Банк). */
+function alfaApi(method, fields, headers = {}) {
+  const sbxCreds = SANDBOX[ALFA_BASE].creds || {};
+  const params = new URLSearchParams({
+    userName: sbxCreds.userName || ALFA_USERNAME,
+    password: sbxCreds.password || ALFA_PASSWORD,
+    ...fields,
+  });
+  return httpReq(ALFA_BASE, 'POST', `/payment/rest/${method}`, params.toString(), headers);
 }
 
 /** Выделение песочницы прогона: в owned — POST /sandboxes, в namespaces — селектор. */
@@ -439,10 +459,89 @@ async function scenario(runId) {
   check('atol страница чека /receipts/:uuid отдаёт 200 и ФН', atolReceiptPage.status === 200 && atolReceiptPage.text.includes('ФН:'));
 
   await httpReq(ATOL_BASE, 'POST', '/mock/time', { reset: true }, sandboxHeaders(ATOL_BASE));
+
+  // 6. Альфа-Банк REST: register -> форма (3DS2 frictionless) -> deposited ->
+  //    двухстадийная схема (холд + deposit ≤ авторизации) -> refund -> reverse -> негативы.
+  //    Callback здесь не принимается (нет внешнего приёмника): доставка и checksum
+  //    покрыты selftest сервиса; здесь — REST-контракт и платёжная страница.
+  const hAlfa = await httpReq(ALFA_BASE, 'GET', '/health');
+  check('alfa-mock /health === 200 ok (api rest, base /payment/rest)',
+    hAlfa.status === 200 && hAlfa.json() && hAlfa.json().ok === true && hAlfa.json().api === 'rest' && hAlfa.json().base === '/payment/rest');
+
+  const oaAlfa = (await httpReq(ALFA_BASE, 'GET', '/openapi.json')).json();
+  check('alfa-mock /openapi.json отдаёт OpenAPI 3.1.0 с register.do',
+    Boolean(oaAlfa && oaAlfa.openapi === '3.1.0' && oaAlfa.paths['/payment/rest/register.do']));
+
+  const alfaBadCreds = (await httpReq(ALFA_BASE, 'POST', '/payment/rest/register.do',
+    new URLSearchParams({ userName: 'wrong', password: 'wrong', orderNumber: `${runId}-alfa-bad`, amount: '10000', returnUrl: 'https://compose.test/ok' }).toString())).json();
+  check('alfa неверные userName/password -> errorCode 2 (merchant-логин не найден)',
+    Boolean(alfaBadCreds && alfaBadCreds.errorCode === 2));
+
+  const alfaReg = await alfaApi('register.do', { orderNumber: `${runId}-alfa-1`, amount: '15000', returnUrl: 'https://compose.test/ok', failUrl: 'https://compose.test/fail', description: 'Compose прогон Альфа' });
+  const alfaRegJ = alfaReg.json() || {};
+  check('alfa register.do -> errorCode 0, {orderId, formUrl}',
+    alfaReg.status === 200 && alfaRegJ.errorCode === 0 && Boolean(alfaRegJ.orderId) && Boolean(alfaRegJ.formUrl), alfaReg.text.slice(0, 160));
+
+  const alfaDup = (await alfaApi('register.do', { orderNumber: `${runId}-alfa-1`, amount: '15000', returnUrl: 'https://compose.test/ok' })).json();
+  check('alfa повтор orderNumber -> errorCode 1 (уникальность в пределах магазина, не replay)',
+    Boolean(alfaDup && alfaDup.errorCode === 1));
+
+  const alfaFormUrl = new URL(alfaRegJ.formUrl);
+  const alfaForm = await httpReq(ALFA_BASE, 'GET', alfaFormUrl.pathname + alfaFormUrl.search);
+  check('alfa платёжная страница formUrl отдаёт 200 с пресетами тестовых карт',
+    alfaForm.status === 200 && alfaForm.text.includes('2201382000000062') && alfaForm.text.includes('12345678'));
+
+  const alfaPay = await httpReq(ALFA_BASE, 'POST', `/payment/${alfaRegJ.orderId}/pay${alfaFormUrl.search}`,
+    'pan=2201382000000062&exp=1234&cvv=123&cardholder=IVAN+IVANOV');
+  check('alfa оплата 3DS2-frictionless картой -> 302 на returnUrl',
+    alfaPay.status === 302 && alfaPay.headers.location === 'https://compose.test/ok', `HTTP ${alfaPay.status}`);
+
+  const alfaStatus = (await alfaApi('getOrderStatusExtended.do', { orderId: alfaRegJ.orderId })).json();
+  check('alfa getOrderStatusExtended -> orderStatus=2, depositedAmount=15000, маска first6**last4 (PAN не хранится)',
+    Boolean(alfaStatus && alfaStatus.errorCode === 0 && alfaStatus.orderStatus === 2 && alfaStatus.depositedAmount === 15000 && alfaStatus.maskPan === '220138**0062'),
+    JSON.stringify(alfaStatus).slice(0, 160));
+
+  const alfaPre = (await alfaApi('registerPreAuth.do', { orderNumber: `${runId}-alfa-2`, amount: '9000', returnUrl: 'https://compose.test/ok' })).json();
+  check('alfa registerPreAuth.do -> orderId + formUrl (двухстадийная схема)',
+    Boolean(alfaPre && alfaPre.errorCode === 0 && alfaPre.orderId && alfaPre.formUrl));
+  const alfaPreUrl = new URL(alfaPre.formUrl);
+  const alfaPrePay = await httpReq(ALFA_BASE, 'POST', `/payment/${alfaPre.orderId}/pay${alfaPreUrl.search}`,
+    'pan=2201382000000062&exp=1234&cvv=123&cardholder=IVAN+IVANOV');
+  check('alfa холд: оплата формы -> 302', alfaPrePay.status === 302);
+  const alfaHold = (await alfaApi('getOrderStatusExtended.do', { orderId: alfaPre.orderId })).json();
+  check('alfa холд: orderStatus=1, authorizedAmount=9000, depositedAmount=0',
+    Boolean(alfaHold && alfaHold.orderStatus === 1 && alfaHold.authorizedAmount === 9000 && alfaHold.depositedAmount === 0));
+
+  const alfaDepBig = (await alfaApi('deposit.do', { orderId: alfaPre.orderId, amount: '9001' })).json();
+  check('alfa deposit больше авторизованной суммы -> errorCode 5', Boolean(alfaDepBig && alfaDepBig.errorCode === 5));
+  const alfaDep = (await alfaApi('deposit.do', { orderId: alfaPre.orderId, amount: '6000' })).json();
+  check('alfa частичный deposit 6000 ≤ 9000 -> errorCode 0', Boolean(alfaDep && alfaDep.errorCode === 0));
+  const alfaDepSt = (await alfaApi('getOrderStatusExtended.do', { orderId: alfaPre.orderId })).json();
+  check('alfa после deposit: orderStatus=2, depositedAmount=6000',
+    Boolean(alfaDepSt && alfaDepSt.orderStatus === 2 && alfaDepSt.depositedAmount === 6000));
+
+  const alfaRefBig = (await alfaApi('refund.do', { orderId: alfaPre.orderId, amount: '6001' })).json();
+  check('alfa refund больше списанного -> errorCode 5', Boolean(alfaRefBig && alfaRefBig.errorCode === 5));
+  const alfaRef = (await alfaApi('refund.do', { orderId: alfaPre.orderId, amount: '2500' })).json();
+  check('alfa частичный refund 2500 -> errorCode 0', Boolean(alfaRef && alfaRef.errorCode === 0));
+  const alfaRefSt = (await alfaApi('getOrderStatusExtended.do', { orderNumber: `${runId}-alfa-2` })).json();
+  check('alfa после refund: orderStatus=4, refundedAmount=2500 (поиск по orderNumber)',
+    Boolean(alfaRefSt && alfaRefSt.orderStatus === 4 && alfaRefSt.refundedAmount === 2500));
+
+  const alfaRev = (await alfaApi('reverse.do', { orderId: alfaRegJ.orderId })).json();
+  check('alfa reverse оплаченного заказа -> errorCode 0', Boolean(alfaRev && alfaRev.errorCode === 0));
+  const alfaRevSt = (await alfaApi('getOrderStatus.do', { orderId: alfaRegJ.orderId })).json();
+  check('alfa после reverse: orderStatus=3', Boolean(alfaRevSt && alfaRevSt.orderStatus === 3));
+
+  const alfaUnknown = (await alfaApi('getOrderStatus.do', { orderId: '00000000-0000-4000-8000-000000000000' })).json();
+  check('alfa неизвестный заказ -> errorCode 3', Boolean(alfaUnknown && alfaUnknown.errorCode === 3));
+
+  const alfaBadAmount = (await alfaApi('register.do', { orderNumber: `${runId}-alfa-3`, amount: '100.50', returnUrl: 'https://compose.test/ok' })).json();
+  check('alfa amount дробный -> errorCode 5 (копейки — целые)', Boolean(alfaBadAmount && alfaBadAmount.errorCode === 5));
 }
 
 async function main() {
-  console.log(`\n== compose black-box selftest (${TBANK_BASE} & ${KASSA_BASE} & ${YOOKASSA_BASE} & ${ATOL_BASE}) ==\n`);
+  console.log(`\n== compose black-box selftest (${TBANK_BASE} & ${KASSA_BASE} & ${YOOKASSA_BASE} & ${ATOL_BASE} & ${ALFA_BASE}) ==\n`);
   console.log(`  · одноразовая песочница прогона: ${SANDBOX_ID}`);
 
   // Базовая линия default-состояния: прогон не должен её изменить (два запуска
@@ -452,10 +551,12 @@ async function main() {
   const kassaCounts = (j) => `checks=${j.checks},ofdQueue=${j.ofdQueueCount},fnUsed=${j.fnUsed},shift=${j.shiftStatus}`;
   const yookassaCounts = (j) => `payments=${j.payments},refunds=${j.refunds}`;
   const atolCounts = (j) => `documents=${j.documents},waiting=${j.waiting},callbacks=${j.callbacks}`;
+  const alfaCounts = (j) => `orders=${j.orders},awaiting=${j.awaiting},callbacks=${j.callbacks}`;
   const beforeBank = (await httpReq(TBANK_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const beforeKassa = (await httpReq(KASSA_BASE, 'GET', '/healthz?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const beforeYookassa = (await httpReq(YOOKASSA_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const beforeAtol = (await httpReq(ATOL_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
+  const beforeAlfa = (await httpReq(ALFA_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
 
   await provisionSandboxes();
   try {
@@ -468,6 +569,7 @@ async function main() {
   const afterKassa = (await httpReq(KASSA_BASE, 'GET', '/healthz?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const afterYookassa = (await httpReq(YOOKASSA_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const afterAtol = (await httpReq(ATOL_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
+  const afterAlfa = (await httpReq(ALFA_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   if (beforeBank.tenancy && beforeBank.tenancy !== 'off') {
     check('tbank: прогон не изменил default-счётчики (F-33)', bankCounts(beforeBank) === bankCounts(afterBank),
       `${bankCounts(beforeBank)} -> ${bankCounts(afterBank)}`);
@@ -483,6 +585,10 @@ async function main() {
   if (beforeAtol.tenancy && beforeAtol.tenancy !== 'off') {
     check('atol: прогон не изменил default-счётчики (F-33)', atolCounts(beforeAtol) === atolCounts(afterAtol),
       `${atolCounts(beforeAtol)} -> ${atolCounts(afterAtol)}`);
+  }
+  if (beforeAlfa.tenancy && beforeAlfa.tenancy !== 'off') {
+    check('alfa: прогон не изменил default-счётчики (F-33)', alfaCounts(beforeAlfa) === alfaCounts(afterAlfa),
+      `${alfaCounts(beforeAlfa)} -> ${alfaCounts(afterAlfa)}`);
   }
 
   console.log(`\nИТОГ compose-selftest: ${passed} passed, ${failed} failed\n`);
