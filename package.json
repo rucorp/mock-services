@@ -4,8 +4,10 @@
   "private": true,
   "description": "Mock bank & fiscal (OFD) services for testing payment integrations against official provider protocols",
   "scripts": {
-    "test": "npm run test:core && npm run test:tbank && npm run test:kassa && npm run check:drift",
+    "test": "npm run test:core && npm run test:tbank && npm run test:kassa && npm run test:upstream && npm run check:drift",
     "test:core": "node packages/core/selftest.js",
+    "test:upstream": "node scripts/sync-upstream-selftest.js",
+    "check:upstream": "node scripts/sync-upstream.js",
     "test:tbank": "node services/tbank-mock/selftest.js",
     "test:kassa": "node services/kassa-mock/selftest.js",
     "test:compose": "node scripts/compose-selftest.js",

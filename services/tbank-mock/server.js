@@ -86,13 +86,14 @@ const PROFILE = String(MOCK_PROFILE).toLowerCase() === 'multisplit' ? 'multispli
 // может включить её и в локальном режиме, значение 0/false — выключить явно.
 const HOSTED = core.flagEnabled(MOCK_HOSTED);
 const OPERATOR_TOKEN = MOCK_OPERATOR_TOKEN || '';
+const ADMIN_CSRF_SECRET = crypto.randomBytes(32).toString('hex');
 const BLOCK_PRIVATE_WEBHOOKS = core.flagEnabled(MOCK_BLOCK_PRIVATE_WEBHOOKS, HOSTED);
 
 /* --------------------------------------------- мульти-аренда (RFC-001, F-12) */
 
-// MOCK_TENANCY=off|on; по умолчанию tenancy выключена для self-hosted и
-// включается hosted-режимом (fail-closed): MOCK_TENANCY=1/MOCK_HOSTED=1 -> owned.
-const TENANCY = resolveTenancyMode(MOCK_TENANCY, HOSTED);
+// MOCK_TENANCY принимает owned/namespaces/off и legacy-флаги; дефолт —
+// namespaces self-hosted и owned при MOCK_HOSTED=1, неизвестное значение warn + safe default.
+const TENANCY = resolveTenancyMode(MOCK_TENANCY, HOSTED, (warning) => log(`WARN ${warning}`));
 const SANDBOX_OWNER_TOKEN = String(MOCK_SANDBOX_TOKEN || '').trim();
 const SANDBOX_TTL_MS = parseMsOr(MOCK_SANDBOX_TTL_MS, TENANCY === 'owned' ? 24 * 60 * 60 * 1000 : 0);
 const SANDBOX_MAX = parseMsOr(MOCK_SANDBOX_MAX, TENANCY === 'owned' ? 100 : 256);
@@ -1895,7 +1896,19 @@ function tickBank() {
 
 /* -------------------------------------------------------------- admin */
 
-function adminPage() {
+function adminPage(req) {
+  const currentSandbox = sandboxRuntime.currentId();
+  const pageQuery = new URL(req.url, 'http://mock.local').searchParams;
+  const adminQuery = new URLSearchParams();
+  if (currentSandbox !== 'default') adminQuery.set('sandbox', currentSandbox);
+  const adminToken = pageQuery.get('admin_token');
+  if (adminToken) adminQuery.set('admin_token', adminToken);
+  const sandboxToken = TENANCY === 'owned' ? sandboxRuntime.ownerTokenOf(req) : '';
+  if (sandboxToken) adminQuery.set('sandbox_token', sandboxToken);
+  const adminSuffix = adminQuery.toString();
+  const adminActionUrl = `/admin/action${adminSuffix ? `?${adminSuffix}` : ''}`;
+  const adminJournalUrl = `/admin/journal${adminSuffix ? `?${adminSuffix}` : ''}`;
+  const csrfToken = core.createCsrfToken(ADMIN_CSRF_SECRET, currentSandbox);
   const payments = Object.values(state.payments)
     .sort((a, b) => b.paymentId.localeCompare(a.paymentId))
     .map((p) => {
@@ -1903,18 +1916,18 @@ function adminPage() {
       const disp = p.disputeId ? ` · спор <code>${esc(p.disputeId)}</code> (${esc(p.disputeStatus)})` : '';
       const actions = [];
       if (p.status === 'AUTHORIZED') {
-        actions.push(btn('auto-confirm-hold', p.paymentId, 'банк подтвердил холд'));
-        actions.push(btn('cancel-payment', p.paymentId, 'отмена платформой (REVERSED)'));
+        actions.push(btn('auto-confirm-hold', p.paymentId, 'банк подтвердил холд', csrfToken, adminActionUrl));
+        actions.push(btn('cancel-payment', p.paymentId, 'отмена платформой (REVERSED)', csrfToken, adminActionUrl));
       }
-      if (p.status === 'CONFIRMED') actions.push(btn('cancel-payment', p.paymentId, 'возврат платформой (REFUNDED)'));
-      if (p.status === 'CONFIRMED') actions.push(btn('chargeback-payment', p.paymentId, 'эмитент: чарджбэк (DISPUTED)'));
-      if (p.disputeId && p.disputeStatus === 'DISPUTED') actions.push(btn('dispute-representment', p.disputeId, 'спор: representment'));
-      if (p.disputeId && p.disputeStatus === 'REPRESENTMENT') actions.push(btn('dispute-arb', p.disputeId, 'спор: arb'));
+      if (p.status === 'CONFIRMED') actions.push(btn('cancel-payment', p.paymentId, 'возврат платформой (REFUNDED)', csrfToken, adminActionUrl));
+      if (p.status === 'CONFIRMED') actions.push(btn('chargeback-payment', p.paymentId, 'эмитент: чарджбэк (DISPUTED)', csrfToken, adminActionUrl));
+      if (p.disputeId && p.disputeStatus === 'DISPUTED') actions.push(btn('dispute-representment', p.disputeId, 'спор: representment', csrfToken, adminActionUrl));
+      if (p.disputeId && p.disputeStatus === 'REPRESENTMENT') actions.push(btn('dispute-arb', p.disputeId, 'спор: arb', csrfToken, adminActionUrl));
       if (p.disputeId && ['DISPUTED', 'REPRESENTMENT', 'ARBITRATION'].includes(p.disputeStatus)) {
-        actions.push(btn('dispute-won', p.disputeId, 'спор: WON'));
-        actions.push(btn('dispute-lost', p.disputeId, 'спор: LOST'));
+        actions.push(btn('dispute-won', p.disputeId, 'спор: WON', csrfToken, adminActionUrl));
+        actions.push(btn('dispute-lost', p.disputeId, 'спор: LOST', csrfToken, adminActionUrl));
       }
-      if (p.status === 'NEW') actions.push(btn('cancel-new', p.paymentId, 'отменить (NEW→CANCELED)'));
+      if (p.status === 'NEW') actions.push(btn('cancel-new', p.paymentId, 'отменить (NEW→CANCELED)', csrfToken, adminActionUrl));
       const hist = p.statusHistory.map((h) => `${h.status}<span style="color:#bbb">@${h.at.slice(11, 19)}</span>`).join('<span style="color:#ccc"> → </span>');
       return `<tr><td><code>${esc(p.paymentId)}</code></td><td>${esc(p.orderId)}<div style="font-size:10px;color:#888;margin-top:3px">${hist}</div></td><td>${(currentAmount(p) / 100).toFixed(2)}</td><td><b>${esc(p.status)}</b>${disp}</td><td>${deal}</td><td>${actions.join(' ')}</td></tr>`;
     })
@@ -1944,7 +1957,7 @@ function adminPage() {
     .slice(-25)
     .map((n) => {
       const st = n.suppressed ? 'suppressed' : n.dumped ? 'dumped' : n.done ? 'delivered' : `retry@${new Date(n.nextAttemptAt || clock.now()).toISOString().slice(11, 19)}`;
-      return `<tr><td><code>${esc(n.id)}</code></td><td><code>${esc(n.paymentId)}</code></td><td>${esc(n.payload.Status)}</td><td>${n.attempts}</td><td>${esc(st)}</td><td>${esc(n.lastStatus ?? '—')} ${esc(String(n.lastBody ?? '').slice(0, 40))}</td><td>${btn('duplicate-notification', n.id, 'повторить')}</td></tr>`;
+      return `<tr><td><code>${esc(n.id)}</code></td><td><code>${esc(n.paymentId)}</code></td><td>${esc(n.payload.Status)}</td><td>${n.attempts}</td><td>${esc(st)}</td><td>${esc(n.lastStatus ?? '—')} ${esc(String(n.lastBody ?? '').slice(0, 40))}</td><td>${btn('duplicate-notification', n.id, 'повторить', csrfToken, adminActionUrl)}</td></tr>`;
     })
     .join('') || '<tr><td colspan="7">нотификаций нет</td></tr>';
 
@@ -1970,14 +1983,14 @@ function adminPage() {
     <table border="0" cellpadding="4" style="font-size:13px;width:100%">${verifs}</table>
     <h1 style="font-size:16px">Нотификации (последние 25)</h1>
     <table border="0" cellpadding="4" style="font-size:12px;width:100%">${notifs}</table>
-    <h1 style="font-size:16px">Журнал запросов к API (последние 15) — <a href="/admin/journal">json</a></h1>
+    <h1 style="font-size:16px">Журнал запросов к API (последние 15) — <a href="${esc(adminJournalUrl)}">json</a></h1>
     <table border="0" cellpadding="4" style="font-size:12px;width:100%">${journalRows}</table>`, true);
 }
 
 const esc = (v) => escapeHtml(v);
 
-function btn(action, id, label) {
-  return `<form method="POST" action="/admin/action" style="display:inline"><input type="hidden" name="action" value="${action}"><input type="hidden" name="id" value="${id}"><button style="width:auto;margin:2px;padding:6px 10px;font-size:12px" type="submit">${label}</button></form>`;
+function btn(action, id, label, csrfToken, actionUrl) {
+  return `<form method="POST" action="${esc(actionUrl)}" style="display:inline"><input type="hidden" name="_csrf" value="${esc(csrfToken)}"><input type="hidden" name="action" value="${action}"><input type="hidden" name="id" value="${id}"><button style="width:auto;margin:2px;padding:6px 10px;font-size:12px" type="submit">${label}</button></form>`;
 }
 
 function adminAction(body) {
@@ -2672,6 +2685,8 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
 
   if (p === '/e2c/v2/Payment' && req.method === 'POST') {
     if (!verifyToken(body)) return sendJson(res, err(13, 'Неверный Token (подпись) запроса'));
+    const badTerminal = checkE2cTerminalKey(body);
+    if (badTerminal) return sendJson(res, badTerminal);
     const payout = state.payouts[String(body.PaymentId || '')];
     if (!payout) return sendJson(res, err(4, 'Выплата не найдена', null, { field: 'PaymentId', doc: PAYOUT_REF_DOC }));
     if (payout.status !== 'NEW' && payout.status !== 'CHECKED') {
@@ -2730,6 +2745,8 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
 
   if (p === '/e2c/v2/GetState' && req.method === 'POST') {
     if (!verifyToken(body)) return sendJson(res, err(13, 'Неверный Token (подпись) запроса'));
+    const badTerminal = checkE2cTerminalKey(body);
+    if (badTerminal) return sendJson(res, badTerminal);
     const payout = state.payouts[String(body.PaymentId || '')];
     if (!payout) return sendJson(res, err(4, 'Выплата не найдена', null, { field: 'PaymentId', doc: PAYOUT_REF_DOC }));
     return sendJson(res, {
@@ -2812,6 +2829,8 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
 
   if (p === '/e2c/v2/GetSbpMembers' && req.method === 'POST') {
     if (!verifyToken(body)) return sendJson(res, err(13, 'Неверный Token (подпись) запроса'));
+    const badTerminal = checkE2cTerminalKey(body);
+    if (badTerminal) return sendJson(res, badTerminal);
     return sendJson(res, {
       Success: true,
       ErrorCode: '0',
@@ -2980,11 +2999,35 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
     return send(res, 404, 'сессия не найдена');
   }
 
-  if (p === '/admin' && req.method === 'GET') return html(res, adminPage());
+  if (p === '/admin' && req.method === 'GET') {
+    return send(res, 200, adminPage(req), {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store, private',
+      'X-Frame-Options': 'DENY',
+      'Referrer-Policy': 'no-referrer',
+      'Content-Security-Policy': "form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    });
+  }
 
   if (p === '/admin/action' && req.method === 'POST') {
+    if (!core.isSameOriginRequest(req)
+        || !core.verifyCsrfToken(body && body._csrf, ADMIN_CSRF_SECRET, sandboxRuntime.currentId())) {
+      return send(res, 403, 'Forbidden: invalid or missing CSRF token', {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+    }
     const result = adminAction(body);
-    return send(res, 302, '', { Location: result.redirect });
+    const postQuery = new URL(req.url, 'http://mock.local').searchParams;
+    const redirectQuery = new URLSearchParams();
+    const currentSandbox = sandboxRuntime.currentId();
+    if (currentSandbox !== 'default') redirectQuery.set('sandbox', currentSandbox);
+    const adminToken = postQuery.get('admin_token');
+    if (adminToken) redirectQuery.set('admin_token', adminToken);
+    const sandboxToken = postQuery.get('sandbox_token');
+    if (sandboxToken) redirectQuery.set('sandbox_token', sandboxToken);
+    const redirectSuffix = redirectQuery.toString();
+    return send(res, 302, '', { Location: `${result.redirect}${redirectSuffix ? `?${redirectSuffix}` : ''}` });
   }
 
   send(res, 404, 'not found');

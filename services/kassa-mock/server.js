@@ -25,12 +25,13 @@ const crypto = require('crypto');
 
 const core = require('../../packages/core');
 const {
-  createLog, readBody, send, sendJson, escapeHtml, checkControlAccess,
+  createLog, readBody, parseBody, send, sendJson, escapeHtml, checkControlAccess,
   parseScenarioSpec, applyRequestChaos, createSandboxRuntime, resolveTenancyMode, parseMsOr,
   verifyMerchantWebhook,
 } = core;
 // Журнал входящих запросов: интегратору видно в /admin/journal (спека §2).
 const journal = core.createJournal({ size: 200 });
+const log = createLog('kassa-mock');
 
 const {
   MOCK_HOST = '0.0.0.0',
@@ -85,13 +86,14 @@ const GROUPS = String(MOCK_GROUPS).split(',').map((g) => g.trim()).filter(Boolea
 // SSRF-политику по умолчанию; env-флаг (1/true, 0/false) переопределяет.
 const HOSTED = core.flagEnabled(MOCK_HOSTED);
 const OPERATOR_TOKEN = MOCK_OPERATOR_TOKEN || '';
+const ADMIN_CSRF_SECRET = crypto.randomBytes(32).toString('hex');
 const BLOCK_PRIVATE_WEBHOOKS = core.flagEnabled(MOCK_BLOCK_PRIVATE_WEBHOOKS, HOSTED);
 
 /* --------------------------------------------- мульти-аренда (RFC-001, F-12) */
 
-// MOCK_TENANCY=off|on; по умолчанию tenancy выключена для self-hosted и
-// включается hosted-режимом: MOCK_TENANCY=1/MOCK_HOSTED=1 -> owned.
-const TENANCY = resolveTenancyMode(MOCK_TENANCY, HOSTED);
+// MOCK_TENANCY принимает owned/namespaces/off и legacy-флаги; дефолт —
+// namespaces self-hosted и owned при MOCK_HOSTED=1, неизвестное значение warn + safe default.
+const TENANCY = resolveTenancyMode(MOCK_TENANCY, HOSTED, (warning) => log(`WARN ${warning}`));
 const SANDBOX_OWNER_TOKEN = String(MOCK_SANDBOX_TOKEN || '').trim();
 const SANDBOX_TTL_MS = parseMsOr(MOCK_SANDBOX_TTL_MS, TENANCY === 'owned' ? 24 * 60 * 60 * 1000 : 0);
 const SANDBOX_MAX = parseMsOr(MOCK_SANDBOX_MAX, TENANCY === 'owned' ? 100 : 256);
@@ -250,7 +252,6 @@ const clock = core.createVirtualClock({
 });
 
 const scenarios = core.createScenarioRegistry({ clock });
-const log = createLog('kassa-mock');
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -1642,12 +1643,25 @@ const server = http.createServer((req, res) => {
 
     // Текстовая админ-консоль
     if (req.method === 'GET' && url === '/admin') {
+      const currentSandbox = sandboxRuntime.currentId();
+      const pageQuery = new URL(req.url, 'http://mock.local').searchParams;
+      const adminQuery = new URLSearchParams();
+      if (currentSandbox !== 'default') adminQuery.set('sandbox', currentSandbox);
+      const adminToken = pageQuery.get('admin_token');
+      if (adminToken) adminQuery.set('admin_token', adminToken);
+      const sandboxToken = TENANCY === 'owned' ? sandboxRuntime.ownerTokenOf(req) : '';
+      if (sandboxToken) adminQuery.set('sandbox_token', sandboxToken);
+      const adminSuffix = adminQuery.toString();
+      const adminActionUrl = `/admin/action${adminSuffix ? `?${adminSuffix}` : ''}`;
+      const adminJournalUrl = `/admin/journal${adminSuffix ? `?${adminSuffix}` : ''}`;
+      const csrfToken = core.createCsrfToken(ADMIN_CSRF_SECRET, currentSandbox);
+      const csrfField = `<input type="hidden" name="_csrf" value="${escapeHtml(csrfToken)}">`;
       const docs = Object.values(state.receipts).sort((a, b) => b.createdAt - a.createdAt);
       const rows = docs.slice(0, 50).map((d) => `<tr>
         <td>${escapeHtml(d.uuid.slice(0, 8))}</td><td>${escapeHtml(d.operation)}</td><td>${escapeHtml(d.externalId)}</td>
         <td>${escapeHtml(d.status)} / ОФД: <b>${escapeHtml(d.ofdStatus || '—')}</b></td><td>${d.payload ? `ФД №${escapeHtml(d.payload.fiscal_document_number)} ФП ${escapeHtml(d.payload.fiscal_document_attribute)}` : (d.error ? escapeHtml(d.error.text) : '—')}</td>
         <td>${((d.receipt?.total || 0) / 100).toFixed(2)} р</td>
-        <td>${d.callbackBody ? `<form method="POST" action="/admin/action" style="display:inline"><input type="hidden" name="action" value="resend-callback"><input type="hidden" name="uuid" value="${escapeHtml(d.uuid)}"><button style="width:auto;padding:2px 6px;font-size:11px">callback</button></form>` : '—'}</td></tr>`).join('');
+        <td>${d.callbackBody ? `<form method="POST" action="${escapeHtml(adminActionUrl)}" style="display:inline">${csrfField}<input type="hidden" name="action" value="resend-callback"><input type="hidden" name="uuid" value="${escapeHtml(d.uuid)}"><button style="width:auto;padding:2px 6px;font-size:11px">callback</button></form>` : '—'}</td></tr>`).join('');
       const journalRows = journal.list().slice(-15).reverse()
         .map((e) => `<tr><td>${escapeHtml(e.at.slice(11, 19))}</td><td>${escapeHtml(e.method)}</td><td><code>${escapeHtml(e.path)}</code></td><td>${escapeHtml(Object.entries(e.body || {}).map(([k, v]) => `${k}=${v}`).join(' '))}</td><td>${e.status}</td><td>${e.ms} мс</td><td><code style="font-size:10px">${escapeHtml(String(e.curl || '').slice(0, 70))}…</code></td></tr>`)
         .join('') || '<tr><td colspan="7">запросов ещё не было</td></tr>';
@@ -1658,32 +1672,43 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
 <h1>kassa-mock — Ferma cloud-cashbox mock (${escapeHtml(state.cashbox.kktState)}, чеков: ${state.cashbox.checksCnt}, ОФД: ${escapeHtml(state.cashbox.ofdMode || 'online')}, очередь ОФД: ${Object.keys(state.ofdQueue || {}).length})</h1>
 <p>POST /possystem/v1/getToken · POST /possystem/v1/{group}/sell|sell_refund|sell_correction|buy|buy_refund|buy_correction · GET /possystem/v1/{group}/report/&#123;uuid&#125; · GET /possystem/v1/stats/cashboxes/extended</p>
 <p>Негатив: X-Mock-Scenario: <b>fail</b> / <b>hang</b> / <b>webhook-drop</b> / <b>ofd-queue</b> / <b>ofd-reject</b> / <b>mark-fail</b>; ExternalId с префиксом <b>fail-</b> / <b>hang-</b>.</p>
-<form method="POST" action="/admin/action" style="display:inline">
+<form method="POST" action="${escapeHtml(adminActionUrl)}" style="display:inline">
+  ${csrfField}
   <input type="hidden" name="action" value="kassa-down">
   <input type="hidden" name="ms" value="300000">
   <button type="submit">Касса недоступна (5 мин)</button>
 </form>
-<form method="POST" action="/admin/action" style="display:inline">
+<form method="POST" action="${escapeHtml(adminActionUrl)}" style="display:inline">
+  ${csrfField}
   <input type="hidden" name="action" value="kassa-up">
   <button type="submit">Вернуть в строй</button>
 </form>
-<form method="POST" action="/admin/action" style="display:inline">
+<form method="POST" action="${escapeHtml(adminActionUrl)}" style="display:inline">
+  ${csrfField}
   <input type="hidden" name="action" value="ofd-offline">
   <button type="submit">ОФД: оффлайн (копить очередь)</button>
 </form>
-<form method="POST" action="/admin/action" style="display:inline">
+<form method="POST" action="${escapeHtml(adminActionUrl)}" style="display:inline">
+  ${csrfField}
   <input type="hidden" name="action" value="ofd-online">
   <button type="submit">ОФД: онлайн (отправить очередь)</button>
 </form>
-<form method="POST" action="/admin/action" style="display:inline">
+<form method="POST" action="${escapeHtml(adminActionUrl)}" style="display:inline">
+  ${csrfField}
   <input type="hidden" name="action" value="clear-external-ids">
   <button type="submit">Сбросить реестр external_id</button>
 </form>
 <p>Статус: ${isDown() ? `НЕДОСТУПНА до ${new Date(state.cashbox.downUntil).toISOString()}` : 'готова'} · external_id в реестре: ${Object.keys(state.externalIds).length} · Виртуальное время: ${escapeHtml(clock.iso())}</p>
 <table><tr><th>uuid</th><th>op</th><th>external_id</th><th>status</th><th>фискальные данные</th><th>сумма</th><th>действия</th></tr>${rows}</table>
-<h2 style="font-size:15px">Журнал запросов к API (последние 15) — <a href="/admin/journal">json</a></h2>
+<h2 style="font-size:15px">Журнал запросов к API (последние 15) — <a href="${escapeHtml(adminJournalUrl)}">json</a></h2>
 <table><tr><th>время</th><th>метод</th><th>путь</th><th>поля</th><th>код</th><th>время</th></tr>${journalRows}</table>
-</body></html>`, { 'Content-Type': 'text/html; charset=utf-8' });
+</body></html>`, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store, private',
+        'X-Frame-Options': 'DENY',
+        'Referrer-Policy': 'no-referrer',
+        'Content-Security-Policy': "form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+      });
     }
 
     // «Касса недоступна» — все possystem-роуты 503
@@ -1834,10 +1859,13 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
 
     if (req.method === 'POST' && url === '/admin/action') {
       const raw = await readBody(req);
-      const body = {};
-      for (const pair of raw.split('&')) {
-        const i = pair.indexOf('=');
-        if (i > 0) body[decodeURIComponent(pair.slice(0, i))] = decodeURIComponent(pair.slice(i + 1));
+      const body = parseBody(raw, req.headers['content-type']);
+      if (!core.isSameOriginRequest(req)
+          || !core.verifyCsrfToken(body && body._csrf, ADMIN_CSRF_SECRET, sandboxRuntime.currentId())) {
+        return jsonRaw(res, 403, errBody(11, 'Запрос заблокирован: отсутствует или неверен CSRF-токен', {
+          field: '_csrf',
+          hint: 'Откройте /admin и отправьте действие из формы этой консоли.',
+        }));
       }
       if (body.action === 'kassa-down') {
         state.cashbox.downUntil = clock.now() + Math.max(0, parseInt(body.ms, 10) || 300000);
@@ -1868,7 +1896,16 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
         log(`сценарий: реестр external_id очищен (${n} записей)`);
         persist();
       }
-      return send(res, 302, '', { Location: '/admin' });
+      const postQuery = new URL(req.url, 'http://mock.local').searchParams;
+      const redirectQuery = new URLSearchParams();
+      const currentSandbox = sandboxRuntime.currentId();
+      if (currentSandbox !== 'default') redirectQuery.set('sandbox', currentSandbox);
+      const adminToken = postQuery.get('admin_token');
+      if (adminToken) redirectQuery.set('admin_token', adminToken);
+      const sandboxToken = postQuery.get('sandbox_token');
+      if (sandboxToken) redirectQuery.set('sandbox_token', sandboxToken);
+      const redirectSuffix = redirectQuery.toString();
+      return send(res, 302, '', { Location: `/admin${redirectSuffix ? `?${redirectSuffix}` : ''}` });
     }
 
     return jsonRaw(res, 404, errBody(404, 'Неизвестный маршрут'));

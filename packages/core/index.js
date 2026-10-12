@@ -1420,6 +1420,75 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(left, right);
 }
 
+const CSRF_TOKEN_TTL_MS = 4 * 60 * 60 * 1000;
+
+/** Выпускает короткоживущий, подписанный синхронизирующий токен для HTML-форм. */
+function createCsrfToken(secret, context = '', now = Date.now(), ttlMs = CSRF_TOKEN_TTL_MS) {
+  const key = String(secret || '');
+  if (!key) throw new Error('createCsrfToken: нужен секрет подписи');
+  const ttl = Number.isFinite(Number(ttlMs)) ? Math.max(1, Number(ttlMs)) : CSRF_TOKEN_TTL_MS;
+  const payload = Buffer.from(JSON.stringify({
+    version: 1,
+    context: String(context || ''),
+    expiresAt: Math.floor(Number(now) + ttl),
+    nonce: crypto.randomBytes(24).toString('base64url'),
+  })).toString('base64url');
+  const signature = crypto.createHmac('sha256', key).update(payload).digest('base64url');
+  return `${payload}.${signature}`;
+}
+
+/** Проверяет подпись, срок жизни и привязку CSRF-токена к контексту/песочнице. */
+function verifyCsrfToken(token, secret, context = '', now = Date.now()) {
+  const key = String(secret || '');
+  const parts = String(token || '').split('.');
+  if (!key || parts.length !== 2 || !parts[0] || !parts[1]) return false;
+  const [payload, signature] = parts;
+  const expected = crypto.createHmac('sha256', key).update(payload).digest('base64url');
+  if (!safeEqual(signature, expected)) return false;
+  try {
+    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    return decoded.version === 1
+      && decoded.context === String(context || '')
+      && Number.isSafeInteger(decoded.expiresAt)
+      && decoded.expiresAt > Number(now)
+      && typeof decoded.nonce === 'string'
+      && decoded.nonce.length >= 32;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Проверка browser-origin для операций из cookie-авторизуемых HTML-форм.
+ * Отсутствующий Origin/Referer допускается для CLI-клиентов — CSRF-токен
+ * остаётся обязательным; явно cross-site запрос всегда запрещён.
+ */
+function isSameOriginRequest(req) {
+  const headers = (req && req.headers) || {};
+  const fetchSite = String(headers['sec-fetch-site'] || '').trim().toLowerCase();
+  if (fetchSite && fetchSite !== 'same-origin') return false;
+
+  const sourceValue = headers.origin || headers.referer;
+  if (!sourceValue) return true;
+  if (String(sourceValue).trim().toLowerCase() === 'null') return false;
+
+  const firstHeaderValue = (value) => String(Array.isArray(value) ? value[0] : value || '').split(',')[0].trim();
+  // X-Forwarded-Host is intentionally ignored: it is often client-controlled
+  // unless every proxy in front of the app is explicitly trusted/configured.
+  const requestHost = firstHeaderValue(headers.host);
+  const forwardedProto = firstHeaderValue(headers['x-forwarded-proto']).toLowerCase();
+  const requestProto = forwardedProto || ((req && req.socket && req.socket.encrypted) ? 'https' : 'http');
+  if (!requestHost || !['http', 'https'].includes(requestProto)) return false;
+
+  try {
+    const source = new URL(String(sourceValue));
+    const target = new URL(`${requestProto}://${requestHost}`);
+    return ['http:', 'https:'].includes(source.protocol) && source.origin === target.origin;
+  } catch {
+    return false;
+  }
+}
+
 /** Токен из Authorization: Bearer, X-(Admin|Operator)-Token или query. */
 function tokenMatches(req, expected) {
   const wanted = String(expected || '');
@@ -1655,11 +1724,33 @@ function randomToken(bytes = 24) {
  *                  CI-воркеров (дефолт self-hosted, владелец не проверяется);
  *   'owned'      — hosted-режим: каждая песочница имеет владельца и owner-token,
  *                  знание ID не даёт доступ (MOCK_HOSTED=1 или MOCK_TENANCY=1).
+ * MOCK_TENANCY принимает имена режимов и legacy-флаги; мусорное значение
+ * вызывает warn и безопасно сводится к default для hosted/self-hosted.
  */
-function resolveTenancyMode(value, hosted = false) {
+function resolveTenancyMode(value, hosted = false, warn = (message) => console.warn(message)) {
   const raw = String(value === undefined || value === null ? '' : value).trim().toLowerCase();
-  if (raw) return flagEnabled(raw) ? 'owned' : 'off';
-  return hosted ? 'owned' : 'namespaces';
+  const safeDefault = hosted ? 'owned' : 'namespaces';
+  if (!raw) return safeDefault;
+
+  const aliases = {
+    owned: 'owned',
+    namespaces: 'namespaces',
+    off: 'off',
+    '1': 'owned',
+    on: 'owned',
+    true: 'owned',
+    yes: 'owned',
+    '0': 'off',
+    false: 'off',
+    no: 'off',
+  };
+  if (Object.prototype.hasOwnProperty.call(aliases, raw)) return aliases[raw];
+
+  const printable = raw.replace(/[\r\n\t\x00-\x1f\x7f]/g, ' ').slice(0, 80);
+  if (typeof warn === 'function') {
+    warn(`Неизвестное значение MOCK_TENANCY=${JSON.stringify(printable)}; безопасный режим по умолчанию: ${safeDefault}.`);
+  }
+  return safeDefault;
 }
 
 /**
@@ -2440,6 +2531,9 @@ module.exports = {
   createScenarioRegistry,
   checkAdminAuth,
   checkControlAccess,
+  createCsrfToken,
+  verifyCsrfToken,
+  isSameOriginRequest,
   applyRequestChaos,
   createSandboxManager,
   createSandboxRuntime,

@@ -3,9 +3,10 @@
 'use strict';
 
 /*
- * Selftest kassa-mock: 10 сценариев контракта Ferma (token, sell, dup,
- * fail-, hang-, report, stats, callback delivery, down-mode, чек покупателю).
- * Запуск: node kassa-mock/selftest.js (поднимает свой экземпляр на :3301).
+ * Selftest kassa-mock: regression matrix for Ferma, 54-ФЗ, tenancy, CSRF,
+ * callbacks and OFD workflows. Child servers and callback listeners use
+ * ephemeral ports; stateful checks poll for observable outcomes.
+ * Запуск: node services/kassa-mock/selftest.js.
  */
 
 const { spawn } = require('child_process');
@@ -14,8 +15,9 @@ const http = require('http');
 const os = require('os');
 const path = require('path');
 
-const PORT = 3301;
-const BASE = `http://127.0.0.1:${PORT}`;
+let PORT = 0;
+let CALLBACK_PORT = 0;
+let BASE = '';
 // Лог дочернего стенда: нужен для проверок «секретов нет в логах» (#24, F-09).
 const SERVER_LOG = [];
 let passed = 0;
@@ -46,8 +48,40 @@ function request(method, url, body = null, headers = {}) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+async function waitForCondition(predicate, { timeoutMs = 8000, intervalMs = 25, description = 'condition', ignoreErrors = false } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      const value = await predicate();
+      if (value) return value;
+    } catch (error) {
+      if (!ignoreErrors) throw error;
+      lastError = error;
+    }
+    await sleep(Math.min(intervalMs, Math.max(1, deadline - Date.now())));
+  }
+  throw new Error(`Timed out waiting for ${description}${lastError ? `: ${lastError.message}` : ''}`);
+}
+
+async function waitForReport(uuid, token, status, timeoutMs = 8000) {
+  return waitForCondition(async () => {
+    const report = (await request('GET', `/possystem/v1/Main/report/${uuid}?token=${token}`)).json();
+    return report && report.status === status ? report : null;
+  }, { timeoutMs, description: `receipt ${uuid} → ${status}` });
+}
+
 async function main() {
   console.log(`\n== kassa-mock selftest on :${PORT} ==\n`);
+
+  // #31: неправильная tenancy-конфигурация предупреждает и не мешает старту.
+  const warningLogOffset = SERVER_LOG.length;
+  const invalidTenancyChild = await startKassaChild({ MOCK_TENANCY: 'unexpected-mode' });
+  const tenancyStartupLog = SERVER_LOG.slice(warningLogOffset).join('');
+  check('#31: неизвестный MOCK_TENANCY пишет WARN и запускается с безопасным namespaces default',
+    tenancyStartupLog.includes('WARN Неизвестное значение MOCK_TENANCY')
+      && tenancyStartupLog.includes('безопасный режим по умолчанию: namespaces'));
+  await stopChild(invalidTenancyChild);
 
   // 1. healthz
   let r = await request('GET', '/healthz');
@@ -76,7 +110,7 @@ async function main() {
       items: [{ name: 'Пышка', price: 61000, quantity: 1, sum: 61000, payment_method: 'full_prepayment', payment_object: 'commodity', vat: { type: 'none' }, agent_info: { type: 'another' }, supplier_info: { name: 'Пекарня', inn: '7801111111', phones: ['+7800'] } }],
       payments: [{ type: 1, sum: 61000 }],
       total: 61000,
-      receipts: { service: { callback_url: `http://127.0.0.1:${PORT + 1}/fake-core-callback` } },
+      receipts: { service: { callback_url: `http://127.0.0.1:${CALLBACK_PORT}/fake-core-callback` } },
     },
   };
   r = await request('POST', `/possystem/v1/Main/sell?token=${token}`, sellBody);
@@ -92,10 +126,11 @@ async function main() {
   check('report сразу -> wait', r.json() && r.json().status === 'wait');
 
   // 8. callback с ФД/ФП пришёл на callback_url (MOCK_PROCESS_MS=500)
-  await sleep(2500);
+  await waitForCondition(() => global.__callbackHits > 0, { description: 'first receipt callback delivery' });
   check('callback доставлен', global.__callbackHits > 0);
 
   // 9. отчёт done с фискальными данными
+  await waitForReport(uuid, token, 'done');
   r = await request('GET', `/possystem/v1/Main/report/${uuid}?token=${token}`);
   const p = r.json() && r.json().payload;
   check('report -> done + ФД/ФП', Boolean(p && p.fiscal_document_number && p.fiscal_document_attribute && p.ofd_receipt_url));
@@ -128,7 +163,7 @@ async function main() {
   // 10d. Дата чека — реальная (не 1970) и совпадает с processedAt; номер чека в смене уникален
   const p1 = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, { ...sellBody, external_id: 'num-1' })).json();
   const p2 = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, { ...sellBody, external_id: 'num-2' })).json();
-  await sleep(1500);
+  await Promise.all([waitForReport(p1.uuid, token, 'done'), waitForReport(p2.uuid, token, 'done')]);
   const rp1 = (await request('GET', `/possystem/v1/Main/report/${p1.uuid}?token=${token}`)).json();
   const rp2 = (await request('GET', `/possystem/v1/Main/report/${p2.uuid}?token=${token}`)).json();
   check('receipt_datetime не 1970 (снимок после печати)', Boolean(rp1.payload) && !String(rp1.payload.receipt_datetime).startsWith('1970'));
@@ -139,20 +174,20 @@ async function main() {
   // без него запрос отбраковывается до создания документа, и проверка
   // экранирования получала 404 вместо чека.
   const xss = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, { ...sellBody, external_id: 'xss-1', receipt: { ...sellBody.receipt, items: [{ ...sellBody.receipt.items[0], name: '<img src=x onc=alert(1)>', sum: sellBody.receipt.items[0].price * sellBody.receipt.items[0].quantity }] } })).json();
-  await sleep(2200); // печать — на секундном тике после processAt=500мс; 1200 мс — гонка
+  await waitForReport(xss.uuid, token, 'done');
   r = await request('GET', `/receipts/${xss.uuid}`);
   check('чек покупателя экранирует HTML из данных интегратора', r.status === 200 && !r.text.includes('<img src=x onc=alert(1)>') && r.text.includes('&lt;img'));
 
   // 10f. Лента чека: НДС считается по позициям (ставка из vat.type)
   const vatDoc = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, { ...sellBody, external_id: 'vat-1', receipt: { ...sellBody.receipt, items: [{ ...sellBody.receipt.items[0], vat: { type: 'vat20' }, sum: sellBody.receipt.items[0].sum }] } })).json();
-  await sleep(2200); // аналогично 10e
+  await waitForReport(vatDoc.uuid, token, 'done');
   r = await request('GET', `/receipts/${vatDoc.uuid}`);
   check('лента чека: НДС по ставке позиции (vat20 → «НДС 20%»)', r.text.includes('НДС 20%'));
 
   // 11. негатив fail-
   r = await request('POST', `/possystem/v1/Main/sell?token=${token}`, { ...sellBody, external_id: 'fail-2' });
   const failUuid = r.json().uuid;
-  await sleep(1500);
+  await waitForReport(failUuid, token, 'fail');
   r = await request('GET', `/possystem/v1/Main/report/${failUuid}?token=${token}`);
   check('fail- сценарий -> status fail + error', r.json().status === 'fail' && Boolean(r.json().error));
 
@@ -165,7 +200,7 @@ async function main() {
   // 12b. Универсальный драйвер негативов: X-Mock-Scenario на запросе
   // (для внешних интеграторов, чьи external_id не начинаются с fail-/hang-)
   const hdr = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, { ...sellBody, external_id: 'order-42', }, { 'X-Mock-Scenario': 'fail' })).json();
-  await sleep(2200);
+  await waitForReport(hdr.uuid, token, 'fail');
   r = await request('GET', `/possystem/v1/Main/report/${hdr.uuid}?token=${token}`);
   check('X-Mock-Scenario: fail -> статус fail для обычного external_id', r.json().status === 'fail' && r.json().external_id === 'order-42');
   const hdrHang = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, { ...sellBody, external_id: 'order-43' }, { 'X-Mock-Scenario': 'hang' })).json();
@@ -337,7 +372,12 @@ async function main() {
     },
   }, { 'X-Mock-Scenario': 'ofd-reject' })).json();
 
-  await sleep(2200);
+  await Promise.all([
+    waitForReport(markedOk.uuid, token, 'done'),
+    waitForReport(markFailDoc.uuid, token, 'fail'),
+    waitForReport(ofdPendingDoc.uuid, token, 'done'),
+    waitForReport(ofdRejectDoc.uuid, token, 'done'),
+  ]);
 
   const markedReport = (await request('GET', `/possystem/v1/Main/report/${markedOk.uuid}?token=${token}`)).json();
   check('отчёт маркированного чека содержит marking_verified + vat_amounts (vat7)', Boolean(markedReport.payload && markedReport.payload.marking_verified === true && markedReport.payload.marked_items_count === 1));
@@ -432,7 +472,7 @@ async function main() {
     sbHealth.sandbox === 'worker-kassa-2' && sbHealth.checks === 0);
   await request('POST', '/mock/sandboxes', { sandbox: 'default' });
 
-  const verifyMerchantRes = (await request('POST', '/mock/verify-merchant', { url: `http://127.0.0.1:${PORT + 1}/callback` })).json();
+  const verifyMerchantRes = (await request('POST', '/mock/verify-merchant', { url: `http://127.0.0.1:${CALLBACK_PORT}/callback` })).json();
   check('POST /mock/verify-merchant проверяет callback мерчанта (readyForProd=true)',
     verifyMerchantRes.ok === true && verifyMerchantRes.readyForProd === true);
 
@@ -513,6 +553,23 @@ async function main() {
       check('#22: operator-токен не открывает /admin', operatorOnAdmin.status === 401);
       const adminOnAdmin = await requestOn(child.port, 'GET', '/admin/journal', null, { Authorization: 'Bearer adm-secret' });
       check('#22: админ-токен открывает /admin/journal', adminOnAdmin.status === 200);
+      const adminPage = await requestOn(child.port, 'GET', '/admin?admin_token=adm-secret');
+      const csrfToken = /name="_csrf" value="([^"]+)"/.exec(adminPage.text)?.[1];
+      const actionUrl = /<form method="POST" action="([^"]+)"/.exec(adminPage.text)?.[1];
+      check('#5 A-20: admin_token сохраняется в action URL вместе с CSRF-полем',
+        adminPage.status === 200 && Boolean(csrfToken) && actionUrl === '/admin/action?admin_token=adm-secret');
+      const form = (fields) => new URLSearchParams(fields).toString();
+      const deniedNoCsrf = await requestOn(child.port, 'POST', '/admin/action?admin_token=adm-secret', form({ action: 'ofd-offline' }), { 'Content-Type': 'application/x-www-form-urlencoded' });
+      check('#5 A-20: действие без CSRF-токена отклоняется', deniedNoCsrf.status === 403);
+      const deniedCrossOrigin = await requestOn(child.port, 'POST', '/admin/action?admin_token=adm-secret', form({ action: 'ofd-offline', _csrf: csrfToken }), {
+        'Content-Type': 'application/x-www-form-urlencoded', Origin: 'http://attacker.invalid',
+      });
+      check('#5 A-20: same-origin проверка отклоняет cross-site форму', deniedCrossOrigin.status === 403);
+      const validAction = await requestOn(child.port, 'POST', actionUrl, form({ action: 'ofd-offline', _csrf: csrfToken }), { 'Content-Type': 'application/x-www-form-urlencoded' });
+      check('#5 A-20: CSRF-форма работает, redirect сохраняет admin_token',
+        validAction.status === 302 && validAction.headers.location === '/admin?admin_token=adm-secret');
+      const redirectedAdmin = await requestOn(child.port, 'GET', validAction.headers.location);
+      check('#5 A-20: redirect с admin_token снова открывает консоль', redirectedAdmin.status === 200);
       const tk = (await requestOn(child.port, 'POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' })).json().token;
       check('#22: getToken (контракт Ferma) не требует operator-токена', Boolean(tk));
       const sell = await requestOn(child.port, 'POST', `/possystem/v1/Main/sell?token=${tk}`, validBody('auth-check-1'));
@@ -573,27 +630,31 @@ async function main() {
   // 26. SSRF-политика: `=1` блокирует приватные IPv4/IPv6 и examiner, и очередь
   //     callback'ов; `=true` работает так же
   {
-    const catchPort = await freePort();
     let hits = 0;
     const catcher = http.createServer((req, res) => { hits += 1; res.writeHead(200); res.end('{"data":{"status":"confirmed"}}'); });
-    await new Promise((r) => catcher.listen(catchPort, '127.0.0.1', r));
+    const catchPort = await new Promise((resolve, reject) => {
+      catcher.once('error', reject);
+      catcher.listen(0, '127.0.0.1', () => resolve(catcher.address().port));
+    });
     const child = await startKassaChild({ MOCK_BLOCK_PRIVATE_WEBHOOKS: '1' });
     try {
       const v4 = await requestOn(child.port, 'POST', '/mock/verify-merchant', { url: `http://127.0.0.1:${catchPort}/callback` });
       check('#22: =1: private IPv4 в /mock/verify-merchant -> 403 + SSRF', v4.status === 403 && v4.text.includes('SSRF'));
-      const v6 = await requestOn(child.port, 'POST', '/mock/verify-merchant', { url: 'http://[::1]:3101/hook' });
+      const v6 = await requestOn(child.port, 'POST', '/mock/verify-merchant', { url: 'http://[::1]/hook' });
       check('#22: =1: private IPv6 -> 403', v6.status === 403);
 
       const tk = (await requestOn(child.port, 'POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' })).json().token;
       const body = validBody('ssrf-callback-1');
       body.receipt.receipts = { service: { callback_url: `http://127.0.0.1:${catchPort}/callback` } };
       await requestOn(child.port, 'POST', `/possystem/v1/Main/sell?token=${tk}`, body);
-      await sleep(2000);
-      const exported = (await requestOn(child.port, 'GET', '/mock/state')).json();
-      const stateSlice = (exported && exported.state) || exported || {};
-      const cb = Object.values(stateSlice.callbacks || {})[0];
+      const cb = await waitForCondition(async () => {
+        const exported = (await requestOn(child.port, 'GET', '/mock/state')).json();
+        const stateSlice = (exported && exported.state) || exported || {};
+        const callback = Object.values(stateSlice.callbacks || {})[0];
+        return callback && String(callback.lastStatus).includes('SSRF') ? callback : null;
+      }, { timeoutMs: 5000, description: 'SSRF callback rejection recorded in state' });
       check('#22: =1: callback на приватный адрес заблокирован (SSRF в lastStatus)',
-        hits === 0 && cb && String(cb.lastStatus).includes('SSRF'), `hits=${hits}, lastStatus=${cb && cb.lastStatus}`);
+        hits === 0 && String(cb.lastStatus).includes('SSRF'), `hits=${hits}, lastStatus=${cb.lastStatus}`);
     } finally {
       child.stop();
       catcher.close();
@@ -603,7 +664,7 @@ async function main() {
   {
     const child = await startKassaChild({ MOCK_BLOCK_PRIVATE_WEBHOOKS: 'true' });
     try {
-      const r = await requestOn(child.port, 'POST', '/mock/verify-merchant', { url: 'http://127.0.0.1:3101/hook' });
+      const r = await requestOn(child.port, 'POST', '/mock/verify-merchant', { url: 'http://[::1]/hook' });
       check('#22: =true тоже включает SSRF-guard', r.status === 403);
     } finally {
       child.stop();
@@ -670,6 +731,27 @@ async function main() {
       check('#8 F-12: POST /sandboxes отдаёт id, ownerToken и креды песочницы',
         Boolean(created.id && created.ownerToken && created.creds && created.creds.fermaPassword), JSON.stringify(created).slice(0, 180));
       const owner = { Authorization: `Bearer ${created.ownerToken}` };
+      const ownerAdminPage = await requestOn(child.port, 'GET', `/admin?sandbox=${encodeURIComponent(created.id)}`, null, owner);
+      const actionMatch = /<form method="POST" action="([^"]*\/admin\/action[^"]*)"/.exec(ownerAdminPage.text);
+      const csrfMatch = /name="_csrf" value="([^"]+)"/.exec(ownerAdminPage.text);
+      let ownerAdminActionWorks = false;
+      if (actionMatch && csrfMatch) {
+        const actionUrl = new URL(actionMatch[1].replace(/&amp;/g, '&'), `http://127.0.0.1:${child.port}`);
+        const adminPost = await requestOn(child.port, 'POST', `${actionUrl.pathname}${actionUrl.search}`,
+          `_csrf=${encodeURIComponent(csrfMatch[1])}&action=ofd-offline`, {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            Origin: `http://127.0.0.1:${child.port}`,
+          });
+        const returnedPage = adminPost.headers.location
+          ? await requestOn(child.port, 'GET', adminPost.headers.location)
+          : null;
+        ownerAdminActionWorks = actionUrl.searchParams.get('sandbox_token') === created.ownerToken
+          && adminPost.status === 302
+          && new URLSearchParams(new URL(adminPost.headers.location || '/', `http://127.0.0.1:${child.port}`).search).get('sandbox_token') === created.ownerToken
+          && returnedPage && returnedPage.status === 200;
+      }
+      check('#8 F-12: native admin-form передаёт owner-token, CSRF и сохраняет токен после redirect',
+        ownerAdminPage.status === 200 && ownerAdminActionWorks, `страница ${ownerAdminPage.status}`);
 
       const idOnly = await requestOn(child.port, 'POST', '/possystem/v1/getToken', { login: created.creds.fermaLogin, pass: created.creds.fermaPassword }, { 'X-Mock-Sandbox': created.id });
       check('#8 F-12: знание ID без owner-token -> 401', idOnly.status === 401, `получено ${idOnly.status}`);
@@ -709,11 +791,15 @@ async function main() {
     try {
       const tk = (await requestOn(child1.port, 'POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' }, { 'X-Mock-Sandbox': 'k-persist' })).json().token;
       savedUuid = (await requestOn(child1.port, 'POST', `/possystem/v1/Main/sell?token=${tk}`, validBody('k-persist-1'), { 'X-Mock-Sandbox': 'k-persist' })).json().uuid;
-      await sleep(300); // реестр песочниц пишется атомарно с debounce
+      await waitForCondition(() => {
+        try {
+          const registry = JSON.parse(fs.readFileSync(`${stateFile}.sandboxes.json`, 'utf8'));
+          return registry.sandboxes && registry.sandboxes.some((record) => record.id === 'k-persist' && record.state && record.state.receipts && record.state.receipts[savedUuid]);
+        } catch { return false; }
+      }, { description: 'sandbox registry flush before restart' });
     } finally {
       child1.stop();
     }
-    await sleep(300);
     const child2 = await startKassaChild({ MOCK_STATE_FILE: stateFile });
     try {
       const restored = (await requestOn(child2.port, 'GET', '/mock/state?sandbox=k-persist')).json().state;
@@ -729,8 +815,10 @@ async function main() {
       const created = (await requestOn(child3.port, 'POST', '/sandboxes', {})).json();
       const before = await requestOn(child3.port, 'GET', '/mock/state', null, { 'X-Mock-Sandbox': created.id, Authorization: `Bearer ${created.ownerToken}` });
       check('#8 F-14: до TTL песочница доступна', before.status === 200);
-      await sleep(2300);
-      const after = await requestOn(child3.port, 'GET', '/mock/state', null, { 'X-Mock-Sandbox': created.id, Authorization: `Bearer ${created.ownerToken}` });
+      const after = await waitForCondition(async () => {
+        const response = await requestOn(child3.port, 'GET', '/mock/state', null, { 'X-Mock-Sandbox': created.id, Authorization: `Bearer ${created.ownerToken}` });
+        return [404, 410].includes(response.status) ? response : null;
+      }, { timeoutMs: 5000, description: 'sandbox TTL expiry' });
       check('#8 F-14: после TTL песочница недоступна', [404, 410].includes(after.status), `получено ${after.status}`);
     } finally {
       child3.stop();
@@ -761,12 +849,11 @@ async function main() {
 
 /** Дочерний стенд кассы на свободном порту с ожиданием healthz. */
 async function startKassaChild(env = {}) {
-  const { spawn } = require('child_process');
-  const port = await freePort();
   const proc = spawn('node', [path.join(__dirname, 'server.js')], {
     env: {
       ...process.env,
-      MOCK_PORT: String(port),
+      MOCK_HOST: '127.0.0.1',
+      MOCK_PORT: '0',
       MOCK_STATE_FILE: '',
       MOCK_PROCESS_MS: '0',
       MOCK_CALLBACK_RETRY_MS: '1000',
@@ -783,24 +870,43 @@ async function startKassaChild(env = {}) {
       MOCK_SANDBOX_HOST_SUFFIX: '',
       MOCK_SANDBOX_CREATE_LIMIT: '',
       ...env,
+      MOCK_PORT: '0',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  proc.stderr.on('data', (d) => process.stderr.write(String(d)));
-  const deadline = Date.now() + 5000;
-  let up = false;
-  while (Date.now() < deadline && !up) {
-    try {
-      const r = await requestOn(port, 'GET', '/healthz');
-      up = r.status === 200;
-    } catch { /* стенд ещё поднимается */ }
-    if (!up) await sleep(100);
-  }
-  if (!up) {
-    try { proc.kill('SIGKILL'); } catch { /* ignore */ }
-    throw new Error(`дочерний стенд кассы на :${port} не поднялся за 5 с`);
-  }
+  let output = '';
+  const port = await new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) {
+        try { proc.kill('SIGKILL'); } catch { /* ignore */ }
+        reject(error);
+      } else resolve(value);
+    };
+    const timer = setTimeout(() => finish(new Error(`kassa-mock did not report its ephemeral port: ${output.slice(-500)}`)), 5000);
+    proc.stdout.on('data', (data) => {
+      const text = String(data);
+      output += text;
+      SERVER_LOG.push(text);
+      const match = /kassa-mock \(Ferma cloud-cashbox mock\) on [^:\s]+:(\d+)/.exec(output);
+      if (match) finish(null, Number(match[1]));
+    });
+    proc.stderr.on('data', (data) => process.stderr.write(String(data)));
+    proc.once('exit', (code, signal) => finish(new Error(`kassa-mock exited before listen (${code ?? signal}): ${output.slice(-500)}`)));
+  });
   return { proc, port, stop: () => { try { proc.kill('SIGKILL'); } catch { /* ignore */ } } };
+}
+
+async function stopChild(child) {
+  const proc = child && child.proc ? child.proc : child;
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
+  await new Promise((resolve) => {
+    proc.once('exit', resolve);
+    try { proc.kill('SIGKILL'); } catch { resolve(); }
+  });
 }
 
 /**
@@ -811,71 +917,82 @@ async function startKassaChild(env = {}) {
  *   • токен с истёкшим TTL (12 ч) даёт ошибку 11, а не «работает вечно».
  */
 async function phaseRestart() {
-  const fs = require('fs');
-  const stateFile = path.join(__dirname, `.selftest-state-${process.pid}.json`);
-  const port = await freePort();
-  const catchPort = await freePort();
+  const stateFile = path.join(os.tmpdir(), `kassa-selftest-${process.pid}.json`);
   const hits = { fail: 0, ok: 0 };
   const catcher = http.createServer((req, res) => {
     if (req.url.startsWith('/fail')) { hits.fail += 1; res.writeHead(500); res.end('no'); return; }
     hits.ok += 1; res.writeHead(200); res.end('{"data":{"status":"confirmed"}}');
   });
-  await new Promise((r) => catcher.listen(catchPort, '127.0.0.1', r));
-  const env = {
-    ...process.env, MOCK_PORT: String(port), MOCK_PROCESS_MS: '0', MOCK_CALLBACK_RETRY_MS: '500',
+  const catchPort = await new Promise((resolve, reject) => {
+    catcher.once('error', reject);
+    catcher.listen(0, '127.0.0.1', () => resolve(catcher.address().port));
+  });
+  const childEnv = {
+    MOCK_PROCESS_MS: '0',
+    MOCK_CALLBACK_RETRY_MS: '500',
     MOCK_STATE_FILE: stateFile,
   };
-  const start = () => spawn('node', [path.join(__dirname, 'server.js')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let port = 0;
+  let child = null;
+  const start = async () => {
+    const next = await startKassaChild(childEnv);
+    port = next.port;
+    return next;
+  };
   const api = (method, url, body, headers = {}) => requestOn(port, method, url, body, headers);
 
-  let child = start();
-  await sleep(900);
-  let tok = (await api('POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' })).json().token;
-  const doc = (await api('POST', `/possystem/v1/Main/sell?token=${tok}`, {
-    external_id: 'restart-pending',
-    receipt: {
-      client: { email: 'a@b.c' },
-      company: { sno: 'usn_income', payment_address: 'lovi.test' },
-      items: [{ name: 'X', price: 100, quantity: 1, sum: 100, vat: { type: 'none' }, payment_method: 'full_payment', payment_object: 'commodity' }],
-      payments: [{ type: 1, sum: 100 }],
-      total: 100,
-      receipts: { service: { callback_url: `http://127.0.0.1:${catchPort}/fail` } },
-    },
-  })).json();
-  await sleep(1300);
-  check('MOCK_PROCESS_MS=0: чек печатается сразу', (await api('GET', `/possystem/v1/Main/report/${doc.uuid}?token=${tok}`)).json().status === 'done');
-  for (let i = 0; i < 40 && hits.fail < 1; i += 1) await sleep(100); // первая callback-попытка — на следующем секундном тике (фиксированный sleep 1200 мс был гонкой)
-  const hitsBefore = hits.fail;
-  check('незавершённый callback ретраится до рестарта', hitsBefore >= 1);
-  child.kill('SIGKILL');
-  await sleep(400);
+  try {
+    child = await start();
+    const tok = (await api('POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' })).json().token;
+    const doc = (await api('POST', `/possystem/v1/Main/sell?token=${tok}`, {
+      external_id: 'restart-pending',
+      receipt: {
+        client: { email: 'a@b.c' },
+        company: { sno: 'usn_income', payment_address: 'lovi.test' },
+        items: [{ name: 'X', price: 100, quantity: 1, sum: 100, vat: { type: 'none' }, payment_method: 'full_payment', payment_object: 'commodity' }],
+        payments: [{ type: 1, sum: 100 }],
+        total: 100,
+        receipts: { service: { callback_url: `http://127.0.0.1:${catchPort}/fail` } },
+      },
+    })).json();
+    await waitForCondition(async () => {
+      const report = (await api('GET', `/possystem/v1/Main/report/${doc.uuid}?token=${tok}`)).json();
+      return report.status === 'done' ? report : null;
+    }, { description: 'MOCK_PROCESS_MS=0 receipt processing' });
+    check('MOCK_PROCESS_MS=0: чек печатается сразу', (await api('GET', `/possystem/v1/Main/report/${doc.uuid}?token=${tok}`)).json().status === 'done');
 
-  child = start();
-  await sleep(2500);
-  check('после рестарта незавершённый callback продолжает ретраиться (A-2)', hits.fail > hitsBefore);
-  child.kill('SIGKILL');
-  await sleep(300);
+    await waitForCondition(async () => {
+      const exported = (await api('GET', '/mock/state')).json();
+      const stateSlice = (exported && exported.state) || exported || {};
+      const callback = Object.values(stateSlice.callbacks || {})[0];
+      return hits.fail >= 1 && callback && callback.lastStatus ? callback : null;
+    }, { timeoutMs: 8000, description: 'first failed callback attempt recorded' });
+    const hitsBefore = hits.fail;
+    check('незавершённый callback ретраится до рестарта', hitsBefore >= 1);
+    await stopChild(child);
 
-  // Токен с истёкшим TTL: подкладываем в state-файл просроченную сессию
-  const st = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-  st.tokens = { ...(st.tokens || {}), expiredtoken: { login: 'loviitest', createdAt: Date.now() - 13 * 60 * 60 * 1000 } };
-  fs.writeFileSync(stateFile, JSON.stringify(st));
-  child = start();
-  await sleep(900);
-  const expired = (await api('GET', '/possystem/v1/Main/report/00000000-0000-0000-0000-000000000000?token=expiredtoken')).json();
-  check('токен с истёкшим TTL -> ошибка 11 (A-11)', expired.error && expired.error.code === 11);
+    child = await start();
+    await waitForCondition(() => hits.fail > hitsBefore, {
+      timeoutMs: 8000,
+      description: 'pending callback retry after process restart',
+    });
+    check('после рестарта незавершённый callback продолжает ретраиться (A-2)', hits.fail > hitsBefore);
+    await stopChild(child);
+    child = null;
 
-  child.kill('SIGKILL');
-  fs.rmSync(stateFile, { force: true });
-  catcher.close();
-}
-
-/** Свободный порт для параллельных прогонов selftest. */
-function freePort() {
-  return new Promise((resolve) => {
-    const srv = require('net').createServer();
-    srv.listen(0, '127.0.0.1', () => { const port = srv.address().port; srv.close(() => resolve(port)); });
-  });
+    // Токен с истёкшим TTL: подкладываем в state-файл просроченную сессию.
+    const savedState = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    savedState.tokens = { ...(savedState.tokens || {}), expiredtoken: { login: 'loviitest', createdAt: Date.now() - 13 * 60 * 60 * 1000 } };
+    fs.writeFileSync(stateFile, JSON.stringify(savedState));
+    child = await start();
+    const expired = (await api('GET', '/possystem/v1/Main/report/00000000-0000-0000-0000-000000000000?token=expiredtoken')).json();
+    check('токен с истёкшим TTL -> ошибка 11 (A-11)', expired.error && expired.error.code === 11);
+  } finally {
+    await stopChild(child);
+    fs.rmSync(stateFile, { force: true });
+    fs.rmSync(`${stateFile}.sandboxes.json`, { force: true });
+    await new Promise((resolve) => catcher.close(resolve));
+  }
 }
 
 /** Запрос на произвольный порт (для фазы рестарта). */
@@ -889,7 +1006,7 @@ function requestOn(port, method, url, body = null, headers = {}) {
     }, (res) => {
       let buf = '';
       res.on('data', (c) => { buf += c; });
-      res.on('end', () => resolve({ status: res.statusCode, text: buf, json: () => { try { return JSON.parse(buf); } catch { return null; } } }));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, text: buf, json: () => { try { return JSON.parse(buf); } catch { return null; } } }));
     });
     req.on('error', reject);
     req.on('timeout', () => req.destroy(new Error('timeout')));
@@ -898,30 +1015,32 @@ function requestOn(port, method, url, body = null, headers = {}) {
   });
 }
 
-// Ловушка callback'ов мока (эмулирует ядро)
+// Ловушка callback'ов мока (эмулирует ядро); слушает отдельный ephemeral-порт.
 const catcher = http.createServer((req, res) => {
   global.__callbackHits = (global.__callbackHits || 0) + 1;
   res.writeHead(200); res.end('{"data":{"status":"confirmed"}}');
 });
-catcher.listen(PORT + 1);
 
-const proc = spawn('node', [path.join(__dirname, 'server.js')], {
-  env: { ...process.env, MOCK_PORT: String(PORT), MOCK_PROCESS_MS: '500', MOCK_CALLBACK_RETRY_MS: '1000' },
-  stdio: ['ignore', 'pipe', 'pipe'],
-});
-proc.stdout.on('data', (d) => SERVER_LOG.push(String(d)));
-proc.stderr.on('data', (d) => process.stderr.write(d));
-
-setTimeout(async () => {
-  let code = 0;
+async function runSelftest() {
+  let child = null;
+  let code = 1;
   try {
+    CALLBACK_PORT = await new Promise((resolve, reject) => {
+      catcher.once('error', reject);
+      catcher.listen(0, '127.0.0.1', () => resolve(catcher.address().port));
+    });
+    child = await startKassaChild({ MOCK_PROCESS_MS: '500', MOCK_CALLBACK_RETRY_MS: '1000' });
+    PORT = child.port;
+    BASE = `http://127.0.0.1:${PORT}`;
     code = await main();
-  } catch (e) {
-    console.error('selftest crashed:', e);
+  } catch (error) {
+    console.error('selftest crashed:', error);
     code = 1;
   } finally {
-    try { proc.kill('SIGKILL'); } catch { /* ignore */ }
-    try { catcher.close(); } catch { /* ignore */ }
+    await stopChild(child);
+    if (catcher.listening) await new Promise((resolve) => catcher.close(resolve));
   }
-  process.exit(code);
-}, 800);
+  process.exitCode = code;
+}
+
+runSelftest();

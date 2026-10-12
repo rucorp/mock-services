@@ -1,16 +1,18 @@
 © 2026 ООО «Аксиома» ИНН:7842223709 · https://github.com/rucorp/mock-services · все права защищены
 Документ проекта mock-services (оригинал: rucorp/mock-services).
 
-# tbank-mock — мок-стенд Т-Банк Мультирасчеты (волна 1)
+# tbank-mock — мок-стенд Т-Банк: эквайринг, Мультирасчёты и E2C
 
-Локальный «банк» вместо тестового контура Т-Банка: тот же HTTP-контракт
-(`/v2/*`), та же Token-подпись, платёжная форма с тестовыми картами, подписанные
-http-нотификации с банковскими ретраями, книга сделок (SpAccumulation) и
-админ-консоль. Исследовательская база и выбор методов —
-`docs/reference/lovii/RES-007-tbank-multisplit-mock-stand.md`, публичные
+Локальный тестовый банк с HTTP-контрактами `/v2/*`, E2C-выплатами, проверкой
+счёта, рекуррентными платежами, СБП/QR, партнёрской регистрацией, Token-подписью,
+платёжной формой, подписанными нотификациями и админ-консолью. Профиль
+`plain` (по умолчанию) моделирует обычный эквайринг; `multisplit` добавляет
+обязательные поля и балансовые правила Мультирасчётов. Исследовательская база —
+`docs/reference/lovii/RES-007-tbank-multisplit-mock-stand.md`; публичные
 конспекты — `docs/reference/tbank/*`.
 
-Zero npm dependencies — чистый Node (>= 18), один файл `server.js`.
+Node.js >= 18; внешние npm-зависимости не нужны. Сервер использует общий модуль
+`packages/core` для HTTP, персистентности, sandbox и защитных helpers.
 
 ## Зачем
 
@@ -27,7 +29,7 @@ docker compose up -d tbank-mock          # порт 3100
 MOCK_TERMINAL_KEY=TBANKMOCKTEST MOCK_TERMINAL_PASSWORD=mockpass123 node services/tbank-mock/server.js
 ```
 
-Самотест (24 сценария: подписи, статусы, DX-ошибки, вебхук-ретраи, регрессы аудита):
+Самотест (48 сценариев: контракты эквайринга/Мультирасчётов/E2C, TerminalKey и CSRF, песочницы, подписи и webhook-ретраи; все процессы слушают ephemeral-порты):
 
 ```bash
 npm run test:tbank
@@ -51,24 +53,30 @@ TBANK_NOTIFICATION_URL=https://<домен ядра>/api/v1/payments/tbank/webho
 Внутрипроцессный `FakeTBankClient` (`PAYMENTS_FAKE=true`) остаётся для
 дешёвых локальных прогонов без HTTP.
 
-## API мока (волна 1)
+## API мока
 
-| Метод | Поведение |
+| Маршрут | Поведение |
 |---|---|
-| `POST /v2/Init` | создаёт сессию (+ сделку при `CreateDealWithType=NN`); требует DealId/флаг сделки, как банк; повторный `OrderId` отклоняется (код 7), чужой `TerminalKey` — код 7 |
-| `POST /v2/Confirm` | только из `AUTHORIZED`, сумма ≤ авторизованной → `CONFIRMED`; иначе код 32 |
-| `POST /v2/Cancel` | переходы по таблице банка (`NEW→CANCELED`, `→REVERSED/PARTIAL_REVERSED`, `→REFUNDED/PARTIAL_REFUNDED`), идемпотентность по `ExternalRequestId`; `Amount` больше доступной суммы → код 7 |
-| `POST /v2/GetState` | текущий статус/сумма; принимает `PaymentId` **или** `OrderId` |
-| `POST /v2/CheckOrder` | все попытки по `OrderId` (+ `RRN`) |
-| `POST /v2/Chargeback` · `POST /v2/Dispute` | машина состояний чарджбэка: `DISPUTED` (`CHARGEBACK` / `PARTIAL_CHARGEBACK`) → `REPRESENTMENT` → `ARBITRATION` (`ARB`) → `WON` / `LOST` + подписанные вебхуки |
-| `GET /v2/Dispute/{id}` | карточка спора и история переходов |
-| `GET /payment/{id}` | платёжная форма: тестовые карты-пресеты, ввод карты, «отклонить покупателем» |
-| `POST /payment/{id}/pay` · `/otp` | сценарий по PAN (см. ниже), challenge → OTP `1qwezxc`, 3 неверных → отказ |
-| `GET /mock/time` · `POST/PUT /mock/time` | виртуальные часы (`{"advance":"7d"}`, `{"advance":"60d"}`, `{"reset":true}`) |
-| `GET /mock/scenarios` · `POST/DELETE /mock/scenarios` | сценарное API и журнал срабатываний; заголовок `X-Mock-Scenario: chargeback-after:7d, partial-refund:30%, webhook-drop, webhook-duplicate` |
-| `GET /admin` | консоль: платежи/споры/сделки/нотификации/поступления/верификации, журнал запросов, кнопки сценариев (опц. защита `MOCK_ADMIN_TOKEN`) |
-| `GET /admin/journal` | JSON-журнал последних API-запросов (метод, путь, поля, код, время); секреты, PAN и PII редактируются — `[REDACTED]`/маска, заголовки только из allowlist (`Content-Type`, `X-Mock-*`) |
-| `GET /health` | health-check |
+| `POST /v2/Init` | создаёт платёж; профиль `plain` допускает обычный эквайринг без сделки, `multisplit` валидирует `DealId`/`CreateDealWithType` и `PaymentRecipientId`; повторный `OrderId` отклоняется, если явно не разрешён |
+| `POST /v2/Confirm`, `Cancel`, `GetState`, `CheckOrder` | подтверждение, отмена/возврат, поиск по `PaymentId` или `OrderId`, история попыток по заказу |
+| `POST /v2/Chargeback`, `Dispute`; `GET /v2/Dispute/{id}` | dispute/chargeback transitions (`DISPUTED` → `REPRESENTMENT` → `ARBITRATION` → `WON`/`LOST`) с подписанными нотификациями |
+| `POST /v2/createSpDeal`, `closeSpDeal` | создание/закрытие сделки Мультирасчётов (также поддерживаются имена `CreateSpDeal`/`CloseSpDeal`) |
+| `POST /e2c/v2/Init`, `Payment`, `GetState`, `CancelPayment`, `GetSbpMembers` | payout по карте, СБП или партнёру; баланс сделки, `FinalPayout`, отмена партнёрской выплаты и список участников СБП. Все запросы подписываются и проверяют допустимый `TerminalKey` |
+| `POST /v2/GetQr`; `POST /payment/{id}/sbp-pay` | QR СБП и тестовая оплата через СБП |
+| `POST /v2/Charge`, `AddCustomer`, `GetCustomer`, `RemoveCustomer`, `AddCard`, `GetCardList`, `RemoveCard` | рекуррентные платежи и управление тестовыми картами покупателя |
+| `POST /v2/SendClosingReceipt` | тестовый закрывающий чек |
+| `POST /av/v1/payment`, `/av/v1/verification` | account verification: «прогон рубля» и проверка счёта |
+| `POST /oauth/token`, `/sm-register/register*` | тестовая OAuth-регистрация партнёра/магазина для E2C partner payouts |
+| `GET /payment/{id}`; `POST /payment/{id}/pay`, `/otp`, `/done`, `/reject` | HTML-форма и тестовые сценарии карт; challenge использует OTP `1qwezxc` |
+| `GET /mock/time`; `POST/PUT /mock/time`; `GET /mock/scenarios`; `POST/DELETE /mock/scenarios` | виртуальные часы, сценарные правила и история срабатываний; для разового запроса — `X-Mock-Scenario` |
+| `GET /admin` | консоль платежей, споров, сделок, уведомлений, поступлений и верификаций; действия форм защищены подписанным CSRF-токеном и same-origin проверкой |
+| `GET /admin/journal`, `GET /openapi.json`, `GET /health` | журнал API с редактированием секретов/PII, OpenAPI 3.1 и health-check |
+
+Терминал проверяется вместе с подписью во всех payout-операциях, включая
+`Payment`, `GetState`, `GetSbpMembers` и `CancelPayment`; неверный или отсутствующий
+`TerminalKey` возвращает provider-shaped ошибку до поиска/изменения выплаты.
+`MOCK_ADMIN_TOKEN` ограничивает консоль, а native POST-формы передают CSRF-токен
+и сохраняют query-token админки и owner-token `owned`-песочницы при отправке/redirect.
 
 Нотификации: подписанный POST (Token покрывает `SpAccumulationId`) на
 `NotificationURL` из Init; ответ должен быть ровно `OK`, иначе ретраи
@@ -92,9 +100,9 @@ POST «в полёте» (ретраи не накладываются), дос�
 
 | Режим | Включается | Поведение |
 |---|---|---|
-| `namespaces` | дефолт self-hosted | `X-Mock-Sandbox` создаёт изолированное пространство имён для параллельных CI-воркеров; креды и управляющие токены — общие |
-| `owned` | `MOCK_TENANCY=1` или `MOCK_HOSTED=1` | hosted tenancy: у каждой песочницы свои креды и owner-token (показывается один раз); знание id без owner-token доступа не даёт (401), неизвестный id — 404, истёкший — 410 |
-| `off` | `MOCK_TENANCY=0` | одна общая песочница `default`; селектор игнорируется |
+| `namespaces` | дефолт self-hosted; `MOCK_TENANCY=namespaces` | `X-Mock-Sandbox` создаёт изолированное пространство имён для параллельных CI-воркеров; креды и управляющие токены — общие |
+| `owned` | `MOCK_HOSTED=1` по умолчанию; `MOCK_TENANCY=owned` (legacy `1`/`on`/`true`/`yes`) | у каждой песочницы свои креды и owner-token (показывается один раз); знание id без owner-token доступа не даёт (401), неизвестный id — 404, истёкший — 410 |
+| `off` | `MOCK_TENANCY=off` (legacy `0`/`false`/`no`) | одна общая песочница `default`; селектор игнорируется |
 
 API (в `owned` — с owner-token; в `namespaces` те же маршруты управляют
 пространствами имён без owner-token):
@@ -130,6 +138,7 @@ Owner-token принимается в `Authorization: Bearer`, `X-Sandbox-Token`
 | Переменная | По умолчанию | Что делает |
 |---|---|---|
 | `MOCK_PORT` / `MOCK_HOST` | `3100` / `0.0.0.0` | прослушивание |
+| `MOCK_PROFILE` | `plain` | `plain` — обычный эквайринг; `multisplit` — требования Мультирасчётов и валидация сделок |
 | `MOCK_TERMINAL_KEY` / `MOCK_TERMINAL_PASSWORD` | `TBANK_TERMINAL_*` из env ядра, иначе `TBANKMOCKTEST`/`mockpass123` | ключи терминала мока |
 | `MOCK_PUBLIC_BASE_URL` | `http://localhost:3100` | база для `PaymentURL` (виден покупателю!) |
 | `MOCK_DEFAULT_NOTIFICATION_URL` | — | куда слать нотификации, если Init без `NotificationURL` |
@@ -138,9 +147,9 @@ Owner-token принимается в `Authorization: Bearer`, `X-Sandbox-Token`
 | `MOCK_ALLOW_DUPLICATE_ORDER_ID` | `false` | разрешить повторный Init с тем же OrderId (по умолчанию — ошибка 7, как в банке) |
 | `MOCK_BLOCK_PRIVATE_WEBHOOKS` | `false` (в `MOCK_HOSTED=1` — `true`) | не отправлять нотификации на приватные адреса и имена, которые в них резолвятся (`1`/`true`; `0`/`false` выключает явно) |
 | `MOCK_OPERATOR_TOKEN` | — | токен управляющей поверхности: `/mock/*` и `GET /v2/Dispute/{id}` (fallback — `MOCK_ADMIN_TOKEN`) |
-| `MOCK_ADMIN_TOKEN` | — | токен админки `/admin*` |
+| `MOCK_ADMIN_TOKEN` | — | токен админки `/admin*`; query-токен из страницы сохраняется в action URL, POST дополнительно требует CSRF-токен и same-origin |
 | `MOCK_HOSTED` | `false` | hosted-режим: управляющая поверхность fail-closed без токена, SSRF-политика по умолчанию |
-| `MOCK_TENANCY` | `owned` при `MOCK_HOSTED=1`, иначе `namespaces` | режим аренды: `1`/`on` — hosted tenancy с owner-token, `0`/`off` — одна общая песочница (селектор игнорируется) |
+| `MOCK_TENANCY` | `owned` при `MOCK_HOSTED=1`, иначе `namespaces` | `owned`/`namespaces`/`off`; legacy `1`/`on`/`true`/`yes` → `owned`, `0`/`false`/`no` → `off`; неизвестное непустое значение пишет WARN и безопасно возвращается к default |
 | `MOCK_SANDBOX_TOKEN` | — | owner-token default-песочницы в hosted; без него `default` открыт (при старте пишется предупреждение) |
 | `MOCK_SANDBOX_TTL_MS` | 24 ч в hosted, иначе 0 (бессрочно) | TTL именованной песочницы; истёкшие удаляет sweep-воркер |
 | `MOCK_SANDBOX_MAX` | `100` в hosted, иначе `256` | максимум именованных песочниц |
@@ -153,20 +162,16 @@ Owner-token принимается в `Authorization: Bearer`, `X-Sandbox-Token`
 | `MOCK_AUTO_CONFIRM_MS` | `0` (выкл.) | авто-подтверждение холда через N мс (банк делает это через 4/7 дней) |
 | `MOCK_STATE_FILE` | — | файл персистентности (JSON); без него состояние в памяти |
 
-## Ограничения (осознанные)
+## Границы симуляции
 
-- Волна 2 (`/e2c/v2/*` выплаты) и волна 3 (`createSpDeal`/`closeSpDeal`,
-  рекуррент, СБП) реализованы частично: маршруты `/e2c/v2/{Init,Payment,GetState}`
-  есть, но баланс сделки не валидируется, `CancelPayment`/`GetSbpMembers`/
-  `FinalPayout` отсутствуют; рекуррент и СБП не эмулируются — см. RES-007 §8.
-- Receipt/54-ФЗ в запросах банка не эмулируются и не валидируются; `DATA`
-  передаётся сквозь.
-- `FinishAuthorize` (схема PCI DSS без формы банка) не реализован — доступен
-  только путь «форма банка».
-- Default `PayType` — как у банка (`T`, двухстадийный), но обычный эквайринг без
-  сделки (`DealId`/`CreateDealWithType` не переданы) текущая версия **требует**
-  профиль Мультирасчетов — см. аудит §4.2 (P0).
-- Состояние в памяти (опционально — JSON-файл): рестарт без `MOCK_STATE_FILE`
-  сбрасывает сессии.
-- Мок должен быть недоступен из интернета без защиты (`SECURITY.md`); в
-  production-контуре не включается (`TBANK_API_URL` боевой по умолчанию).
+- Это локальный mock server, а не тестовый/боевой контур банка: платежи,
+  выплаты, СБП и account verification имеют только синтетическое состояние;
+  реальные карты, ключи и персональные данные использовать нельзя.
+- Поддерживаются только маршруты и конечные автоматы, перечисленные выше.
+  Не реализованные методы возвращают provider-shaped ошибку «501»; наличие
+  тестового ответа не означает сертификацию или полную эквивалентность API банка.
+- Список SBP-участников и карточные сценарии статические. Состояние хранится
+  в памяти, если не задан `MOCK_STATE_FILE`; никакие операции не проводят
+  реальные денежные средства.
+- Перед изменением production-интеграции сверяйте поля и статусы с актуальной
+  документацией Т-Банка и согласованным профилем (`plain`/`multisplit`).
