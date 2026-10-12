@@ -67,7 +67,7 @@ jobs:
           jq -e 'any(.services["tbank-mock"].ports[]; .host_ip == "0.0.0.0" and .target == 3100) and any(.services["kassa-mock"].ports[]; .host_ip == "0.0.0.0" and .target == 3101)' /tmp/mock-compose-network.json
       - name: Сборка образа
         run: docker build -t mock-services:local .
-      - name: Image smoke (F-35/F-36): непривилегированный запуск, healthcheck tbank+kassa, persist/restore при --read-only
+      - name: "Image smoke (F-35/F-36): непривилегированный запуск, healthcheck tbank+kassa, persist/restore при --read-only"
         run: MOCK_SMOKE_IMAGE=mock-services:local MOCK_SMOKE_SKIP_BUILD=1 node scripts/docker-smoke.js
       - name: Запуск compose-стенда и ожидание healthcheck
         run: |
