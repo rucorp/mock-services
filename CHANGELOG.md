@@ -110,6 +110,17 @@
   - env песочниц (`MOCK_TENANCY`, `MOCK_SANDBOX_TOKEN`, TTL/лимиты) прокинуты в
     `docker-compose.include.yml`, копирайт-шапки §3 добавлены в тронутые `*.md`.
   - новые маршруты описаны в OpenAPI 3.1 и манифестах протоколов (дрейф 142/142).
+- **Остаток minor-аудита #37: DX-проверки и docker-инструменты (F-35/F-38).**
+  - `npm run check:links` — относительные ссылки markdown-документации обязаны
+    разрешаться в существующие файлы (входит в `npm test` и CI);
+  - `npm run test:docker` (`scripts/docker-smoke.js`) — image smoke: tbank-mock и
+    kassa-mock становятся `healthy` со стандартным HEALTHCHECK образа (в т.ч. без
+    переменных окружения), процессы идут от UID 10001, persist/restore переживает
+    `--read-only` rootfs с volume `/data`;
+  - `scripts/docker-healthcheck.js` — healthcheck образа сам перебирает известные
+    пары сервисов (`3100/health`, `3101/healthz`, `3102/health`, `3103/health`);
+  - канонический каталог документации адаптера зафиксирован как
+    `docs/reference/<provider>/` — с примером шаблона в CONTRIBUTING.md.
 
 ### Fixed
 - **Протокольная точность Мультирасчётов: Init recipient и CancelPayment (#25, F-16—F-23).**
@@ -117,6 +128,21 @@
   - `/e2c/v2/Init` валидирует общие поля (`OrderId`, `Amount`, `DealId`, `PaymentRecipientId`), ровно один канал выплаты (карта / СБП `Phone`+`SbpMemberId` / партнёр `PartnerId`) и сохраняет нормализованный канал; неполная выплата в state не попадает.
   - `/e2c/v2/CancelPayment` отменяет только `CONFIRMED`-выплату партнёру в открытой сделке, требует `DealId` и сверяет его с выплатой, проверяет `TerminalKey` до поиска; статусы `CREDIT_CANCELING` → `CREDIT_CANCELED`; при отказе выплата не меняется.
 - **Остаток major-аудита #36 (F-05/F-06/F-24/F-26/F-27/F-34).** Виртуальные часы валидируют диапазон `Date` до записи state; chaos `http-500/http-504` согласован с core в T-Bank и Ferma и покрыт black-box selftest; денежные поля T-Bank разбираются строгим parser без prefix/trailing junk и дробей; acqapi проверяет Basic credentials, opaque Bearer с TTL и auth на POST/GET/PATCH; регистрация требует документированную схему и маппит `shopArticleId` в `shopCode`; root compose по умолчанию bind-ится на loopback с явным per-service override.
+- **Minor-аудит #37 (F-25/F-28/F-29/F-30).**
+  - `RedirectDueDate` в Init проверяет обе границы документированного диапазона
+    «1 минута … 90 дней» (включительно): истёкшая дата и срок короче минуты
+    отклоняются кодом 7, ISO-parsing сохранён (F-25);
+  - multibyte `Token` той же JS-длины, что и digest, больше не роняет маршрут в
+    общий `5000`: сравнение подписи идёт по байтовым длинам, любая ошибка формата
+    — это код 13 (F-28);
+  - нотификации Т-Банка уходят последовательно (`awaitSequential`): статусы одного
+    платежа не могут прийти не по порядку даже при медленном приёмнике, наложение
+    тиков доставки защищено в ядре, порядок и отсутствие повторов закреплены
+    тестами (F-29);
+  - денежные поля kassa-mock (`price`/`quantity`/`sum`/`total`/`pay.sum`) и
+    произведение `price × quantity` ограничены безопасными целыми
+    (`Number.isSafeInteger`, ≤ 2^53−1 копеек) — overflow отклоняется кодом 4 до
+    создания документа, включая dry-run `/validate` и возвраты (F-30).
 
 ### Security
 - **Редакция секретов в журналах и минимизация PAN (#24, F-09/F-10).** В ядро
@@ -145,6 +171,14 @@
   `/mock/verify-merchant`. Проверка усилена: приватные IPv4/IPv6-литералы,
   служебные имена и имена, которые резолвятся в приватные адреса, запрещены схемы
   кроме http/https; редиректы не отслеживаются.
+- **Docker-образ: непривилегированный запуск и воспроизводимость (#37, F-35—F-37).**
+  HEALTHCHECK согласован с обоими сервисами (kassa слушает `/healthz`) и без
+  переменных сам находит известные health-пути; контейнеры работают от
+  непривилегированного `mock:mock` (UID/GID 10001) с единственным записываемым
+  каталогом `/data` (named volume наследует права; persist/restore проверен при
+  `--read-only` rootfs); базовый образ `node:22-alpine` и релизный
+  `ghcr.io/rucorp/mock-services:0.5.0` закреплены дайджестами — обновление
+  security patches идёт только контролируемым bump (процесс в CONTRIBUTING.md).
 
 ## [0.5.0] — 2026-10-11
 

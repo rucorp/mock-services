@@ -84,7 +84,8 @@ docs/
   rfc/                   — проектные решения (RFC-001: изоляция песочниц)
   canon/                 — внутренние спеки и карточки проектов (источник истины)
   integration/           — инструкции «интеграция за 10 минут» + миграция Lovii
-  reference/             — референсы для адаптеров (конспекты, снятые страницы доки)
+  reference/             — референсы и документация адаптеров: `docs/reference/<provider>/`
+                           (канонический каталог доки провайдера, см. CONTRIBUTING.md)
 .github/workflows/ci.yml — CI: selftest на Node 18/20/22 + compose-стенд + публикация GHCR
 Dockerfile               — образ для всех сервисов (выбор командой)
 docker-compose.include.yml — внешний compose-модуль (профиль mock) для интеграции в core
@@ -124,16 +125,18 @@ docker-compose.include.yml — внешний compose-модуль (профил
 ## Тестирование
 
 ```bash
-npm test              # всё (core + tbank + kassa + yookassa + atol + offline upstream selftest + check:drift)
-npm run test:core     # ядро (38 проверок): restore/очередь/каталог ошибок/часы/сценарии/песочницы RFC-001/экзаменатор/access-control/SSRF/tenancy/CSRF
+npm test              # всё (core + tbank + kassa + yookassa + atol + offline upstream selftest + check:links + check:drift)
+npm run test:core     # ядро (41 проверка): restore/очередь/каталог ошибок/часы/сценарии/песочницы RFC-001/экзаменатор/access-control/SSRF/tenancy/CSRF
 npm run test:tbank    # 48 сценариев контракта Т-Банка (вкл. E2C TerminalKey, CSRF, чарджбэки, СБП, рекурренты, изоляцию песочниц)
-npm run test:kassa    # 129 проверок Ferma/54-ФЗ (вкл. tenancy, CSRF, owner-token admin, ОФД/ФН, изоляцию песочниц)
+npm run test:kassa    # 141 проверка Ferma/54-ФЗ (вкл. tenancy, CSRF, owner-token admin, ОФД/ФН, изоляцию песочниц)
 npm run test:yookassa # 227 проверок ЮKassa /v3 (вкл. идемпотентность, карты/3DS, вебхуки ACK 200 + ретраи/дубли, сценарии, /mock/time, рестарт, control-plane)
 npm run test:atol     # 202 проверки АТОЛ Онлайн v4 (вкл. дедуп external_id, callback/ретраи/дубли, реквизиты ФФД 1.05, истечение токена 24 ч, песочницы, рестарт)
+npm run check:links   # относительные ссылки markdown-документации разрешаются (docs/providers упразднён — канон docs/reference)
 npm run check:drift   # 221 инвариант: сверка protocols/*.json <-> server.js <-> OpenAPI 3.1 <-> docs/reference
 npm run test:upstream  # офлайн selftest синхронизатора snapshot
 npm --silent run check:upstream -- --json # JSON-отчёт; без --silent npm печатает служебный баннер
 npm run check:upstream -- --update # явное обновление snapshot после просмотра
+npm run test:docker  # image smoke (нужен docker): tbank-mock и kassa-mock становятся healthy, непривилегированный UID, persist/restore при --read-only rootfs
 npm run test:compose  # black-box selftest против контейнеров compose (:3100, :3101, :3102, :3103)
 ```
 

@@ -34,6 +34,8 @@ jobs:
         run: npm run test:atol
       - name: офлайн selftest синхронизатора upstream snapshot
         run: npm run test:upstream
+      - name: проверка относительных ссылок документации
+        run: npm run check:links
       - name: детектор дрейфа протоколов и OpenAPI 3.1
         run: npm run check:drift
 
@@ -65,6 +67,8 @@ jobs:
           jq -e 'any(.services["tbank-mock"].ports[]; .host_ip == "0.0.0.0" and .target == 3100) and any(.services["kassa-mock"].ports[]; .host_ip == "0.0.0.0" and .target == 3101)' /tmp/mock-compose-network.json
       - name: Сборка образа
         run: docker build -t mock-services:local .
+      - name: Image smoke (F-35/F-36): непривилегированный запуск, healthcheck tbank+kassa, persist/restore при --read-only
+        run: MOCK_SMOKE_IMAGE=mock-services:local MOCK_SMOKE_SKIP_BUILD=1 node scripts/docker-smoke.js
       - name: Запуск compose-стенда и ожидание healthcheck
         run: |
           docker compose up -d

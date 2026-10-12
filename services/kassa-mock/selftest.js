@@ -178,6 +178,79 @@ async function main() {
   r = await request('GET', `/receipts/${xss.uuid}`);
   check('чек покупателя экранирует HTML из данных интегратора', r.status === 200 && !r.text.includes('<img src=x onc=alert(1)>') && r.text.includes('&lt;img'));
 
+  // 10f. F-30: денежные поля и произведение price × quantity — только безопасные
+  // целые (≤ 2^53−1 копеек); overflow отклоняется до создания документа.
+  {
+    const UNSAFE = 2 ** 53; // 9007199254740992 — первый не-safe integer
+    const minimal = (extId, over) => ({
+      external_id: extId,
+      receipt: {
+        client: { email: 'a@b.c' },
+        items: [{ name: 'X', price: 100, quantity: 1, sum: 100, vat: { type: 'none' } }],
+        payments: [{ type: 1, sum: 100 }],
+        total: 100,
+        ...over,
+      },
+    });
+
+    // price за границей safe integer -> код 4 на items[0].price
+    const bigPrice = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, minimal('unsafe-price', {
+      items: [{ name: 'X', price: UNSAFE, quantity: 1, sum: UNSAFE, vat: { type: 'none' } }],
+      payments: [{ type: 1, sum: UNSAFE }],
+      total: UNSAFE,
+    }))).json();
+    check('F-30: price за пределами safe integer -> код 4', bigPrice.error && bigPrice.error.code === 4 && bigPrice.error.field === 'receipt.items[0].price');
+
+    // произведение price × quantity переполняет safe integer (sum подан
+    // безопасным — срабатывает именно проверка произведения)
+    const overflow = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, minimal('unsafe-product', {
+      items: [{ name: 'X', price: 4000000000000000, quantity: 3, sum: 4000000000000000, vat: { type: 'none' } }],
+      payments: [{ type: 1, sum: 4000000000000000 }],
+      total: 4000000000000000,
+    }))).json();
+    check('F-30: price × quantity вне safe integer -> код 4', overflow.error && overflow.error.code === 4 && overflow.error.field === 'receipt.items[0].sum');
+
+    // итог за границей safe integer -> код 4 на receipt.total
+    const bigTotal = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, minimal('unsafe-total', {
+      payments: [{ type: 1, sum: UNSAFE }],
+      total: UNSAFE,
+    }))).json();
+    check('F-30: total за пределами safe integer -> код 4', bigTotal.error && bigTotal.error.code === 4 && bigTotal.error.field === 'receipt.total');
+
+    // Σ оплат переполняет безопасный диапазон -> код 4 на payments[1].sum
+    const payOverflow = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, minimal('unsafe-pay-sum', {
+      items: [{ name: 'X', price: 5000000000000000, quantity: 1, sum: 5000000000000000, vat: { type: 'none' } }],
+      payments: [{ type: 1, sum: 5000000000000000 }, { type: 1, sum: 5000000000000000 }],
+      total: 5000000000000000,
+    }))).json();
+    check('F-30: Σ оплат вне safe integer -> код 4', payOverflow.error && payOverflow.error.code === 4 && payOverflow.error.field === 'receipt.payments[1].sum');
+
+    // dry-run /validate ловит те же границы без создания документа
+    const dryUnsafe = (await request('POST', '/possystem/v1/validate', minimal('unsafe-dry', {
+      payments: [{ type: 1, sum: UNSAFE }],
+      total: UNSAFE,
+    }))).json();
+    check('F-30: /validate отклоняет суммы вне safe integer', dryUnsafe.valid === false && dryUnsafe.error && dryUnsafe.error.code === 4);
+
+    // отказ overflow происходит до изменения state: external_id не занят —
+    // повторный sell с тем же external_id и валидными суммами проходит
+    const retry = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, minimal('unsafe-price', {
+      receipts: { service: { callback_url: `http://127.0.0.1:${CALLBACK_PORT}/fake-core-callback` } },
+    }))).json();
+    check('F-30: отклонённый sell не занимает external_id (state не менялся)', Boolean(retry.uuid) && retry.status === 'wait');
+    await waitForReport(retry.uuid, token, 'done');
+
+    // возврат: сумма вне safe integer -> код 4 до изменения остатка
+    const refundUnsafe = (await request('POST', `/possystem/v1/Main/sell_refund?token=${token}`, {
+      ...minimal('unsafe-refund', {
+        payments: [{ type: 1, sum: UNSAFE }],
+        total: UNSAFE,
+      }),
+      origin_external_id: 'unsafe-price',
+    })).json();
+    check('F-30: sell_refund с суммой вне safe integer -> код 4', refundUnsafe.error && refundUnsafe.error.code === 4 && refundUnsafe.error.field === 'receipt.total');
+  }
+
   // 10f. Лента чека: НДС считается по позициям (ставка из vat.type)
   const vatDoc = (await request('POST', `/possystem/v1/Main/sell?token=${token}`, { ...sellBody, external_id: 'vat-1', receipt: { ...sellBody.receipt, items: [{ ...sellBody.receipt.items[0], vat: { type: 'vat20' }, sum: sellBody.receipt.items[0].sum }] } })).json();
   await waitForReport(vatDoc.uuid, token, 'done');

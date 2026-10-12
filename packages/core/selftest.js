@@ -570,6 +570,12 @@ async function main() {
     assert.strictEqual(core.checkControlAccess(req({ authorization: 'Bearer adm-secret' }), { ...opts, surface: 'admin' }).allowed, true);
     // Пустой токен при заданном секрете не проходит
     assert.strictEqual(core.checkControlAccess(req({ authorization: 'Bearer ' }), opts).allowed, false);
+    // F-28: multibyte-токен той же JS-длины, что и секрет, — сравнение идёт по
+    // байтам и не бросает RangeError в timingSafeEqual
+    const multiToken = '⚡'.repeat('op-secret'.length);
+    assert.strictEqual(multiToken.length, 'op-secret'.length);
+    assert.notStrictEqual(Buffer.byteLength(multiToken), 'op-secret'.length);
+    assert.strictEqual(core.checkControlAccess(req({ authorization: `Bearer ${multiToken}` }), opts).allowed, false);
   });
 
   check('createJournal формирует curl, shell-экранирует динамику и скрывает query-токены (F-04)', () => {
@@ -888,6 +894,54 @@ async function main() {
     current = second;
     await queue.tick();
     assert.deepStrictEqual(hits.sort(), ['first', 'second']);
+    srv.close();
+  });
+
+  await acheck('createDeliveryQueue: awaitSequential — порядок без повторов при медленном первом вебхуке (F-29)', async () => {
+    // Приёмник задерживает ОТВЕТ на первую запись дольше, чем любой интервал
+    // тиков: вторая запись не должна начать уходить, пока первая «в полёте» —
+    // ни внутри тика, ни при наложении следующего тика.
+    const events = [];
+    let concurrent = 0;
+    let maxConcurrent = 0;
+    const srv = http.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      req.on('end', () => {
+        const { mark } = JSON.parse(raw || '{}');
+        concurrent += 1;
+        maxConcurrent = Math.max(maxConcurrent, concurrent);
+        events.push(`${mark}:arrive`);
+        setTimeout(() => {
+          concurrent -= 1;
+          events.push(`${mark}:respond`);
+          res.writeHead(200);
+          res.end('OK');
+        }, mark === 'first' ? 250 : 0);
+      });
+    });
+    const port = await listen(srv);
+    const entries = {
+      n1: { id: 'n1', url: `http://127.0.0.1:${port}/hook`, payload: { mark: 'first' }, attempts: 0, nextAttemptAt: 0 },
+      n2: { id: 'n2', url: `http://127.0.0.1:${port}/hook`, payload: { mark: 'second' }, attempts: 0, nextAttemptAt: 0 },
+    };
+    const queue = core.createDeliveryQueue({
+      entries,
+      retryMs: 1000,
+      maxAttempts: 3,
+      awaitSequential: true,
+      log: () => {},
+      request: (entry) => ({ url: entry.url, data: entry.payload }),
+      isOk: () => true,
+      prepare: (entry) => { entry.attempts += 1; },
+    });
+    // Наложившиеся тики не должны ни ускорить вторую запись, ни продублировать первую
+    await Promise.all([queue.tick(), queue.tick(), queue.tick()]);
+    assert.deepStrictEqual(events, ['first:arrive', 'first:respond', 'second:arrive', 'second:respond'], 'вторая запись ждёт завершения первой, порядок сохраняется');
+    assert.strictEqual(maxConcurrent, 1, 'параллельных POST быть не должно');
+    assert.strictEqual(entries.n1.attempts, 1, 'первая запись отправлена ровно один раз');
+    assert.strictEqual(entries.n2.attempts, 1, 'вторая запись отправлена ровно один раз');
+    assert.strictEqual(entries.n1.done && entries.n2.done, true, 'обе записи завершены');
     srv.close();
   });
 

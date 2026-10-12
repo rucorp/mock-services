@@ -384,8 +384,12 @@ const PAYMENT_TYPES = [1, 2, 3, 4, 5]; // 1 безнал, 2 зачёт пред�
 
 const OPERATIONS = ['sell', 'sell_refund', 'sell_correction', 'buy', 'buy_refund', 'buy_correction'];
 
-const isInt = (v) => Number.isInteger(v);
-const isPosInt = (v) => Number.isInteger(v) && v > 0;
+// F-30: денежные поля — только безопасные целые (Number.isSafeInteger):
+// JSON-число за пределами 2^53−1 уже теряет копейки, и проверки равенства
+// «сходятся» на неточной арифметике. Те же границы действуют на quantity и
+// mark_quantity: их произведения с ценой входят в денежную арифметику чека.
+const isInt = (v) => Number.isSafeInteger(v);
+const isPosInt = (v) => Number.isSafeInteger(v) && v > 0;
 const isValidInn = (inn) => typeof inn === 'string' && /^(\d{10}|\d{12})$/.test(inn.trim());
 
 /** Извлечение кода маркировки из позиции (marking_code или nomenclature_code). */
@@ -444,10 +448,16 @@ function validateReceipt(receipt, operation = 'sell', body = {}) {
       return bad(`${at}.quantity`, `Количество — целое > 0 (получено ${JSON.stringify(it.quantity)}). Для дробного количества используйте меру измерения и целые минорные единицы.`);
     }
     if (!isInt(it.sum)) {
-      return bad(`${at}.sum`, 'Сумма позиции — целое число копеек (price × quantity).');
+      return bad(`${at}.sum`, `Сумма позиции — целое число копеек в безопасном диапазоне (|значение| ≤ 2^53−1), получено ${JSON.stringify(it.sum)} (price × quantity).`);
     }
-    if (it.sum !== it.price * it.quantity) {
-      return bad(`${at}.sum`, `Сумма позиции ${it.sum} ≠ price × quantity = ${it.price * it.quantity}. Касса ФНС отклонит такой чек.`);
+    // F-30: произведение price × quantity обязано быть безопасным целым — иначе
+    // сравнение с sum идёт по уже неточной арифметике JS.
+    const lineSum = it.price * it.quantity;
+    if (!Number.isSafeInteger(lineSum)) {
+      return bad(`${at}.sum`, `Произведение price × quantity = ${it.price * it.quantity} выходит за безопасный диапазон целых (≤ 2^53−1 копеек) — арифметика чека теряет точность. Уменьшите цену или количество.`);
+    }
+    if (it.sum !== lineSum) {
+      return bad(`${at}.sum`, `Сумма позиции ${it.sum} ≠ price × quantity = ${lineSum}. Касса ФНС отклонит такой чек.`);
     }
     if (!it.vat || !VAT_TYPES.includes(it.vat.type)) {
       return bad(`${at}.vat.type`, `Неизвестная ставка НДС ${JSON.stringify(it.vat && it.vat.type)}. Допустимо: ${VAT_TYPES.join(', ')}.`, '#vat');
@@ -492,9 +502,12 @@ function validateReceipt(receipt, operation = 'sell', body = {}) {
     }
 
     itemsSum += it.sum;
+    if (!Number.isSafeInteger(itemsSum)) {
+      return bad(`${at}.sum`, 'Σ позиций выходит за безопасный диапазон целых (≤ 2^53−1 копеек) — итог чека теряет точность.');
+    }
   }
 
-  if (!isPosInt(receipt.total)) return bad('receipt.total', 'Итог чека — целое число копеек > 0.');
+  if (!isPosInt(receipt.total)) return bad('receipt.total', `Итог чека — целое число копеек > 0 в безопасном диапазоне (≤ 2^53−1), получено ${JSON.stringify(receipt.total)}.`);
   if (receipt.total !== itemsSum) {
     return bad('receipt.total', `Итог ${receipt.total} ≠ сумме позиций ${itemsSum}. Проверьте арифметику до отправки — касса сверяет суммы сама.`);
   }
@@ -510,8 +523,11 @@ function validateReceipt(receipt, operation = 'sell', body = {}) {
     if (!PAYMENT_TYPES.includes(pay.type)) {
       return bad(`receipt.payments[${i}].type`, `Неизвестный признак формы оплаты ${JSON.stringify(pay.type)}. Допустимо: ${PAYMENT_TYPES.join(', ')} (1 — электронными, 2 — зачёт предоплаты/аванса, 3 — постоплата/кредит, 4 — иная/встречное предоставление, 5 — наличными).`);
     }
-    if (!isPosInt(pay.sum)) return bad(`receipt.payments[${i}].sum`, 'Сумма оплаты — целое число копеек > 0.');
+    if (!isPosInt(pay.sum)) return bad(`receipt.payments[${i}].sum`, `Сумма оплаты — целое число копеек > 0 (получено ${JSON.stringify(pay.sum)}).`);
     paymentsSum += pay.sum;
+    if (!Number.isSafeInteger(paymentsSum)) {
+      return bad(`receipt.payments[${i}].sum`, 'Σ оплат выходит за безопасный диапазон целых (≤ 2^53−1 копеек) — арифметика чека теряет точность.');
+    }
     if (pay.type === 2) prepaymentOffsetSum += pay.sum;
   }
   if (paymentsSum !== receipt.total) {
