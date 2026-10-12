@@ -842,36 +842,98 @@ const PRIVATE_NAME_RE = /^(localhost|.*\.localhost|.*\.local|.*\.internal|.*\.ho
 /**
  * Классификация IP-литерала: true — приватный/служебный, false — публичный,
  * null — это не IP-литерал (имя хоста).
+ *
+ * Адрес сначала приводится к каноническому виду (8 групп по 16 бит), и только
+ * потом классифицируется. Так IPv4-mapped и NAT64 не зависят от того, в какой
+ * форме пришёл литерал: dotted (`::ffff:127.0.0.1`), hex (`::ffff:7f00:1`, так
+ * WHATWG-парсер `new URL()` нормализует адрес в hostname) или 4-частная
+ * (`::ffff:0:7f00:1`). См. SSRF-обход аудита (AUDIT-PREP §2.1, issue #45).
  */
 function isPrivateAddress(ip) {
   let addr = String(ip === undefined || ip === null ? '' : ip).trim().toLowerCase();
   if (!addr) return true;
   if (addr.startsWith('[') && addr.endsWith(']')) addr = addr.slice(1, -1);
   if (addr.includes('%')) addr = addr.split('%')[0]; // zone id: fe80::1%eth0
-  if (addr.startsWith('::ffff:')) addr = addr.slice(7); // IPv4-mapped IPv6
 
-  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(addr);
-  if (v4) {
-    const [a, b, c, d] = v4.slice(1).map(Number);
-    if ([a, b, c, d].some((n) => n > 255)) return true; // битый литерал — не рисковать
-    if (a === 0 || a === 10 || a === 127) return true;                       // this-net, private, loopback
-    if (a === 100 && b >= 64 && b <= 127) return true;                       // CGNAT 100.64/10
-    if (a === 169 && b === 254) return true;                                 // link-local (169.254.169.254 — метаданные облака)
-    if (a === 172 && b >= 16 && b <= 31) return true;                        // private 172.16/12
-    if (a === 192 && b === 168) return true;                                 // private
-    if (a === 192 && b === 0 && c === 0) return true;                        // IETF protocol assignments
-    if (a === 198 && (b === 18 || b === 19)) return true;                    // benchmarking 198.18/15
-    if (a >= 224) return true;                                               // multicast, reserved, broadcast
-    return false;
-  }
+  const v4 = parseDottedQuad(addr);
+  if (v4) return isPrivateIPv4(v4);
 
-  if (/^[0-9a-f:]+$/.test(addr)) {
-    if (addr === '::' || addr === '::1') return true;                        // unspecified, loopback
-    if (/^f[cd][0-9a-f]{0,2}:/.test(addr)) return true;                      // unique local fc00::/7
-    if (/^fe[89ab][0-9a-f]{0,2}:/.test(addr)) return true;                   // link-local fe80::/10
-    return false;
+  // Без двоеточия это имя хоста, даже если оно из hex-символов (dead, cafe, bee):
+  // иначе такое имя считалось бы публичным IPv6 и DNS-проверка пропускалась бы.
+  if (!addr.includes(':')) return null;
+  if (!/^[0-9a-f:.]+$/.test(addr)) return null;
+
+  const groups = parseIPv6Groups(addr);
+  if (!groups) return true; // битый IPv6-литерал — не рисковать
+  return isPrivateIPv6(groups);
+}
+
+/** `a.b.c.d` → [a, b, c, d] или null. */
+function parseDottedQuad(text) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+  return m ? m.slice(1).map(Number) : null;
+}
+
+/**
+ * Разбор IPv6-текста в 8 групп по 16 бит (RFC 4291 §2.2): поддерживаются `::`
+ * и встроенный dotted-хвост. Возвращает null, если текст не разбирается.
+ */
+function parseIPv6Groups(text) {
+  let s = text;
+  const tail = /^(.*:)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(s);
+  if (tail) {
+    const oct = parseDottedQuad(tail[2]);
+    if (!oct || oct.some((n) => n > 255)) return null;
+    s = `${tail[1]}${((oct[0] << 8) | oct[1]).toString(16)}:${((oct[2] << 8) | oct[3]).toString(16)}`;
   }
-  return null;
+  const halves = s.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  let words;
+  if (halves.length === 2) {
+    const rest = halves[1] ? halves[1].split(':') : [];
+    const fill = 8 - head.length - rest.length;
+    if (fill < 1) return null; // `::` обозначает минимум одну группу
+    words = [...head, ...new Array(fill).fill('0'), ...rest];
+  } else {
+    words = head;
+  }
+  if (words.length !== 8) return null;
+  const nums = words.map((w) => (/^[0-9a-f]{1,4}$/.test(w) ? parseInt(w, 16) : NaN));
+  return nums.some(Number.isNaN) ? null : nums;
+}
+
+/** IPv4 [a, b, c, d]: true — приватный/служебный диапазон. */
+function isPrivateIPv4([a, b, c, d]) {
+  if ([a, b, c, d].some((n) => n > 255)) return true; // битый литерал — не рисковать
+  if (a === 0 || a === 10 || a === 127) return true;                       // this-net, private, loopback
+  if (a === 100 && b >= 64 && b <= 127) return true;                       // CGNAT 100.64/10
+  if (a === 169 && b === 254) return true;                                 // link-local (169.254.169.254 — метаданные облака)
+  if (a === 172 && b >= 16 && b <= 31) return true;                        // private 172.16/12
+  if (a === 192 && b === 168) return true;                                 // private
+  if (a === 192 && b === 0 && c === 0) return true;                        // IETF protocol assignments
+  if (a === 198 && (b === 18 || b === 19)) return true;                    // benchmarking 198.18/15
+  if (a >= 224) return true;                                               // multicast, reserved, broadcast
+  return false;
+}
+
+/** IPv6 из 8 групп: true — приватный/служебный адрес или диапазон с приватным IPv4. */
+function isPrivateIPv6(g) {
+  const [g0, g1, g2, g3, g4, g5, g6, g7] = g;
+  const embedded = [g6 >> 8, g6 & 0xff, g7 >> 8, g7 & 0xff]; // IPv4 в последних 32 битах
+  const zeroFirst = (n) => g.slice(0, n).every((x) => x === 0);
+
+  if (zeroFirst(7) && (g7 === 0 || g7 === 1)) return true;                 // :: unspecified, ::1 loopback
+  // IPv4-mapped ::ffff:a.b.c.d (RFC 4291 §2.5.5.2) — в обеих записях решает встроенный IPv4
+  if (zeroFirst(5) && g5 === 0xffff) return isPrivateIPv4(embedded);
+  // IPv4-translated ::ffff:0:0/96 (SIIT, RFC 2765): не маршрутизируется как публичный — блок целиком
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0xffff && g5 === 0) return true;
+  // NAT64 well-known 64:ff9b::/96 (RFC 6052): решает встроенный IPv4. Весь диапазон не блокируем:
+  // DNS64 отдаёт так IPv4-only хосты публичных сетей, и вебхуки к ним перестали бы работать
+  if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) return isPrivateIPv4(embedded);
+  if ((g0 & 0xfe00) === 0xfc00) return true;                               // unique local fc00::/7
+  if ((g0 & 0xffc0) === 0xfe80) return true;                               // link-local fe80::/10
+  return false;
 }
 
 /**
