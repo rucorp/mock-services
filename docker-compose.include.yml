@@ -1,15 +1,17 @@
 # © 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0
 # SPDX-License-Identifier: Apache-2.0
 #
-# Внешний compose-файл мок-контура (банк + касса + ЮKassa) для подключения в приложение-потребитель
+# Внешний compose-файл мок-контура (банк + касса + ЮKassa + АТОЛ Онлайн)
+# для подключения в приложение-потребитель
 # (например, lovii-core на dev-стенде и staging).
 #
 # Ключевые гарантии:
 #   1. Все сервисы живут ТОЛЬКО в профиле `mock` — при обычном `docker compose up -d`
 #      в production (без COMPOSE_PROFILES=mock или `--profile mock`) ни один мок-контейнер
 #      не создаётся и не запускается.
-#   2. Имена сервисов фиксированы (`tbank-mock`, `kassa-mock`, `yookassa-mock`) — внутренние URL
-#      `http://tbank-mock:3100/v2`, `http://kassa-mock:3101` и `http://yookassa-mock:3102/v3` не меняются.
+#   2. Имена сервисов фиксированы (`tbank-mock`, `kassa-mock`, `yookassa-mock`, `atol-mock`) —
+#      внутренние URL `http://tbank-mock:3100/v2`, `http://kassa-mock:3101`,
+#      `http://yookassa-mock:3102/v3` и `http://atol-mock:3103/possystem/v4` не меняются.
 #   3. Никакие домены потребителя не зашиты: Caddy-лейблы и публичные URL задаются
 #      переменными окружения (по умолчанию пустые / localhost).
 #
@@ -158,6 +160,56 @@ services:
     mem_limit: "${MOCK_MEM_LIMIT:-128m}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3102,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    restart: unless-stopped
+
+  atol-mock:
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.5.0}
+    profiles: ["mock"]
+    working_dir: /app
+    command: ["node", "services/atol-mock/server.js"]
+    ports:
+      - "${MOCK_ATOL_BIND_IP:-127.0.0.1}:${MOCK_ATOL_HOST_PORT:-3103}:3103"
+    environment:
+      MOCK_HOST: "0.0.0.0"
+      MOCK_PORT: "3103"
+      MOCK_HEALTH_PATH: "/health"
+      # Публичные тестовые реквизиты v4 — дефолты образа; свои — через эти env.
+      MOCK_ATOL_LOGIN: "${MOCK_ATOL_LOGIN:-${ATOL_LOGIN:-v4-online-atol-ru}}"
+      MOCK_ATOL_PASSWORD: "${MOCK_ATOL_PASSWORD:-${ATOL_PASSWORD:-iGFFuihss}}"
+      MOCK_ATOL_GROUP: "${MOCK_ATOL_GROUP:-${ATOL_GROUP:-v4-online-atol-ru_4179}}"
+      MOCK_GROUPS: "${MOCK_ATOL_GROUPS:-}"
+      MOCK_TOKEN_TTL_MS: "${MOCK_ATOL_TOKEN_TTL_MS:-86400000}"
+      MOCK_PROCESS_MS: "${MOCK_ATOL_PROCESS_MS:-4000}"
+      MOCK_CALLBACK_RETRY_MS: "${MOCK_CALLBACK_RETRY_MS:-10000}"
+      MOCK_CALLBACK_MAX_ATTEMPTS: "${MOCK_CALLBACK_MAX_ATTEMPTS:-24}"
+      MOCK_VALIDATE_RECEIPTS: "${MOCK_ATOL_VALIDATE_RECEIPTS:-true}"
+      MOCK_DEFAULT_CALLBACK_URL: "${MOCK_ATOL_CALLBACK_URL:-}"
+      MOCK_PUBLIC_BASE_URL: "${MOCK_ATOL_PUBLIC_BASE_URL:-http://localhost:3103}"
+      MOCK_BLOCK_PRIVATE_WEBHOOKS: "${MOCK_BLOCK_PRIVATE_WEBHOOKS:-}"
+      MOCK_VIRTUAL_CLOCK: "${MOCK_VIRTUAL_CLOCK:-}"
+      MOCK_ADMIN_TOKEN: "${MOCK_ADMIN_TOKEN:-}"
+      MOCK_OPERATOR_TOKEN: "${MOCK_OPERATOR_TOKEN:-}"
+      MOCK_HOSTED: "${MOCK_HOSTED:-false}"
+      # RFC-001: изоляция песочниц (см. tbank-mock выше).
+      MOCK_TENANCY: "${MOCK_TENANCY:-}"
+      MOCK_SANDBOX_TOKEN: "${MOCK_SANDBOX_TOKEN:-}"
+      MOCK_SANDBOX_TTL_MS: "${MOCK_SANDBOX_TTL_MS:-}"
+      MOCK_SANDBOX_MAX: "${MOCK_SANDBOX_MAX:-}"
+      MOCK_SANDBOX_MAX_DOCUMENTS: "${MOCK_SANDBOX_MAX_DOCUMENTS:-}"
+      MOCK_SANDBOX_HOST_SUFFIX: "${MOCK_SANDBOX_HOST_SUFFIX:-}"
+      MOCK_STATE_FILE: "/data/atol-state.json"
+    volumes:
+      - mock-services-data:/data
+    labels:
+      caddy: "${MOCK_ATOL_CADDY_DOMAIN:-}"
+      caddy.reverse_proxy: "{{upstreams 3103}}"
+    mem_limit: "${MOCK_MEM_LIMIT:-128m}"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3103,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 10s
       timeout: 3s
       retries: 3

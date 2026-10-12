@@ -1,8 +1,9 @@
-# Образ для моков (tbank-mock, kassa-mock, yookassa-mock): выбирается командой.
+# Образ для моков (tbank-mock, kassa-mock, yookassa-mock, atol-mock): выбор командой.
 # Сборка:  docker build -t mock-services .
 # Банк:    docker run -p 3100:3100 mock-services node services/tbank-mock/server.js
 # Касса:   docker run -p 3101:3101 mock-services node services/kassa-mock/server.js
 # ЮKassa:  docker run -p 3102:3102 mock-services node services/yookassa-mock/server.js
+# АТОЛ:    docker run -p 3103:3103 mock-services node services/atol-mock/server.js
 FROM node:22-alpine
 
 WORKDIR /app
@@ -20,8 +21,8 @@ ENV NODE_ENV=production \
     MOCK_HOST=0.0.0.0
 
 # Порт по умолчанию — банк; для кассы переопределяется MOCK_PORT=3101,
-# для ЮKassa — MOCK_PORT=3102.
-EXPOSE 3100 3101 3102
+# для ЮKassa — MOCK_PORT=3102, для АТОЛ Онлайн — MOCK_PORT=3103.
+EXPOSE 3100 3101 3102 3103
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=3s --retries=3 \
   CMD node -e "const p=process.env.MOCK_PORT||'3100';require('http').get({host:'127.0.0.1',port:p,path:process.env.MOCK_HEALTH_PATH||'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"

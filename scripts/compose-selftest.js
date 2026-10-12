@@ -4,11 +4,14 @@
 
 /*
  * Black-box selftest против поднятого стенда (docker compose / внешние контейнеры).
- * Проверяет сервисы (tbank-mock на :3100, kassa-mock на :3101, yookassa-mock на :3102) снаружи по HTTP:
+ * Проверяет сервисы (tbank-mock на :3100, kassa-mock на :3101, yookassa-mock на :3102,
+ * atol-mock на :3103) снаружи по HTTP:
  *   1. Healthchecks (/health, /healthz, /health)
  *   2. Т-Банк: Init -> форма оплаты -> Confirm -> Chargeback (DISPUTED -> REPRESENTMENT -> ARBITRATION -> WON) -> виртуальные часы /mock/time -> /admin/journal
  *   3. Ferma (54-ФЗ): getToken -> sell (предоплата с расчётным НДС vat20_120) -> sell (зачёт предоплаты) -> buy (расход) -> маркировка -> очередь ОФД -> печать с ускорением через /mock/time -> /receipts/:uuid
  *   4. ЮKassa: POST /v3/payments -> confirmation-страница -> оплата -> succeeded -> POST /v3/refunds -> списки
+ *   5. АТОЛ Онлайн v4: getToken -> sell (wait -> done, payload с ФД) -> повтор external_id (тот же uuid)
+ *      -> sell_refund -> buy -> негативы (группа/реквизиты/токен) -> страница чека
  *
  * F-33: прогон выполняется в одноразовой песочнице (X-Mock-Sandbox, в hosted —
  * через POST /sandboxes с owner-token) и убирает её в finally, чтобы повторные
@@ -25,6 +28,7 @@ const http = require('http');
 const TBANK_BASE = (process.env.MOCK_TBANK_URL || 'http://127.0.0.1:3100').replace(/\/$/, '');
 const KASSA_BASE = (process.env.MOCK_KASSA_URL || 'http://127.0.0.1:3101').replace(/\/$/, '');
 const YOOKASSA_BASE = (process.env.MOCK_YOOKASSA_URL || 'http://127.0.0.1:3102').replace(/\/$/, '');
+const ATOL_BASE = (process.env.MOCK_ATOL_URL || 'http://127.0.0.1:3103').replace(/\/$/, '');
 const TERMINAL_KEY = process.env.MOCK_TERMINAL_KEY || 'TBANKMOCKTEST';
 const TERMINAL_PASSWORD = process.env.MOCK_TERMINAL_PASSWORD || 'mockpass123';
 const FERMA_LOGIN = process.env.MOCK_FERMA_LOGIN || 'loviitest';
@@ -32,6 +36,10 @@ const FERMA_PASSWORD = process.env.MOCK_FERMA_PASSWORD || 'mockpass123';
 const YOOKASSA_SHOP_ID = process.env.MOCK_SHOP_ID || process.env.YOOKASSA_SHOP_ID || 'YOOKASSAMOCKTEST';
 const YOOKASSA_SECRET_KEY = process.env.MOCK_SECRET_KEY || process.env.YOOKASSA_SECRET_KEY || 'mockpass123';
 const YOOKASSA_AUTH = `Basic ${Buffer.from(`${YOOKASSA_SHOP_ID}:${YOOKASSA_SECRET_KEY}`).toString('base64')}`;
+// Публичные тестовые реквизиты АТОЛ Онлайн v4 (дефолты образа).
+const ATOL_LOGIN = process.env.MOCK_ATOL_LOGIN || process.env.ATOL_LOGIN || 'v4-online-atol-ru';
+const ATOL_PASSWORD = process.env.MOCK_ATOL_PASSWORD || process.env.ATOL_PASSWORD || 'iGFFuihss';
+const ATOL_GROUP = process.env.MOCK_ATOL_GROUP || process.env.ATOL_GROUP || 'v4-online-atol-ru_4179';
 
 /*
  * F-33 (RFC-001 §8): прогон идёт в одноразовой песочнице, чтобы не накапливать
@@ -47,8 +55,9 @@ const SANDBOX = {
   [TBANK_BASE]: { id: SANDBOX_ID, token: '', creds: null },
   [KASSA_BASE]: { id: SANDBOX_ID, token: '', creds: null },
   [YOOKASSA_BASE]: { id: SANDBOX_ID, token: '', creds: null },
+  [ATOL_BASE]: { id: SANDBOX_ID, token: '', creds: null },
 };
-const ALL_BASES = [TBANK_BASE, KASSA_BASE, YOOKASSA_BASE];
+const ALL_BASES = [TBANK_BASE, KASSA_BASE, YOOKASSA_BASE, ATOL_BASE];
 
 /** Заголовки песочницы прогона; вызов может переопределить их (например, default). */
 function sandboxHeaders(baseUrl) {
@@ -324,10 +333,116 @@ async function scenario(runId) {
   const ykNoAuth = await httpReq(YOOKASSA_BASE, 'GET', `/v3/payments/${ykPay.id}`);
   check('yookassa без Basic Auth -> 401 invalid_credentials',
     ykNoAuth.status === 401 && ykNoAuth.json() && ykNoAuth.json().type === 'error' && ykNoAuth.json().code === 'invalid_credentials');
+
+  // 5. АТОЛ Онлайн v4: getToken -> sell -> report(done) -> дедуп -> возврат -> расход
+  const hAtol = await httpReq(ATOL_BASE, 'GET', '/health');
+  check('atol-mock /health === 200 ok (api v4, ФФД 1.05)',
+    hAtol.status === 200 && hAtol.json() && hAtol.json().ok === true && hAtol.json().api === 'v4' && hAtol.json().ffd === '1.05');
+
+  const atolCreds = SANDBOX[ATOL_BASE].creds || {};
+  const atolLogin = atolCreds.atolLogin || ATOL_LOGIN;
+  const atolPassword = atolCreds.atolPassword || ATOL_PASSWORD;
+  const atolGroup = atolCreds.atolGroup || ATOL_GROUP;
+
+  const atolBadCreds = (await httpReq(ATOL_BASE, 'POST', '/possystem/v4/getToken', { login: atolLogin, pass: 'wrong' })).json();
+  check('atol getToken с неверным паролем -> error.code 14', Boolean(atolBadCreds && atolBadCreds.error && atolBadCreds.error.code === 14));
+
+  const atolTokenRes = (await httpReq(ATOL_BASE, 'POST', '/possystem/v4/getToken', { login: atolLogin, pass: atolPassword })).json();
+  const atolToken = atolTokenRes && atolTokenRes.token;
+  check('atol getToken выдаёт токен (v4, TTL 24 ч)', Boolean(atolToken));
+
+  const atolReceipt = {
+    client: { email: 'compose@test.ru' },
+    company: { email: 'kassa@test.ru', inn: '5544332219', payment_address: 'https://v4.online.atol.ru', sno: 'usn_income' },
+    items: [{ name: 'Кофе латте', price: 120.5, quantity: 2, sum: 241, payment_method: 'full_payment', payment_object: 'commodity', vat: 'vat120' }],
+    payments: [{ type: 1, sum: 241 }],
+    total: 241,
+  };
+
+  const atolSell = await httpReq(ATOL_BASE, 'POST', `/possystem/v4/${encodeURIComponent(atolGroup)}/sell`, {
+    external_id: `${runId}-atol-sell`,
+    timestamp: '12.10.2026 10:00:00',
+    receipt: atolReceipt,
+  }, { Token: atolToken });
+  const atolUuid = atolSell.json() && atolSell.json().uuid;
+  check('atol sell (decimal-рубли, vat120) -> {uuid, status:"wait"}',
+    atolSell.status === 200 && Boolean(atolUuid) && atolSell.json().status === 'wait', atolSell.text.slice(0, 160));
+
+  const atolReplay = await httpReq(ATOL_BASE, 'POST', `/possystem/v4/${encodeURIComponent(atolGroup)}/sell`, {
+    external_id: `${runId}-atol-sell`,
+    receipt: { ...atolReceipt, total: 999 },
+  }, { Token: atolToken });
+  check('atol повтор external_id -> ТОТ ЖЕ uuid и X-Mock-Replayed (не второй чек)',
+    atolReplay.json() && atolReplay.json().uuid === atolUuid && atolReplay.headers['x-mock-replayed'] === '1'
+    && atolReplay.json().error === null, atolReplay.text.slice(0, 160));
+
+  await httpReq(ATOL_BASE, 'POST', '/mock/time', { advance: '20s' }, sandboxHeaders(ATOL_BASE));
+
+  const atolReport = (await httpReq(ATOL_BASE, 'GET', `/possystem/v4/${encodeURIComponent(atolGroup)}/report/${atolUuid}`, null, { Token: atolToken })).json();
+  check('atol report после /mock/time +20s -> done, payload с ФД/ФП/ФН/ККТ и ofd_receipt_url',
+    atolReport && atolReport.status === 'done' && atolReport.payload
+    && Number.isFinite(atolReport.payload.fiscal_document_number)
+    && Boolean(atolReport.payload.fiscal_document_attribute)
+    && Boolean(atolReport.payload.fn_number)
+    && Boolean(atolReport.payload.ecr_registration_number)
+    && Boolean(atolReport.payload.ofd_receipt_url), JSON.stringify(atolReport && atolReport.payload).slice(0, 180));
+
+  const atolRefund = await httpReq(ATOL_BASE, 'POST', `/possystem/v4/${encodeURIComponent(atolGroup)}/sell_refund`, {
+    external_id: `${runId}-atol-refund`,
+    receipt: {
+      ...atolReceipt,
+      items: [{ name: 'Кофе латте', price: 120.5, quantity: 1, sum: 120.5, payment_method: 'full_payment', payment_object: 'commodity', vat: 'vat120' }],
+      payments: [{ type: 1, sum: 120.5 }],
+      total: 120.5,
+    },
+  }, { Token: atolToken });
+  check('atol sell_refund (возврат прихода) -> wait', atolRefund.status === 200 && atolRefund.json().status === 'wait');
+
+  const atolBuy = await httpReq(ATOL_BASE, 'POST', `/possystem/v4/${encodeURIComponent(atolGroup)}/buy`, {
+    external_id: `${runId}-atol-buy`,
+    receipt: {
+      client: { phone: '+79991112233' },
+      company: { email: 'kassa@test.ru', inn: '5544332219', payment_address: 'https://v4.online.atol.ru' },
+      items: [{ name: 'Выплата поставщику', price: '50.00', quantity: 1, sum: '50.00', payment_object: 'service', vat: 'none' }],
+      payments: [{ type: 0, sum: '50.00' }],
+      total: '50.00',
+    },
+  }, { Token: atolToken });
+  check('atol buy (расход, наличные type=0, decimal-строки) -> wait', atolBuy.status === 200 && atolBuy.json().status === 'wait');
+
+  const atolWrongGroup = (await httpReq(ATOL_BASE, 'POST', '/possystem/v4/no-such-group/sell', {
+    external_id: `${runId}-atol-group`, receipt: atolReceipt,
+  }, { Token: atolToken })).json();
+  check('atol чужая группа -> error.code 4 (field group_code)',
+    Boolean(atolWrongGroup && atolWrongGroup.error && atolWrongGroup.error.code === 4 && atolWrongGroup.error.field === 'group_code'));
+
+  const atolNoClient = (await httpReq(ATOL_BASE, 'POST', `/possystem/v4/${encodeURIComponent(atolGroup)}/sell`, {
+    external_id: `${runId}-atol-client`, receipt: { ...atolReceipt, client: {} },
+  }, { Token: atolToken })).json();
+  check('atol client без email/телефона -> error.code 4', Boolean(atolNoClient && atolNoClient.error && atolNoClient.error.code === 4));
+
+  const atolFermaVat = (await httpReq(ATOL_BASE, 'POST', `/possystem/v4/${encodeURIComponent(atolGroup)}/sell`, {
+    external_id: `${runId}-atol-vat`,
+    receipt: { ...atolReceipt, items: [{ name: 'X', price: 10, quantity: 1, sum: 10, vat: 'vat20_120' }], payments: [{ type: 1, sum: 10 }], total: 10 },
+  }, { Token: atolToken })).json();
+  check('atol Ferma-синтаксис vat20_120 отклонён с подсказкой про vat120',
+    Boolean(atolFermaVat && atolFermaVat.error && atolFermaVat.error.code === 4
+      && String(atolFermaVat.error.hint || '').includes('vat120')));
+
+  const atolNoToken = (await httpReq(ATOL_BASE, 'POST', `/possystem/v4/${encodeURIComponent(atolGroup)}/sell`, {
+    external_id: `${runId}-atol-token`, receipt: atolReceipt,
+  })).json();
+  check('atol без заголовка Token -> error.code 11', Boolean(atolNoToken && atolNoToken.error && atolNoToken.error.code === 11));
+
+  const atolReceiptPage = await httpReq(ATOL_BASE, 'GET', `/receipts/${atolUuid}?sandbox=${encodeURIComponent(SANDBOX[ATOL_BASE].id)}`,
+    null, { 'X-Mock-Sandbox': SANDBOX[ATOL_BASE].id });
+  check('atol страница чека /receipts/:uuid отдаёт 200 и ФН', atolReceiptPage.status === 200 && atolReceiptPage.text.includes('ФН:'));
+
+  await httpReq(ATOL_BASE, 'POST', '/mock/time', { reset: true }, sandboxHeaders(ATOL_BASE));
 }
 
 async function main() {
-  console.log(`\n== compose black-box selftest (${TBANK_BASE} & ${KASSA_BASE} & ${YOOKASSA_BASE}) ==\n`);
+  console.log(`\n== compose black-box selftest (${TBANK_BASE} & ${KASSA_BASE} & ${YOOKASSA_BASE} & ${ATOL_BASE}) ==\n`);
   console.log(`  · одноразовая песочница прогона: ${SANDBOX_ID}`);
 
   // Базовая линия default-состояния: прогон не должен её изменить (два запуска
@@ -336,9 +451,11 @@ async function main() {
   const bankCounts = (j) => BANK_KEYS.map((k) => `${k}=${j[k]}`).join(',');
   const kassaCounts = (j) => `checks=${j.checks},ofdQueue=${j.ofdQueueCount},fnUsed=${j.fnUsed},shift=${j.shiftStatus}`;
   const yookassaCounts = (j) => `payments=${j.payments},refunds=${j.refunds}`;
+  const atolCounts = (j) => `documents=${j.documents},waiting=${j.waiting},callbacks=${j.callbacks}`;
   const beforeBank = (await httpReq(TBANK_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const beforeKassa = (await httpReq(KASSA_BASE, 'GET', '/healthz?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const beforeYookassa = (await httpReq(YOOKASSA_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
+  const beforeAtol = (await httpReq(ATOL_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
 
   await provisionSandboxes();
   try {
@@ -350,6 +467,7 @@ async function main() {
   const afterBank = (await httpReq(TBANK_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const afterKassa = (await httpReq(KASSA_BASE, 'GET', '/healthz?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const afterYookassa = (await httpReq(YOOKASSA_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
+  const afterAtol = (await httpReq(ATOL_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   if (beforeBank.tenancy && beforeBank.tenancy !== 'off') {
     check('tbank: прогон не изменил default-счётчики (F-33)', bankCounts(beforeBank) === bankCounts(afterBank),
       `${bankCounts(beforeBank)} -> ${bankCounts(afterBank)}`);
@@ -361,6 +479,10 @@ async function main() {
   if (beforeYookassa.tenancy && beforeYookassa.tenancy !== 'off') {
     check('yookassa: прогон не изменил default-счётчики (F-33)', yookassaCounts(beforeYookassa) === yookassaCounts(afterYookassa),
       `${yookassaCounts(beforeYookassa)} -> ${yookassaCounts(afterYookassa)}`);
+  }
+  if (beforeAtol.tenancy && beforeAtol.tenancy !== 'off') {
+    check('atol: прогон не изменил default-счётчики (F-33)', atolCounts(beforeAtol) === atolCounts(afterAtol),
+      `${atolCounts(beforeAtol)} -> ${atolCounts(afterAtol)}`);
   }
 
   console.log(`\nИТОГ compose-selftest: ${passed} passed, ${failed} failed\n`);

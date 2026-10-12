@@ -1,0 +1,432 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "atol-mock — АТОЛ Онлайн direct API v4, ФФД 1.05 (Мок-стенд)",
+    "version": "0.5.0",
+    "description": "Мок-стенд прямого API АТОЛ Онлайн версии v4 (ФФД 1.05): getToken с TTL 24 часа и токеном в заголовке Token, шесть операций (sell, sell_refund, sell_correction, buy, buy_refund, buy_correction), идемпотентность external_id в пределах группы (повтор возвращает ранее назначенный UUID, а не ошибку), отчёт wait → done|fail с payload (ФД/ФП, ФН/ККТ, ofd_receipt_url), callback результата на service.callback_url, валидация реквизитов ФФД, decimal-рубли, мульти-песочницы. Версия v5 (ФФД 1.2) и маркировка «Честный ЗНАК» в этот стенд не входят."
+  },
+  "servers": [
+    { "url": "http://localhost:3103", "description": "Локальный стенд atol-mock" },
+    { "url": "https://testonline.atol.ru", "description": "Боевой тестовый контур АТОЛ Онлайн (для сравнения контракта; мок его не замещает)" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "atolToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Token",
+        "description": "Токен, выданный POST /possystem/v4/getToken. Действует 24 часа; в отличие от облачных касс Ferma передаётся заголовком, а не в query."
+      },
+      "operatorToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Operator-Token",
+        "description": "Токен управляющей поверхности (MOCK_OPERATOR_TOKEN; также Authorization: Bearer или ?operator_token=). Если токены не заданы, локальный стенд открыт; при MOCK_HOSTED=1 без секрета маршрут закрыт (fail-closed)."
+      },
+      "adminToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Admin-Token",
+        "description": "Токен админки /admin* (MOCK_ADMIN_TOKEN)."
+      },
+      "sandboxToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Sandbox-Token",
+        "description": "Owner-token песочницы (RFC-001): выдаётся один раз при POST /sandboxes; также Authorization: Bearer <ownerToken> или ?sandbox_token=. В режиме MOCK_TENANCY=owned / MOCK_HOSTED=1 знание id песочницы без owner-token доступа не даёт."
+      }
+    },
+    "parameters": {
+      "XMockScenario": {
+        "name": "X-Mock-Scenario",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string" },
+        "description": "Сценарий управления поведением: fail (отказ печати, error.code 57), hang (вечный wait без callback), webhook-drop, webhook-duplicate, latency:<dur>, http-500, http-504."
+      },
+      "XMockSandbox": {
+        "name": "X-Mock-Sandbox",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string" },
+        "description": "Имя изолированной песочницы для параллельных CI-воркеров (по умолчанию default)."
+      },
+      "XMockLatency": {
+        "name": "X-Mock-Latency",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string" },
+        "description": "Искусственная задержка ответа (например, 500ms или 2s)."
+      },
+      "Group": {
+        "name": "group",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" },
+        "description": "Код группы касс из личного кабинета АТОЛ Онлайн. Дефолт мока — публичная тестовая группа v4-online-atol-ru_4179. Незарегистрированная группа отклоняется (error.code 4)."
+      }
+    },
+    "schemas": {
+      "AtolError": {
+        "type": "object",
+        "description": "Ошибка v4: код, текст, тип и идентификатор. Поля field/hint/doc — DX-слой мока (не часть протокола АТОЛ).",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": { "type": "integer", "description": "Код ошибки платформы (4, 5, 10, 11, 14, 57)." },
+              "text": { "type": "string" },
+              "type": { "type": "string", "enum": ["business", "system"] },
+              "error_id": { "type": "string", "format": "uuid" },
+              "field": { "type": "string" },
+              "hint": { "type": "string", "description": "DX: что поправить." },
+              "doc": { "type": "string", "description": "DX: ссылка на раздел документации АТОЛ." }
+            }
+          },
+          "timestamp": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Document": {
+        "type": "object",
+        "description": "Ответ регистрации документа: UUID и состояние очереди.",
+        "properties": {
+          "uuid": { "type": "string", "format": "uuid" },
+          "status": { "type": "string", "enum": ["wait", "done", "fail"] },
+          "timestamp": { "type": "string", "format": "date-time" },
+          "error": { "type": ["object", "null"] },
+          "hint": { "type": "string", "description": "DX: появляется при повторе external_id (возвращён прежний uuid, тело проигнорировано)." }
+        }
+      },
+      "Payload": {
+        "type": ["object", "null"],
+        "description": "Фискальные данные напечатанного документа (ФД/ФП, ФН/ККТ, ссылка ОФД).",
+        "properties": {
+          "fiscal_document_number": { "type": "integer" },
+          "fiscal_document_attribute": { "type": "string", "description": "ФП — фискальный признак документа." },
+          "fiscal_receipt_number": { "type": "integer" },
+          "fn_number": { "type": "string" },
+          "ecr_registration_number": { "type": "string", "description": "Регистрационный номер ККТ." },
+          "fiscal_folder_number": { "type": "string" },
+          "shift_number": { "type": "integer" },
+          "receipt_datetime": { "type": "string" },
+          "total": { "type": "string", "description": "Итог в рублях, decimal." },
+          "taxation_type": { "type": ["string", "null"] },
+          "ofd_receipt_url": { "type": "string", "format": "uri" },
+          "vat_amounts": { "type": "array" }
+        }
+      },
+      "Money": {
+        "description": "Сумма в рублях (decimal, не более 2 знаков): JSON-число или строка.",
+        "oneOf": [
+          { "type": "number", "minimum": 0 },
+          { "type": "string", "pattern": "^\\d{1,9}(\\.\\d{1,2})?$" }
+        ]
+      },
+      "Receipt": {
+        "type": "object",
+        "required": ["company", "items", "payments", "total"],
+        "description": "Реквизиты чека ФФД 1.05. v4 требует у client хотя бы email или телефон; company содержит email, inn, payment_address (sno — при нескольких системах налогообложения).",
+        "properties": {
+          "client": {
+            "type": "object",
+            "properties": {
+              "email": { "type": "string", "format": "email" },
+              "phone": { "type": "string" },
+              "name": { "type": "string" }
+            }
+          },
+          "company": {
+            "type": "object",
+            "properties": {
+              "email": { "type": "string", "format": "email" },
+              "inn": { "type": "string", "pattern": "^\\d{10}$|^\\d{12}$" },
+              "payment_address": { "type": "string" },
+              "sno": { "type": "string", "enum": ["osn", "usn_income", "usn_income_outcome", "envd", "esn", "patent"] }
+            }
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["name", "price", "quantity", "sum", "vat"],
+              "properties": {
+                "name": { "type": "string", "maxLength": 128 },
+                "price": { "$ref": "#/components/schemas/Money" },
+                "quantity": { "type": "number", "exclusiveMinimum": 0 },
+                "sum": { "$ref": "#/components/schemas/Money" },
+                "payment_method": { "type": "string", "enum": ["full_prepayment", "partial_prepayment", "advance", "full_payment", "partial_payment", "credit", "credit_payment", "consideration"] },
+                "payment_object": { "type": "string" },
+                "vat": { "type": "string", "enum": ["none", "vat0", "vat5", "vat7", "vat10", "vat20", "vat22", "vat105", "vat107", "vat110", "vat120", "vat122"] }
+              }
+            }
+          },
+          "payments": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["type", "sum"],
+              "properties": {
+                "type": { "type": "integer", "enum": [0, 1, 2, 3, 4], "description": "Форма расчёта, ФФД тег 1081: 0 наличные, 1 электронными, 2 аванс, 3 кредит, 4 встречное предоставление." },
+                "sum": { "$ref": "#/components/schemas/Money" }
+              }
+            }
+          },
+          "total": { "$ref": "#/components/schemas/Money" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/possystem/v4/getToken": {
+      "post": {
+        "summary": "Получение токена v4 (TTL 24 часа; далее заголовком Token)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["login", "pass"],
+                "properties": {
+                  "login": { "type": "string", "description": "Дефолт мока — публичный тестовый login v4-online-atol-ru." },
+                  "pass": { "type": "string" },
+                  "source": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Токен выдан либо error.code 14 (неверный логин или пароль)" }
+        }
+      }
+    },
+    "/possystem/v4/{group}/{operation}": {
+      "post": {
+        "summary": "Регистрация фискального документа (шесть операций v4)",
+        "description": "Принимает документ в очередь (status=wait) и возвращает uuid. Повтор с тем же external_id в той же группе НЕ ошибка: возвращается ранее назначенный uuid, второй чек не создаётся (заголовок X-Mock-Replayed).",
+        "security": [{ "atolToken": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/Group" },
+          { "name": "operation", "in": "path", "required": true, "schema": { "type": "string", "enum": ["sell", "sell_refund", "sell_correction", "buy", "buy_refund", "buy_correction"] } },
+          { "$ref": "#/components/parameters/XMockScenario" },
+          { "$ref": "#/components/parameters/XMockSandbox" },
+          { "$ref": "#/components/parameters/XMockLatency" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["external_id", "receipt"],
+                "properties": {
+                  "external_id": { "type": "string", "maxLength": 128, "description": "Идентификатор внешней системы, уникальный в пределах группы." },
+                  "timestamp": { "type": "string", "description": "Время внешней системы, dd.mm.yyyy HH:MM:SS." },
+                  "receipt": { "$ref": "#/components/schemas/Receipt" },
+                  "service": {
+                    "type": "object",
+                    "properties": {
+                      "callback_url": { "type": "string", "format": "uri", "description": "Адрес для POST результата после обработки документа." }
+                    }
+                  },
+                  "correction_info": {
+                    "type": "object",
+                    "properties": {
+                      "type": { "type": "string", "enum": ["self", "instruction"] },
+                      "base_date": { "type": "string", "description": "dd.mm.yyyy" },
+                      "base_number": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Документ принят (status=wait) либо ошибка реквизитов/авторизации (4, 5, 10, 11, 14).",
+            "headers": {
+              "X-Mock-Replayed": { "description": "1 — повтор external_id: возвращён прежний uuid.", "schema": { "type": "string" } }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    { "$ref": "#/components/schemas/Document" },
+                    { "$ref": "#/components/schemas/AtolError" }
+                  ]
+                }
+              }
+            }
+          },
+          "405": { "description": "Метод не поддерживается маршрутом" }
+        }
+      }
+    },
+    "/possystem/v4/{group}/report/{uuid}": {
+      "get": {
+        "summary": "Отчёт по документу: wait → done|fail, payload (ФД/ФП, ФН/ККТ, ofd_receipt_url)",
+        "description": "Основной канал сверки результата (callback — альтернативный). Рекомендация v4: не чаще 3 запросов в секунду; если callback не пришёл за 300 секунд — опрашивать.",
+        "security": [{ "atolToken": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/Group" },
+          { "name": "uuid", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "$ref": "#/components/parameters/XMockSandbox" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Состояние документа либо error.code 10 (не найден в этой группе) / 11 (нет авторизации).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "uuid": { "type": "string", "format": "uuid" },
+                    "external_id": { "type": "string" },
+                    "group_code": { "type": "string" },
+                    "type": { "type": "string" },
+                    "status": { "type": "string", "enum": ["wait", "done", "fail"] },
+                    "timestamp": { "type": "string", "format": "date-time" },
+                    "error": { "type": ["object", "null"] },
+                    "payload": { "$ref": "#/components/schemas/Payload" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/receipts/{uuid}": {
+      "get": {
+        "summary": "Страница чека покупателю (цель ofd_receipt_url из payload)",
+        "parameters": [{ "name": "uuid", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "Лента чека (HTML) либо error.code 10 — документ ещё не напечатан" }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Healthcheck: версия API, группы, TTL токена, счётчики документов",
+        "responses": { "200": { "description": "Стенд жив" } }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "summary": "Эта спецификация OpenAPI 3.1",
+        "responses": { "200": { "description": "OpenAPI 3.1.0" } }
+      }
+    },
+    "/admin": {
+      "get": {
+        "summary": "Консоль стенда: документы, callback, журнал, кнопки сценариев",
+        "security": [{ "adminToken": [] }],
+        "responses": { "200": { "description": "HTML-консоль" }, "401": { "description": "Требуется MOCK_ADMIN_TOKEN" } }
+      }
+    },
+    "/admin/journal": {
+      "get": {
+        "summary": "Журнал запросов /possystem/v4 с curl-сниппетами (секреты и PII отредактированы)",
+        "security": [{ "adminToken": [] }],
+        "responses": { "200": { "description": "Записи журнала" }, "401": { "description": "Требуется MOCK_ADMIN_TOKEN" } }
+      }
+    },
+    "/mock/time": {
+      "get": {
+        "summary": "Виртуальные часы: текущее смещение",
+        "security": [{ "operatorToken": [] }],
+        "responses": { "200": { "description": "Снимок часов" } }
+      },
+      "post": {
+        "summary": "Управление виртуальными часами: advance (\"+20s\", \"+25h\"), offset, iso, reset",
+        "description": "Ускоряет очередь wait → done и проверяет истечение токена (24 ч) без реального ожидания.",
+        "security": [{ "operatorToken": [] }],
+        "responses": { "200": { "description": "Новый снимок часов" } }
+      }
+    },
+    "/mock/scenarios": {
+      "get": {
+        "summary": "Правила сценариев и история срабатываний",
+        "security": [{ "operatorToken": [] }],
+        "responses": { "200": { "description": "{rules, history}" } }
+      },
+      "post": {
+        "summary": "Добавить правило: {scenario, target, match, times|persistent}",
+        "security": [{ "operatorToken": [] }],
+        "responses": { "200": { "description": "Правило добавлено" } }
+      },
+      "delete": {
+        "summary": "Очистить правила и историю",
+        "security": [{ "operatorToken": [] }],
+        "responses": { "200": { "description": "Очищено" } }
+      }
+    },
+    "/sandboxes": {
+      "get": {
+        "summary": "Список песочниц (RFC-001)",
+        "responses": { "200": { "description": "{mode, current, sandboxes}" } }
+      },
+      "post": {
+        "summary": "Создать/выбрать песочницу; в owned-режиме выдаёт собственные login/pass/группу АТОЛ и ownerToken",
+        "responses": { "200": { "description": "Выбрана (namespaces)" }, "201": { "description": "Создана (owned)" } }
+      },
+      "delete": {
+        "summary": "Удалить песочницу",
+        "responses": { "200": { "description": "Удалена" } }
+      }
+    },
+    "/sandboxes/me": {
+      "get": {
+        "summary": "Своя песочница по owner-token",
+        "security": [{ "sandboxToken": [] }],
+        "responses": { "200": { "description": "Описание и креды" } }
+      },
+      "delete": {
+        "summary": "Удалить свою песочницу",
+        "security": [{ "sandboxToken": [] }],
+        "responses": { "200": { "description": "Удалена" } }
+      }
+    },
+    "/sandboxes/me/reset": {
+      "post": {
+        "summary": "Сбросить состояние своей песочницы",
+        "security": [{ "sandboxToken": [] }],
+        "responses": { "200": { "description": "Сброшено" } }
+      }
+    },
+    "/sandboxes/me/reset-creds": {
+      "post": {
+        "summary": "Перевыпустить login/pass/группу своей песочницы (owner-token не меняется)",
+        "security": [{ "sandboxToken": [] }],
+        "responses": { "200": { "description": "Новые креды" } }
+      }
+    },
+    "/mock/sandboxes": {
+      "get": { "summary": "Алиас GET /sandboxes", "responses": { "200": { "description": "Список" } } },
+      "post": { "summary": "Алиас POST /sandboxes", "responses": { "200": { "description": "Выбрана/создана" } } }
+    },
+    "/mock/reset": {
+      "post": {
+        "summary": "Сбросить состояние песочницы, правила сценариев и журнал",
+        "security": [{ "operatorToken": [] }],
+        "responses": { "200": { "description": "Сброшено" } }
+      }
+    },
+    "/mock/state": {
+      "get": {
+        "summary": "Экспорт состояния песочницы (?sandbox= — явный target)",
+        "security": [{ "operatorToken": [] }],
+        "responses": { "200": { "description": "Снимок состояния" } }
+      },
+      "post": {
+        "summary": "Импорт снимка состояния",
+        "security": [{ "operatorToken": [] }],
+        "responses": { "200": { "description": "Импортировано" }, "400": { "description": "Недопустимый снимок" } }
+      }
+    }
+  }
+}

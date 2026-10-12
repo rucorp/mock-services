@@ -9,6 +9,53 @@
 ## [Unreleased]
 
 ### Added
+- **Первый внешний касса-адаптер: АТОЛ Онлайн direct API v4 (Stage 2, #34).**
+  - `services/atol-mock` — независимый zero-dep мок прямого API АТОЛ Онлайн версии v4
+    (ФФД 1.05) на :3103: `POST /possystem/v4/getToken` (`{login, pass}` → токен,
+    TTL **24 часа**, далее **заголовок** `Token`), `POST /possystem/v4/{group}/{operation}`
+    для шести операций (`sell`, `sell_refund`, `sell_correction`, `buy`, `buy_refund`,
+    `buy_correction`), `GET /possystem/v4/{group}/report/{uuid}`
+    (`wait → done|fail`, `payload` с ФД/ФП, ФН/ККТ, сменой, НДС и `ofd_receipt_url`),
+    страница чека `/receipts/{uuid}`; дефолты — публичные тестовые реквизиты v4
+    (login `v4-online-atol-ru`, группа `v4-online-atol-ru_4179`);
+  - **идемпотентность `external_id` в пределах группы**: повтор возвращает ранее
+    назначенный UUID и заголовок `X-Mock-Replayed` (второй чек не создаётся) —
+    ключевое отличие от Ferma, где дубль даёт `error.code=12`;
+  - **callback результата** на `service.callback_url`: тот же объект, что и `report`,
+    через core-очередь (ретраи/дамп, SSRF-guard), `webhook-drop|no-callback`,
+    `webhook-duplicate`, повтор кнопкой в `/admin`; ACK — любой 2xx, подпись не
+    добавляется (в публичных руководствах v4 ни ACK, ни подпись, ни расписание
+    повторов не заданы — задокументированный форк, приёмник обязан быть идемпотентным);
+  - ошибки в форме v4 `{error:{code, text, type, error_id}}` + DX-слой мока
+    (`field`/`hint`/`doc`); валидация реквизитов ФФД 1.05 (`client` — хотя бы email
+    или телефон, `company` — email/ИНН/адрес расчётов, ставки НДС, формы расчёта
+    по ФФД 1081, арифметика `sum`/`total`/`payments`, `timestamp` `dd.mm.yyyy HH:MM:SS`);
+    суммы — **decimal-рубли** (≤2 знака), количество — до 3 знаков;
+  - мок ловит перенос синтаксиса Ferma и объясняет его в `hint`: `vat20_120` → «в v4
+    это `vat120`», `payments[].type = 5` → «в v4 наличные — `0`», `?token=` → «в v4
+    токен передаётся заголовком `Token`»;
+  - слои ядра переиспользованы по паттерну yookassa-mock: сценарный реестр
+    (`fail`/`hang`/`webhook-*`/`latency`/`http-500|504` + `/mock/scenarios`),
+    виртуальные часы (`/mock/time`: печать очереди и истечение токена через 24 ч),
+    журнал `/possystem/v4` с curl и редакцией секретов/PII, control-plane токены,
+    sandbox runtime RFC-001 (собственные login/pass/группа песочницы);
+  - контракт описан декларативно: манифест `protocols/atol-online.json`
+    и OpenAPI 3.1 `docs/openapi/atol-mock.openapi.json` (`GET /openapi.json`),
+    `scripts/check-protocol-drift.js` дополнен третьей секцией
+    (142 → **221** инвариант: маршруты, операции, ставки НДС, формы расчёта, СНО,
+    статусы отчёта, поля payload, коды ошибок, инварианты «заголовок Token»,
+    «TTL 24 ч», «дедуп возвращает прежний uuid», рекомендации polling в гайде);
+  - `selftest.js` (**202** проверки) включён в `npm test` (`test:atol`), CI-шаг
+    и прогон внутри образа; compose: сервис `atol-mock :3103` с healthcheck
+    в обоих compose-файлах, black-box сценарий в `scripts/compose-selftest.js`
+    (43 проверки), `start:atol`, `smoke` и `EXPOSE 3103` в Dockerfile;
+    документация: `services/atol-mock/README.md`, гайд `docs/integration/atol.md`,
+    обновлён корневой README;
+  - **вне области #34**: v5/ФФД 1.2 и маркировка «Честный ЗНАК» (следующий шаг);
+    числовая таблица кодов v4 в конспекте не снята — взята общая таблица кодов
+    платформы АТОЛ/Ferma с явной пометкой в README и отчёте PR;
+  - контракты `tbank-mock`, `kassa-mock` и `yookassa-mock` не менялись
+    (selftest: 48 / 129 / 227).
 - **Первый внешний банк-адаптер: ЮKassa end-to-end (Stage 2, #33).**
   - `services/yookassa-mock` — независимый zero-dep мок мерчантского API ЮKassa на :3102:
     REST `/v3` (Basic Auth `shopId:secretKey`, обязательный `Idempotence-Key` для POST с replay
