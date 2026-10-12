@@ -322,6 +322,7 @@ MS-16, MS-20, MS-27, MS-30, MS-33, MS-35, MS-36, MS-38 (11); **в силе** —
 - **MS-40.** Версии Node: заявлено `>=18` и CI на 18/20/22. Node 18 снят с поддержки, а Node 20, по состоянию на момент аудита, вероятно вышел из LTS (проверить на nodejs.org). **[DECISION]** поднять минимум до 22 и гонять CI на 22 и 24. Образ уже на 22.
   
   **Статус (#43):** [DECISION] + данные. `package.json:25-27` = `node >=18`; `ci.yml:17` = `['18','20','22']`; образ — Node 22 (`Dockerfile:20`). Справка на 2026-10-12 (nodejs.org из песочницы недоступен, сверено по публичным schedule-обзорам): Node 18 EOL с 2025-04-30, Node 20 EOL с 2026-04-30, Node 22 — Maintenance LTS до 2027-04-30, Node 24 — Active LTS до 2026-10-20, Node 26 → LTS 2026-10-28. 2 из 3 раннеров CI на неподдерживаемом runtime.
+  Подтверждение из лога CI этой ветки (`run 38265251073`, job `test (20)`): `! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@…, actions/setup-node@…` и `- "The ubuntu-latest label will migrate to Ubuntu 26 beginning October 19, 2026"`. То есть runner-слой уже принудительно исполняет наши job на Node 24, а через 7 дней меняется и образ `ubuntu-latest`. `[VERIFY]` «проверить на nodejs.org» закрыт данными schedule-обзоров; решение — за владельцем.
 
 ## 7. Сводка рисков, подтверждённых и неподтверждённых
 
