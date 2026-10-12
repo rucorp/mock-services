@@ -131,7 +131,7 @@ async function main() {
     IMAGE,
   ]);
   await waitForHealth(NAME_RO);
-  const init = await request(3902, 'POST', '/v2/Init', { Amount: '1000', OrderId: 'smoke-readonly-1' });
+  const init = await request(3902, 'POST', '/v2/Init', { TerminalKey: 'TBANKMOCKTEST', Amount: '1000', OrderId: 'smoke-readonly-1' });
   const initJson = JSON.parse(init.body);
   if (initJson.Success !== true) throw new Error(`Init в read-only контейнере не прошёл: ${init.body}`);
   docker(['restart', NAME_RO]);
