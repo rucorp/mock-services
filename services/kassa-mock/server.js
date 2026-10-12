@@ -1266,11 +1266,17 @@ const server = http.createServer((req, res) => {
       return originalWriteHead(code, ...rest);
     };
 
-    // Инъекция задержек и сетевых сбоев (X-Mock-Latency, X-Mock-Scenario: latency:..., http-500, http-504)
+    // Инъекция задержек и сетевых сбоев (X-Mock-Latency, X-Mock-Scenario: latency:..., http-500, http-504).
+    // F-06: контракт ядра — { abortStatus, abortMessage }; сбой шлюза отдаётся
+    // provider-shaped ошибкой с HTTP-статусом сценария и без побочных эффектов
+    // (документ не создаётся, очередь ОФД/смены не меняются).
     const chaosSpec = parseScenarioSpec(req.headers['x-mock-scenario'] || '');
     const chaosResult = await applyRequestChaos(req, chaosSpec);
-    if (chaosResult.fault) {
-      return jsonRaw(res, chaosResult.fault.status, errBody(chaosResult.fault.status, chaosResult.fault.message));
+    if (chaosResult.abortStatus) {
+      return jsonRaw(res, chaosResult.abortStatus, errBody(chaosResult.abortStatus, chaosResult.abortMessage, {
+        field: 'X-Mock-Scenario',
+        hint: 'Сценарий X-Mock-Scenario: http-500|http-504 имитирует сбой шлюза ОФД — запрос не выполнен, документ не создан. Задержка — latency:<время>.',
+      }));
     }
   }
 

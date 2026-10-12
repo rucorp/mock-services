@@ -43,6 +43,11 @@
 # 1. Стенд «банк + касса + ЮKassa + АТОЛ Онлайн» целиком
 docker compose up            # tbank-mock :3100, kassa-mock :3101, yookassa-mock :3102, atol-mock :3103
 
+# Порты root compose по умолчанию слушают только 127.0.0.1.
+# Для осознанного сетевого доступа задайте bind отдельно для нужного сервиса:
+MOCK_TBANK_BIND_IP=0.0.0.0 MOCK_KASSA_BIND_IP=0.0.0.0 docker compose up
+# Не используйте 0.0.0.0 на публичном хосте без operator/admin auth, firewall и TLS.
+
 # 2. Без Docker (только Node >= 18, зависимостей нет)
 npm run start:tbank          # http://localhost:3100
 npm run start:kassa          # http://localhost:3101
@@ -59,7 +64,7 @@ npm test                     # selftest ядра + всех адаптеров
 (ЮKassa), [`docs/integration/atol.md`](docs/integration/atol.md)
 (АТОЛ Онлайн v4) и [`docs/integration/lovii.md`](docs/integration/lovii.md)
 (подключение как внешнего сервиса в платформу Lovii). Контракты и переменные окружения — в README каждого сервиса
-(`services/tbank-mock`, `services/kassa-mock`, `services/yookassa-mock`, `services/atol-mock`).
+(`services/tbank-mock`, `services/kassa-mock`, `services/yookassa-mock`, `services/atol-mock`). Для acqapi Т-Банка тестовые Basic-креды по умолчанию `partner:partner`, а регистрация точки требует полной схемы реквизитов из `docs/reference/tbank/03-payouts-and-deals.md`.
 
 ## Структура
 

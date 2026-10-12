@@ -380,6 +380,40 @@ async function main() {
     assert.strictEqual(clock.snapshot().offsetMs, 0);
   });
 
+  check('createVirtualClock валидирует Date-диапазон до записи state и восстанавливается после отказа (F-05)', () => {
+    let savedOffset = 0;
+    const clock = core.createVirtualClock({
+      getStateOffset: () => savedOffset,
+      setStateOffset: (v) => { savedOffset = v; },
+      log: () => {},
+    });
+    for (const spec of [
+      { offsetMs: Number.MAX_VALUE },
+      { offset: '9999999999999d' },
+      { advance: '9999999999999d' },
+    ]) {
+      assert.throws(() => clock.set(spec), /вне диапазона|представимо Date/);
+      assert.strictEqual(savedOffset, 0, `невалидный offset не должен persist-иться: ${JSON.stringify(spec)}`);
+      assert.strictEqual(clock.snapshot().offsetMs, 0);
+    }
+    assert.strictEqual(clock.advance('7d').offsetMs, 7 * 86400000);
+    assert.strictEqual(savedOffset, 7 * 86400000);
+    assert.strictEqual(clock.reset().offsetMs, 0);
+
+    let poisoned = Number.MAX_VALUE;
+    const restored = core.createVirtualClock({ getStateOffset: () => poisoned, setStateOffset: (v) => { poisoned = v; }, log: () => {} });
+    assert.strictEqual(restored.snapshot().offsetMs, 0, 'старый невалидный state не должен ломать snapshot');
+    assert.strictEqual(restored.advance('1h').offsetMs, 3600000, 'после восстановления часы снова работают');
+  });
+
+  check('parseMoneyKopeks строго принимает целые копейки и отклоняет prefix/trailing junk и дроби (F-24)', () => {
+    assert.deepStrictEqual(core.parseMoneyKopeks('1000'), { ok: true, value: 1000 });
+    assert.deepStrictEqual(core.parseMoneyKopeks(1000), { ok: true, value: 1000 });
+    for (const raw of ['1000xyz', '1000.9', '+1000', ' 1000', '0x10', 1000.9, 0, -1, Number.MAX_SAFE_INTEGER + 1]) {
+      assert.strictEqual(core.parseMoneyKopeks(raw).ok, false, `должно быть отклонено: ${JSON.stringify(raw)}`);
+    }
+  });
+
   check('createScenarioRegistry объединяет заголовок X-Mock-Scenario, правила и журнал срабатываний', () => {
     const reg = core.createScenarioRegistry();
     reg.addRule({ target: 'init', match: { orderId: 'ord-1' }, scenario: 'chargeback-after:7d', times: 1 });

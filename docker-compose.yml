@@ -8,10 +8,15 @@ services:
     image: mock-services:local
     working_dir: /app
     command: node services/tbank-mock/server.js
-    ports: ["3100:3100"]
+    # Безопасный локальный default: наружу публикуем только loopback.
+    # Явный override для сетевого доступа: MOCK_TBANK_BIND_IP=0.0.0.0.
+    ports: ["${MOCK_TBANK_BIND_IP:-127.0.0.1}:${MOCK_TBANK_HOST_PORT:-3100}:3100"]
     environment:
       MOCK_PORT: "3100"
       MOCK_HEALTH_PATH: /health
+      MOCK_ACQAPI_CLIENT_ID: "${MOCK_ACQAPI_CLIENT_ID:-partner}"
+      MOCK_ACQAPI_CLIENT_SECRET: "${MOCK_ACQAPI_CLIENT_SECRET:-partner}"
+      MOCK_ACQAPI_TOKEN_TTL_MS: "${MOCK_ACQAPI_TOKEN_TTL_MS:-1h}"
       # Персистентность между рестартами: состояние на volume ниже.
       MOCK_STATE_FILE: /data/tbank-state.json
       # Публичный адрес стенда глазами покупателя (меняйте на свой домен).
@@ -33,7 +38,9 @@ services:
     image: mock-services:local
     working_dir: /app
     command: node services/kassa-mock/server.js
-    ports: ["3101:3101"]
+    # Безопасный локальный default: наружу публикуем только loopback.
+    # Явный override для сетевого доступа: MOCK_KASSA_BIND_IP=0.0.0.0.
+    ports: ["${MOCK_KASSA_BIND_IP:-127.0.0.1}:${MOCK_KASSA_HOST_PORT:-3101}:3101"]
     environment:
       MOCK_PORT: "3101"
       MOCK_HEALTH_PATH: /healthz
@@ -57,7 +64,8 @@ services:
     image: mock-services:local
     working_dir: /app
     command: node services/yookassa-mock/server.js
-    ports: ["3102:3102"]
+    # Безопасный локальный default; сетевой bind включается явно.
+    ports: ["${MOCK_YOOKASSA_BIND_IP:-127.0.0.1}:${MOCK_YOOKASSA_HOST_PORT:-3102}:3102"]
     environment:
       MOCK_PORT: "3102"
       MOCK_HEALTH_PATH: /health
@@ -84,7 +92,8 @@ services:
     image: mock-services:local
     working_dir: /app
     command: node services/atol-mock/server.js
-    ports: ["3103:3103"]
+    # Безопасный локальный default; сетевой bind включается явно.
+    ports: ["${MOCK_ATOL_BIND_IP:-127.0.0.1}:${MOCK_ATOL_HOST_PORT:-3103}:3103"]
     environment:
       MOCK_PORT: "3103"
       MOCK_HEALTH_PATH: /health
