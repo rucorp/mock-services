@@ -64,7 +64,7 @@ include:
 ```yaml
 services:
   tbank-mock:
-    image: ghcr.io/rucorp/mock-services:${MOCK_IMAGE_TAG:-0.4.0}
+    image: ghcr.io/rucorp/mock-services:${MOCK_IMAGE_TAG:-0.5.0}${MOCK_IMAGE_DIGEST-@sha256:5e2b030f04672691c92b33f9e78099bed3a10616fbf7bcbc1f89668a99e30ef6}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/tbank-mock/server.js"]
@@ -96,7 +96,7 @@ services:
     restart: unless-stopped
 
   kassa-mock:
-    image: ghcr.io/rucorp/mock-services:${MOCK_IMAGE_TAG:-0.4.0}
+    image: ghcr.io/rucorp/mock-services:${MOCK_IMAGE_TAG:-0.5.0}${MOCK_IMAGE_DIGEST-@sha256:5e2b030f04672691c92b33f9e78099bed3a10616fbf7bcbc1f89668a99e30ef6}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/kassa-mock/server.js"]
@@ -177,7 +177,8 @@ curl -fsS http://127.0.0.1:3101/healthz
 |---|---|---|---|---|
 | `COMPOSE_PROFILES` | Docker Compose | `mock` (когда включён платёжный стенд) | `mock` | **не задан** (пусто — моки не поднимаются) |
 | `MOCK_IMAGE` | Compose | `ghcr.io/rucorp/mock-services` | `ghcr.io/rucorp/mock-services` | — *(не используется)* |
-| `MOCK_IMAGE_TAG` | Compose | `0.4.0` | `0.4.0` | — *(не используется)* |
+| `MOCK_IMAGE_TAG` | Compose | `0.5.0` | `0.5.0` | — *(не используется)* |
+| `MOCK_IMAGE_DIGEST` | Compose | пусто (pin по умолчанию в compose-модуле) | пусто (pin по умолчанию) | — *(не используется)* |
 | `PAYMENTS_ENABLED` | `lovii-core` | `true` (флагом стенда) | `true` | `true` |
 | `PAYMENTS_FAKE` | `lovii-core` | `false` (через HTTP в `tbank-mock`) | `false` | `false` |
 | `TBANK_API_URL` | `lovii-core` | `http://tbank-mock:3100/v2` | `http://tbank-mock:3100/v2` | `https://securepay.tinkoff.ru/v2` |

@@ -263,11 +263,22 @@ function tokenOf(payload, password = null) {
 
 function verifyToken(payload) {
   if (!STRICT_TOKEN) return true;
-  const given = payload && payload.Token;
-  if (!given || typeof given !== 'string') return false;
-  const expected = tokenOf(payload);
-  if (given.length !== expected.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(given), Buffer.from(expected));
+  try {
+    const given = payload && payload.Token;
+    if (!given || typeof given !== 'string') return false;
+    const expected = tokenOf(payload);
+    // F-28: сравниваем БАЙТОВЫЕ длины буферов. JS string.length — это UTF-16
+    // code units: multibyte-Token (например, 32 эмодзи = 64 units, 128 bytes)
+    // проходил проверку длины, но timingSafeEqual бросал RangeError и маршрут
+    // отвечал 5000 вместо ошибки подписи 13.
+    const givenBuf = Buffer.from(given, 'utf8');
+    const expectedBuf = Buffer.from(expected, 'utf8');
+    if (givenBuf.length !== expectedBuf.length) return false;
+    return crypto.timingSafeEqual(givenBuf, expectedBuf);
+  } catch {
+    // Мусор вместо Token — это отказ подписи (код 13), а не внутренняя ошибка 5000.
+    return false;
+  }
 }
 
 /* ------------------------------------------------------------ test cards */
@@ -557,6 +568,10 @@ const deliveryQueue = core.createDeliveryQueue({
   entries: () => state.notifications,
   retryMs: RETRY_MS,
   maxAttempts: MAX_ATTEMPTS,
+  // F-29: нотификации Т-Банка обязаны уходить по одной и по порядку (контракт
+  // очереди ядра, packages/core/README.md) — статусы одного платежа не должны
+  // перепрыгивать друг друга при разной задержке приёмника.
+  awaitSequential: true,
   persist,
   log,
   now: () => clock.now(),
@@ -1299,6 +1314,28 @@ function checkE2cTerminalKey(body) {
   });
 }
 
+/**
+ * Валидация RedirectDueDate (F-25, дока Init): срок жизни ссылки/QR — от 1 минуты
+ * до 90 дней, формат ISO 8601. Границы включительные: ровно nowMs+1m и ровно
+ * nowMs+90d допустимы. Возвращает текст ошибки или null.
+ */
+function validateRedirectDueDate(value, nowMs) {
+  const dueTs = Date.parse(String(value));
+  if (!Number.isFinite(dueTs)) {
+    return `Некорректный формат RedirectDueDate «${value}» (ожидается ISO 8601)`;
+  }
+  if (dueTs <= nowMs) {
+    return 'RedirectDueDate уже истёк — дата должна быть в будущем';
+  }
+  if (dueTs < nowMs + 60 * 1000) {
+    return 'RedirectDueDate не может быть раньше чем через 1 минуту (минимальный срок жизни ссылки — 1 минута)';
+  }
+  if (dueTs > nowMs + 90 * 24 * 60 * 60 * 1000) {
+    return 'RedirectDueDate превышает максимальный срок жизни ссылки 90 дней';
+  }
+  return null;
+}
+
 function handleInit(body, reqHeaders = {}) {
   const badTerminal = checkTerminalKey(body);
   if (badTerminal) return badTerminal;
@@ -1335,15 +1372,11 @@ function handleInit(body, reqHeaders = {}) {
     }
   }
 
-  // Валидация RedirectDueDate (1 минута ... 90 дней по доке Init)
+  // Валидация RedirectDueDate (1 минута ... 90 дней по доке Init, F-25: обе границы)
   if (body.RedirectDueDate !== undefined && body.RedirectDueDate !== null && body.RedirectDueDate !== '') {
-    const dueTs = Date.parse(String(body.RedirectDueDate));
-    if (!Number.isFinite(dueTs)) {
-      return err(7, `Некорректный формат RedirectDueDate «${body.RedirectDueDate}» (ожидается ISO 8601)`, null, { field: 'RedirectDueDate', doc: '/api/init' });
-    }
-    const maxDueTs = clock.now() + 90 * 24 * 60 * 60 * 1000;
-    if (dueTs > maxDueTs) {
-      return err(7, 'RedirectDueDate превышает максимальный срок жизни ссылки 90 дней', null, { field: 'RedirectDueDate', doc: '/api/init' });
+    const dueError = validateRedirectDueDate(body.RedirectDueDate, clock.now());
+    if (dueError) {
+      return err(7, dueError, null, { field: 'RedirectDueDate', doc: '/api/init' });
     }
   }
 
@@ -3394,4 +3427,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { server, state, clock, scenarios, tokenOf, CARDS, route, persist, restore, sandboxRuntime, TERMINAL_KEY, TERMINAL_PASSWORD };
+module.exports = { server, state, clock, scenarios, tokenOf, CARDS, route, persist, restore, sandboxRuntime, validateRedirectDueDate, TERMINAL_KEY, TERMINAL_PASSWORD };

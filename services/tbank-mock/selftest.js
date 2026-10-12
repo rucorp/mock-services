@@ -44,7 +44,7 @@ process.env.MOCK_PUBLIC_BASE_URL = 'http://mock.test';
 process.env.MOCK_ACQAPI_CLIENT_ID = 'partner';
 process.env.MOCK_ACQAPI_CLIENT_SECRET = 'mock-acqapi-secret';
 
-const { server, state, tokenOf, TERMINAL_KEY, TERMINAL_PASSWORD } = require('./server.js');
+const { server, state, tokenOf, validateRedirectDueDate, TERMINAL_KEY, TERMINAL_PASSWORD } = require('./server.js');
 
 const PASSWORD = TERMINAL_PASSWORD;
 const TERMINAL = TERMINAL_KEY;
@@ -234,8 +234,11 @@ async function main() {
 process.env.MOCK_PROFILE = 'multisplit';
 process.env.MOCK_RETRY_MS = '1000';
   // /webhook — подтверждает доставку; /slow — «медленный и падающий» мерчант
-  // (проверка, что очередь не шлёт одну нотификацию параллельно сама себе).
+  // (проверка, что очередь не шлёт одну нотификацию параллельно сама себе);
+  // /ordered — «медленный, но успешный»: отвечает на ПЕРВУЮ нотификацию дольше
+  // интервала тика доставки (F-29: порядок и отсутствие параллельных POST).
   const slowHook = { hits: 0, concurrent: 0, maxConcurrent: 0 };
+  const orderedHook = { records: [], concurrent: 0, maxConcurrent: 0 };
   const webhook = http.createServer((req, res) => {
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -245,6 +248,23 @@ process.env.MOCK_RETRY_MS = '1000';
         slowHook.concurrent += 1;
         slowHook.maxConcurrent = Math.max(slowHook.maxConcurrent, slowHook.concurrent);
         setTimeout(() => { slowHook.concurrent -= 1; res.writeHead(500); res.end('no'); }, 600);
+        return;
+      }
+      if (req.url === '/ordered') {
+        let json = {};
+        try { json = JSON.parse(body); } catch { /* диагностическое тело */ }
+        const rec = { status: json.Status || '', arriveAt: Date.now(), respondAt: null };
+        orderedHook.records.push(rec);
+        orderedHook.concurrent += 1;
+        orderedHook.maxConcurrent = Math.max(orderedHook.maxConcurrent, orderedHook.concurrent);
+        // Ответ на первую нотификацию задерживается на 1200ms — дольше интервала
+        // тика (1000ms): без последовательной доставки вторая ушла бы параллельно.
+        const delayMs = orderedHook.records.length === 1 ? 1200 : 0;
+        setTimeout(() => {
+          orderedHook.concurrent -= 1;
+          rec.respondAt = Date.now();
+          res.end('OK');
+        }, delayMs);
         return;
       }
       WEBHOOK_HITS.push({ body, json: JSON.parse(body) });
@@ -427,6 +447,19 @@ process.env.MOCK_RETRY_MS = '1000';
   const shortTok = await request(mockPort, 'POST', '/v2/Init', { TerminalKey: TERMINAL, Amount: '1000', OrderId: 'order-82', Token: 'abc' });
   assert.strictEqual(JSON.parse(shortTok.body).ErrorCode, '13', 'короткий Token должен отклоняться кодом 13, не 5000');
 
+  // 18a. F-28: multibyte Token с той же JS-длиной, что и digest (32 эмодзи —
+  // 64 UTF-16 units при 64-символьном hex-Token, но 128 байт) — код 13, а не
+  // RangeError внутри timingSafeEqual и общий 5000.
+  {
+    const multiToken = '😄'.repeat(32);
+    assert.strictEqual(multiToken.length, 64, 'сценарий: JS-длина Token совпадает с длиной digest');
+    assert.strictEqual(Buffer.byteLength(multiToken), 128, 'сценарий: байтовая длина Token больше длины digest');
+    const multiTok = await request(mockPort, 'POST', '/v2/Init', {
+      TerminalKey: TERMINAL, Amount: '1000', OrderId: 'order-f28', Token: multiToken,
+    });
+    assert.strictEqual(JSON.parse(multiTok.body).ErrorCode, '13', 'multibyte Token должен отклоняться кодом 13, не 5000');
+  }
+
   // 19. Повторный Init с тем же OrderId — ошибка 7 (дока Init: OrderId уникален) (A-6)
   const dupOrder = JSON.parse((await api(mockPort, 'Init', { Amount: '1000', OrderId: 'order-77', CreateDealWithType: 'NN' })).body);
   assert.strictEqual(dupOrder.ErrorCode, '7', 'дубль OrderId должен отклоняться');
@@ -463,7 +496,32 @@ process.env.MOCK_RETRY_MS = '1000';
   assert.strictEqual(slowHook.maxConcurrent, 1, `параллельных POST на одну нотификацию: ${slowHook.maxConcurrent}`);
   assert.ok(slowNotif && slowHook.hits - slowNotif.attempts <= 1, `attempts=${slowNotif && slowNotif.attempts}, POST'ов=${slowHook.hits} — очередь отправляет больше, чем учитывает`);
 
-  // 23a. Чужой TerminalKey — ошибка 7 (A-15)
+  // 23a. F-29: две due-нотификации (AUTHORIZED → CONFIRMED) при медленном ответе
+  // на первую: вторая ждёт завершения первой (порядок статусов сохраняется),
+  // параллельных POST и повторов нет — контракт serial delivery Т-Банка.
+  {
+    const orderInit = JSON.parse((await api(mockPort, 'Init', {
+      Amount: '50000', OrderId: 'order-f29', CreateDealWithType: 'NN', PayType: 'T',
+      NotificationURL: `http://127.0.0.1:${port}/ordered`, SuccessURL: successUrl, FailURL: failUrl,
+    })).body);
+    await request(mockPort, 'POST', `/payment/${orderInit.PaymentId}/pay`, 'pan=2201382000000013&exp=1227&cvv=123', { 'Content-Type': 'application/x-www-form-urlencoded' });
+    const confirmed = JSON.parse((await api(mockPort, 'Confirm', { PaymentId: orderInit.PaymentId }).then((r) => r.body)));
+    assert.strictEqual(confirmed.Status, 'CONFIRMED', `Confirm должен подтвердить платёж: ${JSON.stringify(confirmed)}`);
+    await waitForCondition(() => orderedHook.records.length >= 2 && orderedHook.concurrent === 0, {
+      timeoutMs: 8000,
+      description: 'обе нотификации доставлены последовательно, без параллельных POST',
+    });
+    const [first, second] = orderedHook.records;
+    assert.deepStrictEqual([first.status, second.status], ['AUTHORIZED', 'CONFIRMED'], `статусы должны приходить по порядку: ${JSON.stringify(orderedHook.records)}`);
+    assert.ok(second.arriveAt >= first.respondAt, `вторая нотификация пришла до завершения ответа первой: ${JSON.stringify(orderedHook.records)}`);
+    assert.strictEqual(orderedHook.maxConcurrent, 1, 'параллельных POST быть не должно');
+    assert.strictEqual(orderedHook.records.length, 2, 'каждая нотификация доставлена ровно один раз');
+    const queued = Object.values(state.notifications).filter((n) => n.paymentId === orderInit.PaymentId);
+    assert.strictEqual(queued.length, 2, 'должно быть ровно две записи очереди');
+    assert.ok(queued.every((n) => n.done && n.attempts === 1), `записи завершены с одной попыткой: ${JSON.stringify(queued.map((n) => ({ done: n.done, attempts: n.attempts })))}`);
+  }
+
+  // 23b. Чужой TerminalKey — ошибка 7 (A-15)
   const wrongTerminal = JSON.parse((await api(mockPort, 'Init', { TerminalKey: 'OTHER-TERMINAL', Amount: '1000', OrderId: 'order-84', CreateDealWithType: 'NN' })).body);
   assert.strictEqual(wrongTerminal.ErrorCode, '7', 'чужой TerminalKey должен отклоняться');
   assert.ok(String(wrongTerminal.Message).includes('OTHER-TERMINAL'));
@@ -848,13 +906,61 @@ process.env.MOCK_RETRY_MS = '1000';
     assert.strictEqual(badData.Success, false);
     assert.strictEqual(badData.ErrorCode, '7');
 
-    // RedirectDueDate > 90 дней -> ErrorCode 7
+    // RedirectDueDate (F-25): обе границы диапазона «1 минута … 90 дней»
+    // > 90 дней -> ErrorCode 7
     const farFuture = new Date(Date.now() + 100 * 86400000).toISOString();
     const badDue = JSON.parse((await api(mockPort, 'Init', {
       Amount: '10000', OrderId: 'order-baddue', CreateDealWithType: 'NN', RedirectDueDate: farFuture,
     })).body);
     assert.strictEqual(badDue.Success, false);
     assert.strictEqual(badDue.ErrorCode, '7');
+
+    // истёкшая дата -> ErrorCode 7
+    const expiredDue = JSON.parse((await api(mockPort, 'Init', {
+      Amount: '10000', OrderId: 'order-expdue', CreateDealWithType: 'NN', RedirectDueDate: new Date(Date.now() - 60000).toISOString(),
+    })).body);
+    assert.strictEqual(expiredDue.Success, false);
+    assert.strictEqual(expiredDue.ErrorCode, '7');
+    assert.ok(String(expiredDue.Message).includes('истёк'), `сообщение об истёкшей дате: ${expiredDue.Message}`);
+
+    // меньше минуты -> ErrorCode 7
+    const soonDue = JSON.parse((await api(mockPort, 'Init', {
+      Amount: '10000', OrderId: 'order-soondue', CreateDealWithType: 'NN', RedirectDueDate: new Date(Date.now() + 30000).toISOString(),
+    })).body);
+    assert.strictEqual(soonDue.Success, false);
+    assert.strictEqual(soonDue.ErrorCode, '7');
+
+    // не-ISO значение -> ErrorCode 7 (корректный ISO parsing сохраняется)
+    const badFormatDue = JSON.parse((await api(mockPort, 'Init', {
+      Amount: '10000', OrderId: 'order-fmtdue', CreateDealWithType: 'NN', RedirectDueDate: 'вчера',
+    })).body);
+    assert.strictEqual(badFormatDue.Success, false);
+    assert.strictEqual(badFormatDue.ErrorCode, '7');
+    assert.ok(String(badFormatDue.Message).includes('ISO 8601'), `сообщение о формате: ${badFormatDue.Message}`);
+
+    // ровно 90 дней (верхняя граница, включительно) -> принимается
+    const ok90Due = JSON.parse((await api(mockPort, 'Init', {
+      Amount: '10000', OrderId: 'order-ok90due', CreateDealWithType: 'NN', RedirectDueDate: new Date(Date.now() + 90 * 86400000).toISOString(),
+    })).body);
+    assert.strictEqual(ok90Due.Success, true, `ровно 90 дней — допустимо: ${JSON.stringify(ok90Due)}`);
+
+    // нижняя граница через HTTP: чуть больше минуты (запас на задержку запроса)
+    const okMinDue = JSON.parse((await api(mockPort, 'Init', {
+      Amount: '10000', OrderId: 'order-okmindue', CreateDealWithType: 'NN', RedirectDueDate: new Date(Date.now() + 65000).toISOString(),
+    })).body);
+    assert.strictEqual(okMinDue.Success, true, `ссылка на ~1 минуту — допустимо: ${JSON.stringify(okMinDue)}`);
+
+    // Точная граница «1 минута» (включительно) — на фиксированном nowMs: HTTP-путь
+    // сравнивает с clock.now() на момент валидации, и границу в 1 мс нельзя
+    // удержать детерминированно из-за задержки запроса.
+    const t0 = Date.parse('2030-06-15T12:00:00.000Z');
+    const isoAt = (deltaMs) => new Date(t0 + deltaMs).toISOString();
+    assert.strictEqual(validateRedirectDueDate(isoAt(60000), t0), null, 'ровно 1 минута — допустимо');
+    assert.ok(validateRedirectDueDate(isoAt(59999), t0), 'чуть меньше минуты — отклоняется');
+    assert.ok(validateRedirectDueDate(isoAt(0), t0), 'ровно сейчас — отклоняется');
+    assert.ok(validateRedirectDueDate(isoAt(-1000), t0), 'истёкшая дата — отклоняется');
+    assert.strictEqual(validateRedirectDueDate(isoAt(90 * 86400000), t0), null, 'ровно 90 дней — допустимо');
+    assert.ok(validateRedirectDueDate(isoAt(90 * 86400000 + 1), t0), 'чуть больше 90 дней — отклоняется');
 
     // Recurrent=Y без CustomerKey -> ErrorCode 7
     const noCust = JSON.parse((await api(mockPort, 'Init', {

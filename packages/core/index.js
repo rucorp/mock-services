@@ -1008,6 +1008,12 @@ function createDeliveryQueue({
   // «В полёте» — рантайм-состояние, намеренно НЕ в state: после рестарта
   // процесса ничего не должно считаться отправленным «прямо сейчас».
   const inFlight = new Set();
+  // F-29: защита от перекрывающихся тиков. setInterval не ждёт async tick(), и
+  // пока медленный вебхук держит «последовательный» тик, следующий тик мог бы
+  // отправить следующую запись параллельно — порядок доставки ломался бы даже
+  // при awaitSequential. Пока тик идёт, новый просто пропускается (записи
+  // доберутся следующим тиком).
+  let ticking = false;
 
   async function deliverOne(id, entry) {
     if (inFlight.has(id)) return;
@@ -1038,15 +1044,21 @@ function createDeliveryQueue({
   }
 
   async function tick() {
-    const currentEntries = entriesOf() || {};
-    const ids = Object.keys(currentEntries);
-    for (const id of ids) {
-      const entry = currentEntries[id];
-      if (!entry || inFlight.has(id)) continue;
-      if (!isDue(entry)) continue;
-      prepare(entry);
-      if (awaitSequential) await deliverOne(id, entry);
-      else deliverOne(id, entry); // пачкой, без ожидания — как у Ferma-мока
+    if (ticking) return;
+    ticking = true;
+    try {
+      const currentEntries = entriesOf() || {};
+      const ids = Object.keys(currentEntries);
+      for (const id of ids) {
+        const entry = currentEntries[id];
+        if (!entry || inFlight.has(id)) continue;
+        if (!isDue(entry)) continue;
+        prepare(entry);
+        if (awaitSequential) await deliverOne(id, entry);
+        else deliverOne(id, entry); // пачкой, без ожидания — как у Ferma-мока
+      }
+    } finally {
+      ticking = false;
     }
   }
 
