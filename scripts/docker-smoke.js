@@ -52,6 +52,7 @@ function request(port, method, p, body) {
       res.on('end', () => resolve({ statusCode: res.statusCode, body: out }));
     });
     req.on('error', reject);
+    req.setTimeout(10000, () => req.destroy(new Error(`HTTP timeout ${method} ${p}`)));
     if (data) req.write(data);
     req.end();
   });
@@ -61,13 +62,18 @@ async function waitForHealth(name, timeoutMs = 45000) {
   const deadline = Date.now() + timeoutMs;
   let status = 'unknown';
   while (Date.now() < deadline) {
+    let state = '';
+    let health = '';
     try {
-      status = docker(['inspect', '--format', '{{.State.Health.Status}}', name]);
+      // Контейнер мог упасть — различаем «не здоров» и «процесс мёртв».
+      [state, health] = docker(['inspect', '--format', '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}', name]).split(/\s+/);
     } catch {
-      status = 'missing';
+      state = 'missing';
+      health = 'missing';
     }
-    if (status === 'healthy') return status;
-    if (status === 'unhealthy' || status === 'missing' || status === 'exited') break;
+    status = health;
+    if (health === 'healthy') return health;
+    if (health === 'unhealthy' || health === 'missing' || state === 'exited' || state === 'dead' || state === 'missing') break;
     await sleep(1000);
   }
   let logs = '';
@@ -132,7 +138,10 @@ async function main() {
   await waitForHealth(NAME_RO);
   const snapshot = await request(3902, 'GET', '/mock/state');
   const stateJson = JSON.parse(snapshot.body);
-  const payments = Object.values((stateJson.state && stateJson.state.payments) || {});
+  // GET /mock/state отдаёт { sandbox, state: exportState() }, а exportState сам
+  // возвращает { sandbox, exportedAt, state } — платежи лежат в state.state.payments.
+  const inner = (stateJson.state && stateJson.state.state) || stateJson.state || {};
+  const payments = Object.values(inner.payments || {});
   if (!payments.some((p) => p.orderId === 'smoke-readonly-1')) {
     throw new Error(`состояние не пережило рестарт (persist/restore): ${snapshot.body.slice(0, 500)}`);
   }
