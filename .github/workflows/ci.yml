@@ -28,6 +28,8 @@ jobs:
         run: npm run test:tbank
       - name: selftest мока кассы
         run: npm run test:kassa
+      - name: офлайн selftest синхронизатора upstream snapshot
+        run: npm run test:upstream
       - name: детектор дрейфа протоколов и OpenAPI 3.1
         run: npm run check:drift
 

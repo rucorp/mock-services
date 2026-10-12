@@ -398,6 +398,42 @@ async function main() {
     assert.strictEqual(core.checkAdminAuth({ headers: {}, url: '/admin?admin_token=sec-1' }, 'sec-1'), true);
   });
 
+  check('resolveTenancyMode принимает литералы и legacy-флаги, а неизвестное значение безопасно откатывает с warn (#31)', () => {
+    const warnings = [];
+    const parse = (value, hosted = false) => core.resolveTenancyMode(value, hosted, (message) => warnings.push(message));
+    for (const value of ['1', 'on', 'true', 'yes', 'owned', 'OWNED']) assert.strictEqual(parse(value), 'owned', `${value} → owned`);
+    for (const value of ['0', 'off', 'false', 'no']) assert.strictEqual(parse(value), 'off', `${value} → off`);
+    assert.strictEqual(parse('namespaces'), 'namespaces');
+    assert.strictEqual(parse('  '), 'namespaces', 'пустое значение self-hosted → namespaces');
+    assert.strictEqual(parse('', true), 'owned', 'пустое значение hosted → owned');
+    assert.strictEqual(parse('typo'), 'namespaces', 'неизвестное значение self-hosted → безопасный default');
+    assert.strictEqual(parse('typo', true), 'owned', 'неизвестное значение hosted → безопасный default');
+    assert.strictEqual(warnings.length, 2, 'warn только для двух неизвестных значений');
+    assert.ok(warnings.every((message) => message.includes('MOCK_TENANCY')));
+    assert.ok(warnings[1].includes('owned'));
+  });
+
+  check('CSRF-токены подписаны, истекают и привязаны к контексту; Origin режет cross-site формы (A-20)', () => {
+    const secret = 'selftest-csrf-secret';
+    const token = core.createCsrfToken(secret, 'sandbox-a', 1000, 10);
+    assert.strictEqual(core.verifyCsrfToken(token, secret, 'sandbox-a', 1009), true);
+    assert.strictEqual(core.verifyCsrfToken(token, secret, 'sandbox-b', 1009), false);
+    assert.strictEqual(core.verifyCsrfToken(token, 'wrong-secret', 'sandbox-a', 1009), false);
+    assert.strictEqual(core.verifyCsrfToken(`${token}x`, secret, 'sandbox-a', 1009), false);
+    assert.strictEqual(core.verifyCsrfToken(token, secret, 'sandbox-a', 1010), false, 'токен истекает на границе TTL');
+    assert.strictEqual(core.isSameOriginRequest({ headers: { host: 'mock.test:3100', origin: 'http://mock.test:3100' } }), true);
+    assert.strictEqual(core.isSameOriginRequest({ headers: { host: 'mock.test:3100', origin: 'https://attacker.test' } }), false);
+    assert.strictEqual(core.isSameOriginRequest({ headers: { host: 'mock.test:3100', 'sec-fetch-site': 'cross-site' } }), false);
+    assert.strictEqual(core.isSameOriginRequest({ headers: { host: 'mock.test:3100', 'sec-fetch-site': 'same-site' } }), false);
+    assert.strictEqual(core.isSameOriginRequest({
+      headers: {
+        host: 'mock.test:3100', origin: 'https://attacker.test',
+        'x-forwarded-host': 'attacker.test', 'x-forwarded-proto': 'https',
+      },
+    }), false, 'нельзя подменить target через untrusted X-Forwarded-Host');
+    assert.strictEqual(core.isSameOriginRequest({ headers: { host: 'mock.test:3100' } }), true, 'CLI без Origin опирается на CSRF-токен');
+  });
+
   /* --- #22: access-control управляющей поверхности и SSRF-политика ------- */
 
   check('flagEnabled принимает 1/true и различает явное false (F-08)', () => {

@@ -18,6 +18,22 @@ const assert = require('assert');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+async function waitForCondition(predicate, { timeoutMs = 8000, intervalMs = 25, description = 'condition', ignoreErrors = false } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      const value = await predicate();
+      if (value) return value;
+    } catch (error) {
+      if (!ignoreErrors) throw error;
+      lastError = error;
+    }
+    await sleep(Math.min(intervalMs, Math.max(1, deadline - Date.now())));
+  }
+  throw new Error(`Timed out waiting for ${description}${lastError ? `: ${lastError.message}` : ''}`);
+}
+
 // Основной инстанс — профиль Lovii (Мультирасчеты); plain тестируется
 // отдельным процессом в сценарии 25.
 process.env.MOCK_PROFILE = 'multisplit';
@@ -123,6 +139,7 @@ function startChild(env = {}) {
   const proc = spawn('node', [path.join(__dirname, 'server.js')], {
     env: {
       ...process.env,
+      MOCK_HOST: '127.0.0.1',
       MOCK_PORT: '0',
       MOCK_STATE_FILE: '',
       MOCK_RETRY_MS: '1000',
@@ -155,6 +172,15 @@ function startChild(env = {}) {
     proc.on('exit', (code) => { clearTimeout(timer); reject(new Error(`дочерний стенд завершился с кодом ${code}: ${buf.slice(0, 300)}`)); });
   });
   return { proc, port, stop: () => { try { proc.kill('SIGKILL'); } catch { /* ignore */ } } };
+}
+
+async function stopChild(child) {
+  const proc = child && child.proc ? child.proc : child;
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
+  await new Promise((resolve) => {
+    proc.once('exit', resolve);
+    try { proc.kill('SIGKILL'); } catch { resolve(); }
+  });
 }
 
 function waitNotification(pred, timeoutMs = 4000) {
@@ -396,7 +422,10 @@ process.env.MOCK_RETRY_MS = '1000';
     NotificationURL: `http://127.0.0.1:${port}/slow`, SuccessURL: successUrl, FailURL: failUrl,
   })).body);
   await request(mockPort, 'POST', `/payment/${slowInit.PaymentId}/pay`, 'pan=2201382000000013&exp=1227&cvv=123', { 'Content-Type': 'application/x-www-form-urlencoded' });
-  await new Promise((r) => setTimeout(r, 4500)); // ретрай 1 с + тик 1 с: успеваем увидеть 2–3 попытки
+  await waitForCondition(() => slowHook.hits >= 2 && slowHook.concurrent === 0, {
+    timeoutMs: 12000,
+    description: 'slow webhook retries complete without overlapping requests',
+  });
   const slowNotif = Object.values(state.notifications).find((n) => n.paymentId === slowInit.PaymentId);
   assert.ok(slowHook.hits >= 2, `ретраев не было: ${slowHook.hits}`);
   assert.strictEqual(slowHook.maxConcurrent, 1, `параллельных POST на одну нотификацию: ${slowHook.maxConcurrent}`);
@@ -417,29 +446,25 @@ process.env.MOCK_RETRY_MS = '1000';
   // 25. plain-профиль (дефолт): Init без сделочных полей, PaymentRecipientId
   // не является ошибкой (классический эквайринг не знает полей Мультирасчетов)
   {
-    const { spawn } = require('child_process');
-    const plainProc = spawn('node', [path.join(__dirname, 'server.js')], {
-      env: { ...process.env, MOCK_PORT: '3198', MOCK_RETRY_MS: '1000', MOCK_PROFILE: 'plain', MOCK_STATE_FILE: '' },
-      stdio: 'ignore',
-    });
+    const plainChild = startChild({ MOCK_PROFILE: 'plain' });
+    const plainPort = await plainChild.port;
     try {
-    await new Promise((r) => setTimeout(r, 700));
-    const plainApi = (method, body) => { const signed = { ...body, Token: tokenOf(body) }; return request(3198, 'POST', `/v2/${method}`, signed); };
+      const plainApi = (method, body) => { const signed = { ...body, Token: tokenOf(body) }; return request(plainPort, 'POST', `/v2/${method}`, signed); };
     const plainInit = await plainApi('Init', { TerminalKey: TERMINAL_KEY, OrderId: 'plain-1', Amount: '250000', PaymentRecipientId: 'acc-1', NotificationURL: `http://127.0.0.1:${port}/hook` });
     const plainParsed = JSON.parse(plainInit.body);
     assert.strictEqual(plainParsed.Success, true, 'plain Init с PaymentRecipientId должен проходить (профиль plain)');
     // F-16 регрессия: plain без сделочных полей и без PaymentRecipientId — успех (не меняем)
     const plainBare = JSON.parse((await plainApi('Init', { TerminalKey: TERMINAL_KEY, OrderId: 'plain-bare', Amount: '1000' })).body);
     assert.strictEqual(plainBare.Success, true, 'plain Init без сделки и без PaymentRecipientId должен проходить');
-    const plainPay = await request(3198, 'POST', `/payment/${plainParsed.PaymentId}/pay`, 'pan=2201382000000013&exp=1227', { 'Content-Type': 'application/x-www-form-urlencoded' });
+    const plainPay = await request(plainPort, 'POST', `/payment/${plainParsed.PaymentId}/pay`, 'pan=2201382000000013&exp=1227', { 'Content-Type': 'application/x-www-form-urlencoded' });
     assert.ok([200, 302].includes(plainPay.statusCode), `оплата по тестовой карте должна проходить (статус ${plainPay.statusCode}: ${String(plainPay.body).slice(0, 80)})`);
-    await sleep(1500);
+    await waitNotification((entry) => entry.json.PaymentId === plainParsed.PaymentId);
     const plainConf = await plainApi('Confirm', { TerminalKey: TERMINAL_KEY, PaymentId: plainParsed.PaymentId, Amount: '250000' });
     assert.strictEqual(JSON.parse(plainConf.body).Status, 'CONFIRMED', 'plain Confirm из AUTHORIZED');
     const plainHook = WEBHOOK_HITS.map((h) => { try { return JSON.parse(h.body); } catch { return null; } }).filter(Boolean).find((n) => n.PaymentId === plainParsed.PaymentId);
     assert.ok(plainHook, 'plain платёж должен уведомлять мерчанта');
     assert.strictEqual(plainHook.SpAccumulationId, undefined, 'в plain-нотификации не должно быть SpAccumulationId');
-    } finally { plainProc.kill(); }
+    } finally { plainChild.stop(); }
   }
 
   /* --- Этап 6–7 (бриф 2026-10-11): чарджбэки e2e, сценарии, виртуальные часы, e2c/AV --- */
@@ -527,9 +552,11 @@ process.env.MOCK_RETRY_MS = '1000';
       NotificationURL: notificationUrl,
     }, { 'X-Mock-Scenario': 'webhook-drop' })).body);
     await request(mockPort, 'POST', `/payment/${dropInit.PaymentId}/pay`, 'pan=2201382000000013&exp=1227&cvv=123', { 'Content-Type': 'application/x-www-form-urlencoded' });
-    await sleep(1200);
+    const dropState = await waitForCondition(async () => {
+      const current = JSON.parse((await api(mockPort, 'GetState', { PaymentId: dropInit.PaymentId })).body);
+      return current.Status === 'CONFIRMED' ? current : null;
+    }, { description: 'webhook-drop payment reaches CONFIRMED' });
     assert.ok(!WEBHOOK_HITS.some((h) => h.json.PaymentId === dropInit.PaymentId), 'при webhook-drop вебхук не должен приходить');
-    const dropState = JSON.parse((await api(mockPort, 'GetState', { PaymentId: dropInit.PaymentId })).body);
     assert.strictEqual(dropState.Status, 'CONFIRMED', 'при webhook-drop сам платёж в банке проведён (GetState=CONFIRMED)');
 
     // Частичный возврат через X-Mock-Scenario: partial-refund:25% (без передачи Amount в теле Cancel)
@@ -871,6 +898,32 @@ process.env.MOCK_RETRY_MS = '1000';
       const adminOnAdmin = await request(childPort, 'GET', '/admin/journal', undefined, { Authorization: 'Bearer adm-secret' });
       assert.strictEqual(adminOnAdmin.statusCode, 200, 'админ-токен должен открывать /admin/journal');
 
+      const adminInitPayload = { TerminalKey: TERMINAL, Amount: '100', OrderId: 'csrf-admin-child' };
+      const adminInit = JSON.parse((await request(childPort, 'POST', '/v2/Init', {
+        ...adminInitPayload, Token: tokenOf(adminInitPayload),
+      })).body);
+      assert.strictEqual(adminInit.Success, true, 'тестовая операция для admin-формы создаётся');
+      const adminPageWithQueryToken = await request(childPort, 'GET', '/admin?admin_token=adm-secret');
+      const csrfToken = /name="_csrf" value="([^"]+)"/.exec(adminPageWithQueryToken.body)?.[1];
+      const actionUrl = /<form method="POST" action="([^"]+)"/.exec(adminPageWithQueryToken.body)?.[1];
+      assert.strictEqual(adminPageWithQueryToken.statusCode, 200);
+      assert.ok(csrfToken && actionUrl === '/admin/action?admin_token=adm-secret', 'GET query-token сохраняется в CSRF-форме');
+      const form = (fields) => new URLSearchParams(fields).toString();
+      const deniedNoCsrf = await request(childPort, 'POST', '/admin/action?admin_token=adm-secret', form({ action: 'cancel-new', id: adminInit.PaymentId }), { 'Content-Type': 'application/x-www-form-urlencoded' });
+      assert.strictEqual(deniedNoCsrf.statusCode, 403, 'POST без CSRF-токена запрещён');
+      const deniedCrossOrigin = await request(childPort, 'POST', '/admin/action?admin_token=adm-secret', form({ action: 'cancel-new', id: adminInit.PaymentId, _csrf: csrfToken }), {
+        'Content-Type': 'application/x-www-form-urlencoded', Origin: 'http://attacker.invalid',
+      });
+      assert.strictEqual(deniedCrossOrigin.statusCode, 403, 'cross-site POST запрещён даже с действующим токеном');
+      const validAction = await request(childPort, 'POST', actionUrl, form({ action: 'cancel-new', id: adminInit.PaymentId, _csrf: csrfToken }), { 'Content-Type': 'application/x-www-form-urlencoded' });
+      assert.strictEqual(validAction.statusCode, 302, 'CSRF-форма принимается');
+      assert.strictEqual(validAction.headers.location, '/admin?admin_token=adm-secret', 'redirect сохраняет admin_token из GET');
+      const getStatePayload = { TerminalKey: TERMINAL, PaymentId: adminInit.PaymentId };
+      const adminActionState = JSON.parse((await request(childPort, 'POST', '/v2/GetState', {
+        ...getStatePayload, Token: tokenOf(getStatePayload),
+      })).body);
+      assert.strictEqual(adminActionState.Status, 'CANCELED', 'успешная защищённая форма выполнила действие');
+
       // Платёжный API остаётся доступен без управляющих токенов
       const healthChild = await request(childPort, 'GET', '/health');
       assert.strictEqual(healthChild.statusCode, 200);
@@ -911,17 +964,19 @@ process.env.MOCK_RETRY_MS = '1000';
       assert.strictEqual(v4.statusCode, 403, 'MOCK_BLOCK_PRIVATE_WEBHOOKS=1: private IPv4 в /mock/verify-merchant -> 403');
       assert.ok(String(v4.body).includes('SSRF'), 'DX-ответ должен называть политику SSRF');
 
-      const v6 = await request(childPort, 'POST', '/mock/verify-merchant', { url: 'http://[::1]:3100/hook' });
+      const v6 = await request(childPort, 'POST', '/mock/verify-merchant', { url: 'http://[::1]/hook' });
       assert.strictEqual(v6.statusCode, 403, 'MOCK_BLOCK_PRIVATE_WEBHOOKS=1: private IPv6 -> 403');
 
       // Очередь вебхуков тоже под guard'ом: INCOMING-нотификация не уходит на 127.0.0.1
       const incomingPayload = { TerminalKey: TERMINAL, VerificationCode: 'VER-SSRF', Amount: '100', PayerInn: '7801111111', NotificationURL: notificationUrl };
       const incoming = await request(childPort, 'POST', '/av/v1/payment', { ...incomingPayload, Token: tokenOf(incomingPayload) });
       assert.strictEqual(JSON.parse(incoming.body).Success, true);
-      await sleep(1500);
-      const exported = JSON.parse((await request(childPort, 'GET', '/mock/state')).body);
-      const childState = (exported.state && exported.state.state) || exported.state || {};
-      const notif = Object.values(childState.notifications || {}).find((n) => n.paymentId && n.paymentId.startsWith('IN-'));
+      const notif = await waitForCondition(async () => {
+        const exported = JSON.parse((await request(childPort, 'GET', '/mock/state')).body);
+        const childState = (exported.state && exported.state.state) || exported.state || {};
+        const candidate = Object.values(childState.notifications || {}).find((n) => n.paymentId && n.paymentId.startsWith('IN-'));
+        return candidate && candidate.lastStatus ? candidate : null;
+      }, { description: 'private callback blocked and recorded in queue' });
       assert.ok(notif, 'нотификация должна быть зарегистрирована в очереди');
       assert.ok(String(notif.lastStatus).startsWith('ERR'), `доставка на приватный адрес должна быть заблокирована, lastStatus=${notif.lastStatus}`);
       assert.ok(String(notif.lastStatus).includes('SSRF'), 'причина отказа должна быть явной (SSRF)');
@@ -1264,9 +1319,48 @@ process.env.MOCK_RETRY_MS = '1000';
     assert.strictEqual(cE2cKey.Success, true, 'F-22: PAYOUT-терминал точки тоже допустим');
   }
 
+  // 43. A-20: TerminalKey проверяется во всех E2C-маршрутах до поиска/мутации
+  {
+    const dealId = await fundedDeal(mockPort, 500000, 'order-e2c-terminal-check');
+    const init = JSON.parse((await e2c(mockPort, 'Init', {
+      Amount: '10000', OrderId: 'e2c-terminal-check', DealId: dealId, CardId: 'e2c-terminal-card',
+    })).body);
+    assert.strictEqual(init.Success, true);
+    const payout = state.payouts[init.PaymentId];
+    const beforePayment = JSON.stringify({ status: payout.status, history: payout.statusHistory.length });
+
+    for (const [label, terminalKey] of [['missing', undefined], ['wrong', 'OTHER-TERMINAL']]) {
+      const rejected = JSON.parse((await e2c(mockPort, 'Payment', {
+        TerminalKey: terminalKey, PaymentId: init.PaymentId,
+      })).body);
+      assert.strictEqual(rejected.ErrorCode, '7', `Payment ${label} TerminalKey is rejected before transition`);
+      assert.strictEqual(JSON.stringify({ status: payout.status, history: payout.statusHistory.length }), beforePayment, 'rejected Payment does not mutate payout');
+    }
+    const payment = JSON.parse((await e2c(mockPort, 'Payment', { PaymentId: init.PaymentId })).body);
+    assert.strictEqual(payment.Success, true, 'Payment accepts the configured E2C terminal');
+
+    for (const [label, terminalKey] of [['missing', undefined], ['wrong', 'OTHER-TERMINAL']]) {
+      const rejected = JSON.parse((await e2c(mockPort, 'GetState', {
+        TerminalKey: terminalKey, PaymentId: init.PaymentId,
+      })).body);
+      assert.strictEqual(rejected.ErrorCode, '7', `GetState ${label} TerminalKey is rejected`);
+    }
+    const payoutState = JSON.parse((await e2c(mockPort, 'GetState', { PaymentId: init.PaymentId })).body);
+    assert.strictEqual(payoutState.Success, true);
+    assert.strictEqual(payoutState.Status, 'CONFIRMED');
+
+    for (const terminalKey of [undefined, 'OTHER-TERMINAL']) {
+      const rejected = JSON.parse((await e2c(mockPort, 'GetSbpMembers', { TerminalKey: terminalKey })).body);
+      assert.strictEqual(rejected.ErrorCode, '7', 'GetSbpMembers rejects missing/foreign TerminalKey');
+    }
+    const members = JSON.parse((await e2c(mockPort, 'GetSbpMembers')).body);
+    assert.strictEqual(members.Success, true, 'GetSbpMembers accepts the configured terminal');
+    assert.ok(Array.isArray(members.Members));
+  }
+
   /* --- #8 (RFC-001, F-11—F-15): изоляция песочниц -------------------------- */
 
-  // 43. F-11/F-13: request-local контекст (гонка activeId), target в export/import
+  // 44. F-11/F-13: request-local контекст (гонка activeId), target в export/import
   {
     const sandboxState = async (id) => JSON.parse((await request(mockPort, 'GET', `/mock/state?sandbox=${encodeURIComponent(id)}`)).body).state.state;
     const initIn = (id, orderId, latency = 0) => {
@@ -1312,7 +1406,7 @@ process.env.MOCK_RETRY_MS = '1000';
     assert.ok(expTarget.state.state.payments['777'], 'экспорт читает выбранный снимок');
   }
 
-  // 44. F-12: hosted tenancy — owner-token, креды песочницы, знание ID ≠ доступ
+  // 45. F-12: hosted tenancy — owner-token, креды песочницы, знание ID ≠ доступ
   {
     const child = startChild({ MOCK_TENANCY: '1', MOCK_OPERATOR_TOKEN: 'op-agent', MOCK_SANDBOX_TTL_MS: '3600000' });
     const childPort = await child.port;
@@ -1338,6 +1432,31 @@ process.env.MOCK_RETRY_MS = '1000';
       const payload = { TerminalKey: created.creds.terminalKey, Amount: '100', OrderId: 'owned-1', PaymentRecipientId: DEFAULT_RECIPIENT };
       const init = JSON.parse((await request(childPort, 'POST', '/v2/Init', { ...payload, Token: tokenOf(payload, created.creds.terminalPassword) }, { 'X-Mock-Sandbox': created.id, ...owner })).body);
       assert.strictEqual(init.Success, true, `Init с кредами песочницы должен проходить: ${JSON.stringify(init).slice(0, 160)}`);
+
+      // Native admin form must carry the sandbox owner-token through the POST and redirect.
+      const ownerAdminPage = await request(childPort, 'GET', `/admin?sandbox=${encodeURIComponent(created.id)}`, undefined, owner);
+      const actionMatch = /<form method="POST" action="([^"]*\/admin\/action[^"]*)"/.exec(ownerAdminPage.body);
+      const csrfMatch = /name="_csrf" value="([^"]+)"/.exec(ownerAdminPage.body);
+      let ownerAdminActionWorks = false;
+      if (actionMatch && csrfMatch) {
+        const actionUrl = new URL(actionMatch[1].replace(/&amp;/g, '&'), `http://127.0.0.1:${childPort}`);
+        const adminPost = await request(childPort, 'POST', `${actionUrl.pathname}${actionUrl.search}`,
+          `_csrf=${encodeURIComponent(csrfMatch[1])}&action=cancel-new&id=${encodeURIComponent(init.PaymentId)}`, {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            Origin: `http://127.0.0.1:${childPort}`,
+          });
+        const returnedPage = adminPost.headers.location
+          ? await request(childPort, 'GET', adminPost.headers.location)
+          : null;
+        const redirectQuery = new URL(adminPost.headers.location || '/', `http://127.0.0.1:${childPort}`).searchParams;
+        ownerAdminActionWorks = actionUrl.searchParams.get('sandbox_token') === created.ownerToken
+          && adminPost.statusCode === 302
+          && redirectQuery.get('sandbox_token') === created.ownerToken
+          && returnedPage && returnedPage.statusCode === 200;
+      }
+      assert.ok(ownerAdminPage.statusCode === 200 && ownerAdminActionWorks,
+        `admin form keeps owner-token across POST/redirect; status=${ownerAdminPage.statusCode}`);
+
       // криптография песочницы: чужой (stand) пароль не подходит
       const wrongPassword = JSON.parse((await request(childPort, 'POST', '/v2/Init', { ...payload, OrderId: 'owned-2', Token: tokenOf({ ...payload, OrderId: 'owned-2' }) }, { 'X-Mock-Sandbox': created.id, ...owner })).body);
       assert.strictEqual(wrongPassword.ErrorCode, '13', 'пароль стенда не действует в песочнице (свои креды)');
@@ -1366,7 +1485,7 @@ process.env.MOCK_RETRY_MS = '1000';
     }
   }
 
-  // 45. F-14: персистентность песочницы через рестарт и TTL-очистка
+  // 46. F-14: персистентность песочницы через рестарт и TTL-очистка
   {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tbank-sbx-'));
     const stateFile = path.join(tmpDir, 'state.json');
@@ -1376,11 +1495,15 @@ process.env.MOCK_RETRY_MS = '1000';
     try {
       const payload = { TerminalKey: TERMINAL, Amount: '100', OrderId: 'persist-1', PaymentRecipientId: DEFAULT_RECIPIENT };
       savedPaymentId = JSON.parse((await request(port1, 'POST', '/v2/Init', { ...payload, Token: tokenOf(payload) }, { 'X-Mock-Sandbox': 'persist-a' })).body).PaymentId;
-      await sleep(300); // реестр песочниц пишется атомарно с debounce
+      await waitForCondition(() => {
+        try {
+          const registry = JSON.parse(fs.readFileSync(`${stateFile}.sandboxes.json`, 'utf8'));
+          return registry.sandboxes && registry.sandboxes.some((record) => record.id === 'persist-a' && record.state && record.state.payments && record.state.payments[savedPaymentId]);
+        } catch { return false; }
+      }, { description: 'atomic sandbox registry flush before restart' });
     } finally {
-      child1.stop();
+      await stopChild(child1);
     }
-    await sleep(300);
 
     const child2 = startChild({ MOCK_STATE_FILE: stateFile });
     const port2 = await child2.port;
@@ -1407,8 +1530,10 @@ process.env.MOCK_RETRY_MS = '1000';
       const created = JSON.parse((await request(port3, 'POST', '/sandboxes', {})).body);
       const before = await request(port3, 'GET', '/mock/state', undefined, { 'X-Mock-Sandbox': created.id, Authorization: `Bearer ${created.ownerToken}` });
       assert.strictEqual(before.statusCode, 200, 'до TTL песочница доступна');
-      await sleep(2300);
-      const after = await request(port3, 'GET', '/mock/state', undefined, { 'X-Mock-Sandbox': created.id, Authorization: `Bearer ${created.ownerToken}` });
+      const after = await waitForCondition(async () => {
+        const response = await request(port3, 'GET', '/mock/state', undefined, { 'X-Mock-Sandbox': created.id, Authorization: `Bearer ${created.ownerToken}` });
+        return [404, 410].includes(response.statusCode) ? response : null;
+      }, { timeoutMs: 5000, description: 'sandbox TTL expiry' });
       assert.ok([404, 410].includes(after.statusCode), `после TTL песочница недоступна (получено ${after.statusCode})`);
     } finally {
       child3.stop();
@@ -1416,7 +1541,7 @@ process.env.MOCK_RETRY_MS = '1000';
     }
   }
 
-  // 46. F-15: квота документов песочницы (hosted-лимит на объём state)
+  // 47. F-15: квота документов песочницы (hosted-лимит на объём state)
   {
     const child = startChild({ MOCK_SANDBOX_MAX_DOCUMENTS: '2' });
     const childPort = await child.port;
@@ -1436,7 +1561,7 @@ process.env.MOCK_RETRY_MS = '1000';
     }
   }
 
-  // 47. F-15: снимок без ссылочных индексов (state-файл до их появления) не
+  // 48. F-15: снимок без ссылочных индексов (state-файл до их появления) не
   // ломает создание и поиск по OrderId — индексы пересобираются из state
   {
     const child = startChild({});

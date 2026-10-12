@@ -14,8 +14,10 @@
 > Сегодня поддерживается: эквайринг Т-Банка (обычный + Мультирасчеты Wave 2, СБП QR, рекурренты `RebillId`/`Charge`, регистрация партнёров `acqapi`, чарджбэки e2e,
 > выплаты e2c, верификация AV) и облачная касса OFD Ferma (полная матрица 54-ФЗ:
 > `sell`/`buy` + возвраты и коррекции с позиционным контролем, авансы/зачёты, маркировка Честный ЗНАК,
-> очередь ОФД, смены ККТ 24ч + Z-отчёты, ресурс ФН, dry-run валидация), а также мульти-песочницы (`X-Mock-Sandbox`), активный экзаменатор вебхуков (`/mock/verify-merchant`), OpenAPI 3.1 (`/openapi.json`) и детектор дрейфа протоколов (`npm run check:drift`). Обе модели — «как у провайдера»: переход на боевой контур =
-> смена `TBANK_API_URL`/`FERMA_API_URL`, код интеграции не меняется.
+> очередь ОФД, смены ККТ 24ч + Z-отчёты, ресурс ФН, dry-run валидация), а также мульти-песочницы (`X-Mock-Sandbox`), активный экзаменатор вебхуков (`/mock/verify-merchant`), OpenAPI 3.1 (`/openapi.json`), детектор дрейфа протоколов (`npm run check:drift`) и report-only сверка ссылок первоисточников (`npm run check:upstream`).
+> Обе модели следуют клиентскому контракту провайдера, но это не делает стенд
+> совместимым с production автоматически: перед переключением проверьте
+> конфигурацию, безопасность и условия интеграции; одной смены URL недостаточно.
 
 ## Зачем
 
@@ -102,15 +104,18 @@ docker-compose.include.yml — внешний compose-модуль (профил
 ## Тестирование
 
 ```bash
-npm test              # всё (core + tbank + kassa + check:drift)
-npm run test:core     # ядро (36 проверок): restore/очередь/каталог ошибок/часы/сценарии/песочницы RFC-001/экзаменатор/access-control/SSRF
-npm run test:tbank    # 46 сценариев контракта Т-Банка (вкл. чарджбэки e2e, Wave 2, СБП, рекурренты, acqapi, изоляцию песочниц)
-npm run test:kassa    # 122 проверки контракта Ferma и 54-ФЗ (вкл. buy/авансы/маркировку/смены 24ч/ФН/dry-run, изоляцию песочниц)
+npm test              # всё (core + tbank + kassa + offline upstream selftest + check:drift)
+npm run test:core     # ядро (38 проверок): restore/очередь/каталог ошибок/часы/сценарии/песочницы RFC-001/экзаменатор/access-control/SSRF/tenancy/CSRF
+npm run test:tbank    # 48 сценариев контракта Т-Банка (вкл. E2C TerminalKey, CSRF, чарджбэки, СБП, рекурренты, изоляцию песочниц)
+npm run test:kassa    # 129 проверок Ferma/54-ФЗ (вкл. tenancy, CSRF, owner-token admin, ОФД/ФН, изоляцию песочниц)
 npm run check:drift   # 142 инварианта: сверка protocols/*.json <-> server.js <-> OpenAPI 3.1 <-> docs/reference
+npm run test:upstream  # офлайн selftest синхронизатора snapshot
+npm --silent run check:upstream -- --json # JSON-отчёт; без --silent npm печатает служебный баннер
+npm run check:upstream -- --update # явное обновление snapshot после просмотра
 npm run test:compose  # black-box selftest против контейнеров compose (:3100 и :3101)
 ```
 
-CI гоняет то же на Node 18/20/22 и проверяет, что compose-стенд поднимается.
+CI гоняет то же на Node 18/20/22 и проверяет, что compose-стенд поднимается. Отдельный weekly/ручной workflow сравнивает HTTP-отпечатки ссылок из `docs/reference/external-links.md` с `protocols/upstream-snapshot.json`; он только публикует отчёт, не создаёт issue и не ломает сборку при сетевых сбоях. Снимок изменяется только явной командой `npm run check:upstream -- --update` после просмотра отчёта. SPA-страницы и источник с обязательной авторизацией помечены `mode: "skip"` с причиной.
 
 ## Безопасность
 
