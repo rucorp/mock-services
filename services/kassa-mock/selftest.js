@@ -207,6 +207,23 @@ async function main() {
   r = await request('GET', `/possystem/v1/Main/report/${hdrHang.uuid}?token=${token}`);
   check('X-Mock-Scenario: hang -> вечный wait', r.json().status === 'wait');
 
+  // F-06: http-500/http-504 должны прервать request до создания документа.
+  const chaosHealthBefore = (await request('GET', '/healthz')).json();
+  for (const status of [500, 504]) {
+    const chaosResponse = await request('POST', `/possystem/v1/Main/sell?token=${token}`, {
+      ...sellBody,
+      external_id: `chaos-http-${status}`,
+    }, { 'X-Mock-Scenario': `http-${status}` });
+    check(`X-Mock-Scenario: http-${status} -> HTTP ${status}`, chaosResponse.status === status);
+    const chaosBody = chaosResponse.json();
+    check(`chaos http-${status} -> provider-shaped error`, chaosBody && chaosBody.error && chaosBody.error.code === status
+      && chaosBody.error.field === 'X-Mock-Scenario');
+  }
+  const chaosHealthAfter = (await request('GET', '/healthz')).json();
+  check('chaos http-500/504 не меняет счётчики/очередь', chaosHealthAfter.checks === chaosHealthBefore.checks
+    && chaosHealthAfter.ofdQueueCount === chaosHealthBefore.ofdQueueCount
+    && chaosHealthAfter.fnUsed === chaosHealthBefore.fnUsed);
+
   // 13. stats кассы
   r = await request('GET', `/possystem/v1/stats/cashboxes/extended?token=${token}`);
   check('stats: Готова к работе', r.json().Status === 'Success' && r.json().Data[0].kktState === 'Готова к работе');

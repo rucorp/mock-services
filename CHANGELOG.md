@@ -116,6 +116,7 @@
   - `Init` в профиле `multisplit` требует `PaymentRecipientId` (≤16 символов) до создания платежа; `plain` не меняется.
   - `/e2c/v2/Init` валидирует общие поля (`OrderId`, `Amount`, `DealId`, `PaymentRecipientId`), ровно один канал выплаты (карта / СБП `Phone`+`SbpMemberId` / партнёр `PartnerId`) и сохраняет нормализованный канал; неполная выплата в state не попадает.
   - `/e2c/v2/CancelPayment` отменяет только `CONFIRMED`-выплату партнёру в открытой сделке, требует `DealId` и сверяет его с выплатой, проверяет `TerminalKey` до поиска; статусы `CREDIT_CANCELING` → `CREDIT_CANCELED`; при отказе выплата не меняется.
+- **Остаток major-аудита #36 (F-05/F-06/F-24/F-26/F-27/F-34).** Виртуальные часы валидируют диапазон `Date` до записи state; chaos `http-500/http-504` согласован с core в T-Bank и Ferma и покрыт black-box selftest; денежные поля T-Bank разбираются строгим parser без prefix/trailing junk и дробей; acqapi проверяет Basic credentials, opaque Bearer с TTL и auth на POST/GET/PATCH; регистрация требует документированную схему и маппит `shopArticleId` в `shopCode`; root compose по умолчанию bind-ится на loopback с явным per-service override.
 
 ### Security
 - **Редакция секретов в журналах и минимизация PAN (#24, F-09/F-10).** В ядро

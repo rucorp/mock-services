@@ -57,6 +57,12 @@ jobs:
           echo "$SERVICES_MOCK" | grep -q "kassa-mock"
           echo "$SERVICES_MOCK" | grep -q "yookassa-mock"
           echo "$SERVICES_MOCK" | grep -q "atol-mock"
+      - name: Проверка безопасного bind root compose и явного сетевого override
+        run: |
+          docker compose config --format json > /tmp/mock-compose-default.json
+          jq -e 'any(.services["tbank-mock"].ports[]; .host_ip == "127.0.0.1" and .target == 3100) and any(.services["kassa-mock"].ports[]; .host_ip == "127.0.0.1" and .target == 3101)' /tmp/mock-compose-default.json
+          MOCK_TBANK_BIND_IP=0.0.0.0 MOCK_KASSA_BIND_IP=0.0.0.0 docker compose config --format json > /tmp/mock-compose-network.json
+          jq -e 'any(.services["tbank-mock"].ports[]; .host_ip == "0.0.0.0" and .target == 3100) and any(.services["kassa-mock"].ports[]; .host_ip == "0.0.0.0" and .target == 3101)' /tmp/mock-compose-network.json
       - name: Сборка образа
         run: docker build -t mock-services:local .
       - name: Запуск compose-стенда и ожидание healthcheck

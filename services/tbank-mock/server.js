@@ -137,6 +137,7 @@ function createInitialTbankState({ seed = 0 } = {}) {
     customers: {},           // customerKey -> {customerKey, email, phone, createdAt}
     cards: {},               // cardId -> {cardId, customerKey, panMask, expDate, rebillId, status}
     shops: {},               // shopCode -> acqapi partner shop registration
+    acqTokens: {},           // F-26: sha256(access_token) -> { scope, issuedAtMs, expiresAtMs }
     orderIndex: {},          // F-15: OrderId -> [PaymentId] (производный, без полных сканов)
     dealIndex: {},           // F-15: DealId -> { payments: [PaymentId], payouts: [PayoutId] }
     clockOffsetMs: 0,
@@ -361,15 +362,16 @@ function pushPayoutStatus(payout, status) {
  * до выделения PaymentId и записи в state (F-17).
  */
 function validatePayoutInitFields(body) {
-  const amount = parseInt(body.Amount, 10);
-  if (!Number.isFinite(amount) || amount <= 0) {
+  const money = core.parseMoneyKopeks(body.Amount, { field: 'Amount' });
+  if (!money.ok) {
     return {
-      error: err(7, 'Обязательные параметры не заполнены или невалидны: Amount — целое число копеек больше нуля', null, {
+      error: err(7, `Обязательные параметры не заполнены или невалидны: ${money.message}`, null, {
         field: 'Amount',
         doc: PAYOUT_REF_DOC,
       }),
     };
   }
+  const amount = money.value;
   const orderId = textOrNull(body.OrderId);
   const dealId = textOrNull(body.DealId);
   const recipientId = textOrNull(body.PaymentRecipientId);
@@ -587,6 +589,8 @@ const derr = core.createErrorCatalog({
     13: { message: 'Неверный Token (подпись) запроса', field: 'Token', hint: 'Подпись = sha256(значения всех top-level скаляров кроме Token/null/\'\' + Password, отсортированные по ключу, в нижнем регистре для boolean). Сверьте с conspectus docs/reference/tbank/02-notifications-signature.md.', doc: '/intro/to-api' },
     32: { message: 'Операция недоступна в текущем статусе', field: 'PaymentId | DisputeId', hint: 'Переход запрещён машиной состояний: Confirm — только из AUTHORIZED; Cancel — из NEW (CANCELED), AUTHORIZED (REVERSED/PARTIAL_REVERSED), CONFIRMED (REFUNDED/PARTIAL_REFUNDED); Chargeback — только из CONFIRMED/PARTIAL_REFUNDED по цепочке DISPUTED -> REPRESENTMENT -> ARBITRATION -> WON|LOST.', doc: '/api/confirm' },
     501: { message: 'Метод не поддерживается мок-стендом', hint: 'Стенд реализует Init/Confirm/Cancel/GetState/CheckOrder/Chargeback/Dispute + e2c/AV.', doc: '' },
+    500: { message: 'Сбой шлюза (сценарий мока)', field: 'X-Mock-Scenario', hint: 'Сценарий X-Mock-Scenario: http-500 имитирует 500 шлюза до банка: запрос не выполнен, побочных эффектов нет. Уберите сценарий и повторите.', doc: '' },
+    504: { message: 'Таймаут шлюза (сценарий мока)', field: 'X-Mock-Scenario', hint: 'Сценарий X-Mock-Scenario: http-504 имитирует таймаут шлюза: запрос не выполнен, побочных эффектов нет. Для честной задержки используйте latency:<время>.', doc: '' },
     5000: { message: 'Внутренняя ошибка мок-стенда', hint: 'Смотрите лог сервиса; если воспроизводится — это дефект мока, заводите issue.', doc: '' },
   },
 });
@@ -754,7 +758,11 @@ function applyScenarioToPayment(payment, spec) {
   }
 }
 
-/** Вычисление суммы для сценария partial-refund (процент или копейки). */
+/**
+ * Вычисление суммы для сценария partial-refund (процент или копейки).
+ * F-24: копейки разбираются тем же строгим правилом, что и Amount в API —
+ * мусор в сценарии («30000xyz») не превращается в сумму, а уходит в дефолт 50 %.
+ */
 function resolvePartialAmount(rawSpec, available) {
   if (!rawSpec || rawSpec === true) return Math.max(1, Math.floor(available / 2));
   const s = String(rawSpec).trim();
@@ -764,8 +772,8 @@ function resolvePartialAmount(rawSpec, available) {
       return Math.max(1, Math.round((available * pct) / 100));
     }
   }
-  const kop = parseInt(s, 10);
-  if (Number.isFinite(kop) && kop > 0 && kop < available) return kop;
+  const money = core.parseMoneyKopeks(s, { field: 'partial-refund' });
+  if (money.ok && money.value < available) return money.value;
   return Math.max(1, Math.floor(available / 2));
 }
 
@@ -811,10 +819,12 @@ function openDispute(payment, { amount, reasonCode = '4853', comment = '', suppr
   const available = currentAmount(payment);
   let disputeAmount = available;
   if (amount !== undefined && amount !== null && amount !== '') {
-    const parsed = parseInt(amount, 10);
-    if (!Number.isFinite(parsed) || parsed <= 0) {
-      return { ...err(7, 'Некорректная сумма чарджбэка: Amount должен быть целым числом > 0'), PaymentId: payment.paymentId, OrderId: payment.orderId };
+    // F-24: строгий разбор суммы — «1000xyz»/«1000.9» не должны открывать спор на 1000 копеек.
+    const money = core.parseMoneyKopeks(amount, { field: 'Amount' });
+    if (!money.ok) {
+      return { ...err(7, `Некорректная сумма чарджбэка: ${money.message}`), PaymentId: payment.paymentId, OrderId: payment.orderId };
     }
+    const parsed = money.value;
     if (parsed > available) {
       return {
         ...err(7, `Сумма чарджбэка ${parsed} больше доступной суммы платежа ${available}`),
@@ -1049,6 +1059,223 @@ function handleChargeback(body, reqHeaders = {}) {
   return transitionDispute(dispute, action, body, options);
 }
 
+/* -------------------------------------- acqapi OAuth + регистрация партнёров */
+
+/**
+ * F-26: до 0.5.0 `/oauth/token` проверял только префикс `Basic `, bearer-токен
+ * собирался из виртуального времени (предсказуем) и нигде не валидировался, а
+ * GET/PATCH регистрации были доступны анонимно. Здесь — честная модель:
+ *   • Basic-креды клиента сверяются с MOCK_ACQAPI_CLIENT_ID/SECRET (дефолт
+ *     эталона — `partner:partner`, docs/reference/tbank/03-payouts-and-deals.md);
+ *   • выдаётся opaque-токен (crypto random), в state лежит только его SHA-256
+ *     с scope и TTL, поэтому токен не течёт через /mock/state и журнал;
+ *   • каждая операция регистрации требует действующий bearer со scope partner.
+ * TTL по умолчанию 1 час (как `expires_in: 3600` в эталоне), переопределяется
+ * MOCK_ACQAPI_TOKEN_TTL_MS; отсчёт — по виртуальным часам, поэтому истечение
+ * проверяется через POST /mock/time без ожидания.
+ */
+const ACQAPI_CLIENT_ID = String(process.env.MOCK_ACQAPI_CLIENT_ID || '').trim() || 'partner';
+const ACQAPI_CLIENT_SECRET = String(process.env.MOCK_ACQAPI_CLIENT_SECRET || '').trim() || 'partner';
+const ACQAPI_TOKEN_TTL_MS = parseMsOr(process.env.MOCK_ACQAPI_TOKEN_TTL_MS, 60 * 60 * 1000);
+const ACQAPI_SCOPE = 'partner';
+const ACQAPI_GRANT_TYPES = ['password', 'client_credentials'];
+
+/** Разбор `Authorization: Basic ...` без привязки к регистру схемы. */
+function parseBasicAuth(header) {
+  const m = /^basic\s+([A-Za-z0-9+/=_-]+)$/i.exec(String(header || '').trim());
+  if (!m) return null;
+  let decoded;
+  try {
+    decoded = Buffer.from(m[1], 'base64').toString('utf8');
+  } catch {
+    return null;
+  }
+  const sep = decoded.indexOf(':');
+  if (sep < 0) return null;
+  return { clientId: decoded.slice(0, sep), clientSecret: decoded.slice(sep + 1) };
+}
+
+/** Разбор `Authorization: Bearer ...` без привязки к регистру схемы. */
+function parseBearerAuth(header) {
+  const m = /^bearer\s+([A-Za-z0-9._~+/=-]+)$/i.exec(String(header || '').trim());
+  return m ? m[1] : null;
+}
+
+/** Старый state-файл может не знать о новой коллекции acqTokens. */
+function acqapiTokenStore() {
+  if (!isRecord(state.acqTokens)) state.acqTokens = Object.create(null);
+  return state.acqTokens;
+}
+
+/** Выпуск opaque-токена: в state — только хэш, scope и TTL (F-26). */
+function issueAcqapiToken() {
+  const raw = core.randomToken(32);
+  const issuedAtMs = clock.now();
+  acqapiTokenStore()[core.hashSecret(raw)] = {
+    scope: ACQAPI_SCOPE,
+    issuedAtMs,
+    expiresAtMs: issuedAtMs + ACQAPI_TOKEN_TTL_MS,
+  };
+  persist();
+  return {
+    access_token: raw,
+    token_type: 'Bearer',
+    expires_in: Math.max(1, Math.round(ACQAPI_TOKEN_TTL_MS / 1000)),
+    scope: ACQAPI_SCOPE,
+  };
+}
+
+/**
+ * Проверка bearer-токена на каждой защищённой операции: наличие, срок жизни
+ * (виртуальные часы), scope. Возвращает OAuth-shaped описание отказа или null.
+ */
+function checkAcqapiBearer(req, { scope = ACQAPI_SCOPE } = {}) {
+  const raw = parseBearerAuth(req.headers && req.headers.authorization);
+  if (!raw) {
+    return { error: 'invalid_token', message: 'Требуется заголовок Authorization: Bearer <access_token> — получите токен в POST /oauth/token (Basic client credentials)' };
+  }
+  const hash = core.hashSecret(raw);
+  const rec = acqapiTokenStore()[hash];
+  if (!rec) {
+    return { error: 'invalid_token', message: 'Bearer-токен неизвестен стенду: получите новый в POST /oauth/token (старые токены не переживают reset/перезапуск стенда)' };
+  }
+  const nowMs = clock.now();
+  if (!Number.isFinite(rec.expiresAtMs) || rec.expiresAtMs <= nowMs) {
+    return {
+      error: 'invalid_token',
+      message: `Bearer-токен истёк (TTL ${Math.round(ACQAPI_TOKEN_TTL_MS / 1000)} с) — получите новый в POST /oauth/token`,
+      expires_at: rec.expiresAtMs,
+    };
+  }
+  if (scope && rec.scope !== scope) {
+    return { error: 'insufficient_scope', message: `Токену выдан scope «${rec.scope}», для этой операции нужен «${scope}»` };
+  }
+  return null;
+}
+
+function sendAcqapiAuthError(res, authError) {
+  return sendJson(res, { error: authError.error, message: authError.message, ...(authError.expires_at !== undefined ? { expires_at: authError.expires_at } : {}) }, 401);
+}
+
+function isRecord(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function requiredText(value, field, { maxLength = 0, pattern, patternHint = '' } = {}) {
+  if (typeof value !== 'string' || !value.trim()) return { field, message: `${field} обязателен и должен быть непустой строкой` };
+  const text = value.trim();
+  if (maxLength && text.length > maxLength) return { field, message: `${field} длиннее допустимого максимума ${maxLength} символов` };
+  if (pattern && !pattern.test(text)) return { field, message: `${field} имеет недопустимый формат${patternHint ? `: ${patternHint}` : ''}` };
+  return null;
+}
+
+function validateAcqapiAddress(address, index) {
+  const prefix = `addresses[${index}]`;
+  if (!isRecord(address)) return { field: prefix, message: `${prefix} должен быть объектом` };
+  const type = address.type || address.addressType || address.kind;
+  let problem = requiredText(type, `${prefix}.type`, { pattern: /^(legal|actual|mailing|registration|other)$/i, patternHint: 'legal, actual, mailing, registration или other' });
+  if (problem) return problem;
+  problem = requiredText(address.zip, `${prefix}.zip`, { pattern: /^\d{6}$/, patternHint: 'шесть цифр индекса' });
+  if (problem) return problem;
+  problem = requiredText(address.country, `${prefix}.country`, { pattern: /^[A-Za-z]{3}$/, patternHint: 'ISO-3, например RUS' });
+  if (problem) return problem;
+  for (const field of ['city', 'street']) {
+    problem = requiredText(address[field], `${prefix}.${field}`, { maxLength: 255 });
+    if (problem) return problem;
+  }
+  return null;
+}
+
+function validateAcqapiBankAccount(account, field = 'bankAccount') {
+  if (!isRecord(account)) return { field, message: `${field} обязателен и должен быть объектом` };
+  const fields = [
+    ['account', /^\d{20}$/, '20 цифр расчётного счёта'],
+    ['korAccount', /^\d{20}$/, '20 цифр корреспондентского счёта'],
+    ['bankName', null, 'название банка'],
+    ['bik', /^\d{9}$/, '9 цифр БИК'],
+    ['details', null, 'шаблон назначения платежа'],
+  ];
+  for (const [name, pattern, hint] of fields) {
+    const problem = requiredText(account[name], `${field}.${name}`, { pattern, patternHint: hint });
+    if (problem) return problem;
+  }
+  const hasKbk = account.kbk !== undefined && account.kbk !== null && account.kbk !== '';
+  const hasOktmo = account.oktmo !== undefined && account.oktmo !== null && account.oktmo !== '';
+  if (hasKbk !== hasOktmo) {
+    return { field: `${field}.kbk|${field}.oktmo`, message: `${field}.kbk и ${field}.oktmo передаются парой` };
+  }
+  if (hasKbk) {
+    const kbk = requiredText(String(account.kbk), `${field}.kbk`, { pattern: /^\d{20}$/, patternHint: '20 цифр КБК' });
+    if (kbk) return kbk;
+    const oktmo = requiredText(String(account.oktmo), `${field}.oktmo`, { pattern: /^\d{8,11}$/, patternHint: '8–11 цифр ОКТМО' });
+    if (oktmo) return oktmo;
+  }
+  return null;
+}
+
+/**
+ * Контрактная схема POST /sm-register/register (F-27). Схема намеренно
+ * проверяется до выделения shopCode/квоты и до записи state: частичная заявка
+ * не создаёт «магазин», который потом нельзя отличить от полноценного.
+ */
+function validateAcqapiRegistration(body) {
+  if (!isRecord(body)) return { field: 'body', message: 'Тело регистрации должно быть JSON-объектом' };
+  const textFields = [
+    ['shopArticleId', { maxLength: 32, pattern: /^[A-Za-z0-9_.-]+$/, patternHint: 'латиница, цифры, точка, дефис, подчёркивание' }],
+    ['billingDescriptor', { maxLength: 14, pattern: /^[A-Za-z0-9._ -]+$/, patternHint: 'латиница, цифры, точка, пробел, дефис, подчёркивание' }],
+    ['fullName', { maxLength: 255, pattern: /[А-Яа-яЁё]/, patternHint: 'наименование с кириллическими буквами' }],
+    ['name', { maxLength: 255, pattern: /[А-Яа-яЁё]/, patternHint: 'наименование с кириллическими буквами и ОПФ' }],
+    ['email', { maxLength: 254, pattern: /^[^\s@]+@[^\s@]+\.[^\s@]+$/, patternHint: 'email' }],
+    ['siteUrl', { maxLength: 2048, pattern: /^https?:\/\/[^\s/$.?#].[^\s]*$/i, patternHint: 'URL с http:// или https://' }],
+  ];
+  for (const [field, options] of textFields) {
+    const problem = requiredText(body[field], field, options);
+    if (problem) return problem;
+  }
+  let problem = requiredText(body.inn, 'inn', { pattern: /^\d{10}(?:\d{2})?$/, patternHint: '10 или 12 цифр' });
+  if (problem) return problem;
+  // В эталонной фикстуре для точки без КПП используется «00000000»; реальные
+  // российские КПП имеют 9 цифр, поэтому принимаем обе документированные формы.
+  problem = requiredText(body.kpp, 'kpp', { pattern: /^\d{8,9}$/, patternHint: '8 или 9 цифр' });
+  if (problem) return problem;
+  problem = requiredText(body.ogrn, 'ogrn', { pattern: /^\d{13}(?:\d{2})?$/, patternHint: '13 или 15 цифр' });
+  if (problem) return problem;
+
+  if (!Array.isArray(body.addresses) || body.addresses.length === 0) {
+    return { field: 'addresses', message: 'addresses обязателен: передайте хотя бы legal/actual-адрес' };
+  }
+  for (let index = 0; index < body.addresses.length; index += 1) {
+    problem = validateAcqapiAddress(body.addresses[index], index);
+    if (problem) return problem;
+  }
+
+  if (!isRecord(body.ceo)) return { field: 'ceo', message: 'ceo обязателен и должен быть объектом' };
+  problem = requiredText(body.ceo.phone, 'ceo.phone', { pattern: /^\+?[0-9 ()-]{7,32}$/, patternHint: 'телефон' });
+  if (problem) return problem;
+  problem = requiredText(body.ceo.citizenship, 'ceo.citizenship', { maxLength: 64 });
+  if (problem) return problem;
+
+  if (!isRecord(body.founders) || !Array.isArray(body.founders.individuals) || body.founders.individuals.length === 0) {
+    return { field: 'founders.individuals', message: 'founders.individuals обязателен и должен содержать хотя бы одного учредителя' };
+  }
+  for (let index = 0; index < body.founders.individuals.length; index += 1) {
+    if (!isRecord(body.founders.individuals[index])) {
+      return { field: `founders.individuals[${index}]`, message: `founders.individuals[${index}] должен быть объектом` };
+    }
+  }
+
+  problem = validateAcqapiBankAccount(body.bankAccount);
+  if (problem) return problem;
+  if (body.mcc !== undefined && body.mcc !== null && body.mcc !== '') {
+    problem = requiredText(String(body.mcc), 'mcc', { pattern: /^\d{4}$/, patternHint: '4 цифры MCC' });
+    if (problem) return problem;
+  }
+  if (typeof body.nonResident !== 'boolean') {
+    return { field: 'nonResident', message: 'nonResident обязателен и должен быть boolean (для этой фикстуры false)' };
+  }
+  return null;
+}
+
 /* ------------------------------------------------------------- API logic */
 
 function checkTerminalKey(body) {
@@ -1075,9 +1302,15 @@ function checkE2cTerminalKey(body) {
 function handleInit(body, reqHeaders = {}) {
   const badTerminal = checkTerminalKey(body);
   if (badTerminal) return badTerminal;
-  const amount = parseInt(body.Amount, 10);
-  if (!body.OrderId || !Number.isFinite(amount) || amount <= 0) {
-    return err(7, 'Обязательные параметры не заполнены или невалидны (Amount, OrderId)');
+  // F-24: строгий разбор суммы до любых проверок уникальности OrderId —
+  // невалидный Amount не должен ни создавать платёж, ни «съедать» OrderId.
+  const money = core.parseMoneyKopeks(body.Amount, { field: 'Amount' });
+  if (!money.ok) {
+    return err(7, `Обязательные параметры не заполнены или невалидны (Amount, OrderId): ${money.message}`, null, { field: 'Amount' });
+  }
+  const amount = money.value;
+  if (!body.OrderId) {
+    return err(7, 'Обязательные параметры не заполнены или невалидны (Amount, OrderId): OrderId обязателен', null, { field: 'OrderId' });
   }
   if (!ALLOW_DUPLICATE_ORDER_ID) {
     const existing = paymentsOfOrder(body.OrderId).find((p) => p.orderId === String(body.OrderId));
@@ -1293,10 +1526,12 @@ function handleConfirm(body, reqHeaders = {}) {
   }
   let amount = payment.amount;
   if (body.Amount !== undefined && body.Amount !== null && body.Amount !== '') {
-    amount = parseInt(body.Amount, 10);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      return { ...err(7, 'Некорректная сумма подтверждения'), PaymentId: payment.paymentId };
+    // F-24: строгий разбор суммы подтверждения (частичный Confirm).
+    const money = core.parseMoneyKopeks(body.Amount, { field: 'Amount' });
+    if (!money.ok) {
+      return { ...err(7, `Некорректная сумма подтверждения: ${money.message}`, null, { field: 'Amount' }), PaymentId: payment.paymentId };
     }
+    amount = money.value;
     if (amount > payment.amount) {
       return { ...err(7, 'Сумма подтверждения больше суммы авторизации'), PaymentId: payment.paymentId };
     }
@@ -1355,10 +1590,12 @@ function handleCancel(body, reqHeaders = {}) {
   const originalAmount = currentAmount(payment);
   let cancelAmount = originalAmount;
   if (before !== 'NEW' && body.Amount !== undefined && body.Amount !== null && body.Amount !== '') {
-    const a = parseInt(body.Amount, 10);
-    if (!Number.isFinite(a) || a <= 0) {
-      return { ...err(7, 'Некорректная сумма отмены: Amount должен быть целым числом > 0'), PaymentId: payment.paymentId, OrderId: payment.orderId };
+    // F-24: строгий разбор суммы возврата/отмены — без «1000xyz» и дробей.
+    const money = core.parseMoneyKopeks(body.Amount, { field: 'Amount' });
+    if (!money.ok) {
+      return { ...err(7, `Некорректная сумма отмены: ${money.message}`, null, { field: 'Amount' }), PaymentId: payment.paymentId, OrderId: payment.orderId };
     }
+    const a = money.value;
     if (a > originalAmount) {
       return {
         ...err(7, `Сумма отмены ${a} больше доступной суммы ${originalAmount}`),
@@ -2301,11 +2538,17 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
       return originalWriteHead(code, ...rest);
     };
 
-    // Инъекция задержек и сетевых сбоев (X-Mock-Latency, X-Mock-Scenario: latency:..., http-500, http-504)
+    // Инъекция задержек и сетевых сбоев (X-Mock-Latency, X-Mock-Scenario: latency:..., http-500, http-504).
+    // F-06: контракт ядра — { abortStatus, abortMessage }; сбой шлюза отдаётся
+    // provider-shaped ошибкой с HTTP-статусом сценария и без побочных эффектов
+    // (handler запроса не вызывается вовсе).
     const chaosSpec = parseScenarioSpec(req.headers['x-mock-scenario'] || '');
     const chaosResult = await applyRequestChaos(req, chaosSpec);
-    if (chaosResult.fault) {
-      return sendJson(res, err(chaosResult.fault.status, chaosResult.fault.message), chaosResult.fault.status);
+    if (chaosResult.abortStatus) {
+      return sendJson(res, err(chaosResult.abortStatus, chaosResult.abortMessage, null, {
+        field: 'X-Mock-Scenario',
+        hint: 'Сценарий X-Mock-Scenario: http-500|http-504 имитирует сбой шлюза — запрос не дошёл до банка. Задержка — latency:<время>, например latency:250ms.',
+      }), chaosResult.abortStatus);
     }
   }
 
@@ -2459,48 +2702,62 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
 
   // ── acqapi: OAuth 2.0 + Регистрация партнёров (/sm-register/register*)
   if (p === '/oauth/token' && req.method === 'POST') {
-    const auth = String(req.headers.authorization || '');
-    if (!auth.startsWith('Basic ')) {
-      return sendJson(res, { error: 'invalid_client', error_description: 'Basic authorization header is required (Basic partner:password)' }, 401);
+    // F-26: Basic-креды клиента берутся из конфигурации стенда (эталон: partner:partner).
+    const basic = parseBasicAuth(req.headers.authorization);
+    if (!basic || basic.clientId !== ACQAPI_CLIENT_ID || basic.clientSecret !== ACQAPI_CLIENT_SECRET) {
+      return sendJson(res, {
+        error: 'invalid_client',
+        error_description: `Basic-авторизация клиента обязательна и сверяется с MOCK_ACQAPI_CLIENT_ID/MOCK_ACQAPI_CLIENT_SECRET (эталон: partner:partner); передавайте заголовок Authorization: Basic base64(clientId:clientSecret)`,
+      }, 401);
     }
-    const token = 'mock-acqapi-bearer-' + Buffer.from(`${clock.now()}`).toString('base64').replace(/=/g, '');
-    return sendJson(res, {
-      access_token: token,
-      token_type: 'Bearer',
-      expires_in: 3600,
-      scope: 'sm-register',
-    });
+    const grantType = String((body && body.grant_type) || 'client_credentials').trim();
+    if (!ACQAPI_GRANT_TYPES.includes(grantType)) {
+      return sendJson(res, {
+        error: 'unsupported_grant_type',
+        error_description: `grant_type «${grantType}» не поддерживается мок-стендом; допустимо: ${ACQAPI_GRANT_TYPES.join(', ')}`,
+      }, 400);
+    }
+    return sendJson(res, issueAcqapiToken());
   }
 
   if (p === '/sm-register/register' && req.method === 'POST') {
-    const auth = String(req.headers.authorization || '');
-    if (!auth.startsWith('Bearer ')) {
-      return sendJson(res, { error: 'unauthorized', message: 'Bearer token is required (получите токен в POST /oauth/token)' }, 401);
+    const authError = checkAcqapiBearer(req);
+    if (authError) return sendAcqapiAuthError(res, authError);
+    const schemaError = validateAcqapiRegistration(body);
+    if (schemaError) {
+      return sendJson(res, err(7, `Регистрация партнёра не прошла проверку схемы: ${schemaError.message}`, null, {
+        field: schemaError.field,
+        doc: '/e2c',
+        hint: 'Передайте обязательные shopArticleId, реквизиты ЮЛ, addresses[], ceo, founders.individuals[], bankAccount и nonResident по docs/reference/tbank/03-payouts-and-deals.md.',
+      }), 400);
     }
-    const descriptor = String(body.billingDescriptor || '').trim();
-    if (!descriptor || descriptor.length > 14 || !/^[A-Za-z0-9._ -]+$/.test(descriptor)) {
-      return sendJson(
-        res,
-        err(7, `billingDescriptor «${descriptor}» невалиден (до 14 символов: латиница, цифры, точка, пробел, дефис, подчёркивание)`, null, {
-          field: 'billingDescriptor',
-          doc: '/e2c',
-        }),
-        400,
-      );
+    const descriptor = body.billingDescriptor.trim();
+    const inn = body.inn.trim();
+    // F-27: shopArticleId — внешний код точки у площадки — является shopCode
+    // мока и далее тем же PartnerId в выплате; случайный код больше не генерируется.
+    const shopCode = body.shopArticleId.trim();
+    if (!isRecord(state.shops)) state.shops = Object.create(null);
+    if (Object.prototype.hasOwnProperty.call(state.shops, shopCode)) {
+      return sendJson(res, err(7, `Партнёр shopArticleId/shopCode «${shopCode}» уже зарегистрирован`, null, { field: 'shopArticleId' }), 409);
     }
-    const inn = String(body.inn || (body.requisites && body.requisites.inn) || '').trim();
-    if (!/^\d{10}(\d{2})?$/.test(inn)) {
-      return sendJson(res, err(7, `ИНН партнёра «${inn}» должен содержать 10 или 12 цифр`, null, { field: 'inn' }), 400);
-    }
-    const shopCode = String(body.shopCode || (700000 + Object.keys(state.shops || {}).length + 1));
     const shop = {
       code: shopCode,
       shopCode,
-      name: body.name || body.fullName || descriptor,
+      shopArticleId: shopCode,
+      name: body.name.trim(),
+      fullName: body.fullName.trim(),
       inn,
+      kpp: body.kpp.trim(),
+      ogrn: body.ogrn.trim(),
       billingDescriptor: descriptor,
-      email: body.email || null,
-      bankAccount: body.bankAccount || body.requisites || {},
+      email: body.email.trim(),
+      siteUrl: body.siteUrl.trim(),
+      addresses: body.addresses,
+      ceo: body.ceo,
+      founders: body.founders,
+      bankAccount: body.bankAccount,
+      mcc: body.mcc === undefined || body.mcc === null || body.mcc === '' ? null : String(body.mcc),
+      nonResident: body.nonResident,
       status: 'ACTIVE',
       terminals: [
         { terminalKey: `${terminalKey()}`, type: 'ACQUIRING' },
@@ -2515,27 +2772,63 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
     return sendJson(res, shop);
   }
 
-  const smGetMatch = p.match(/^\/sm-register\/register\/shop\/([A-Za-z0-9_-]+)$/);
+  const smGetMatch = p.match(/^\/sm-register\/register\/shop\/([A-Za-z0-9_.-]+)$/);
   if (smGetMatch && req.method === 'GET') {
-    const shop = state.shops[smGetMatch[1]];
+    const authError = checkAcqapiBearer(req);
+    if (authError) return sendAcqapiAuthError(res, authError);
+    const shop = state.shops && state.shops[smGetMatch[1]];
     if (!shop) return sendJson(res, err(8, `Партнёр shopCode=«${smGetMatch[1]}» не найден`), 404);
     return sendJson(res, shop);
   }
 
-  const smPatchMatch = p.match(/^\/sm-register\/register\/([A-Za-z0-9_-]+)$/);
+  const smPatchMatch = p.match(/^\/sm-register\/register\/([A-Za-z0-9_.-]+)$/);
   if ((smPatchMatch && req.method === 'PATCH') || (smPatchMatch && req.method === 'POST')) {
-    const shop = state.shops[smPatchMatch[1]];
+    const authError = checkAcqapiBearer(req);
+    if (authError) return sendAcqapiAuthError(res, authError);
+    const shop = state.shops && state.shops[smPatchMatch[1]];
     if (!shop) return sendJson(res, err(8, `Партнёр shopCode=«${smPatchMatch[1]}» не найден`), 404);
     if (body.billingDescriptor !== undefined) {
-      const descriptor = String(body.billingDescriptor).trim();
-      if (!descriptor || descriptor.length > 14 || !/^[A-Za-z0-9._ -]+$/.test(descriptor)) {
-        return sendJson(res, err(7, `billingDescriptor «${descriptor}» невалиден (до 14 символов латиницей)`, null, { field: 'billingDescriptor' }), 400);
-      }
-      shop.billingDescriptor = descriptor;
+      const descriptorProblem = requiredText(body.billingDescriptor, 'billingDescriptor', {
+        maxLength: 14,
+        pattern: /^[A-Za-z0-9._ -]+$/,
+        patternHint: 'латиница, цифры, точка, пробел, дефис, подчёркивание',
+      });
+      if (descriptorProblem) return sendJson(res, err(7, descriptorProblem.message, null, { field: descriptorProblem.field }), 400);
+      shop.billingDescriptor = body.billingDescriptor.trim();
     }
-    if (body.name) shop.name = body.name;
-    if (body.email) shop.email = body.email;
-    if (body.bankAccount) shop.bankAccount = { ...shop.bankAccount, ...body.bankAccount };
+    if (body.name !== undefined) {
+      const nameProblem = requiredText(body.name, 'name', { maxLength: 255, pattern: /[А-Яа-яЁё]/, patternHint: 'кириллическое наименование' });
+      if (nameProblem) return sendJson(res, err(7, nameProblem.message, null, { field: nameProblem.field }), 400);
+      shop.name = body.name.trim();
+    }
+    if (body.fullName !== undefined) {
+      const fullNameProblem = requiredText(body.fullName, 'fullName', { maxLength: 255, pattern: /[А-Яа-яЁё]/, patternHint: 'кириллическое наименование' });
+      if (fullNameProblem) return sendJson(res, err(7, fullNameProblem.message, null, { field: fullNameProblem.field }), 400);
+      shop.fullName = body.fullName.trim();
+    }
+    if (body.email !== undefined) {
+      const emailProblem = requiredText(body.email, 'email', { maxLength: 254, pattern: /^[^\s@]+@[^\s@]+\.[^\s@]+$/, patternHint: 'email' });
+      if (emailProblem) return sendJson(res, err(7, emailProblem.message, null, { field: emailProblem.field }), 400);
+      shop.email = body.email.trim();
+    }
+    if (body.siteUrl !== undefined) {
+      const urlProblem = requiredText(body.siteUrl, 'siteUrl', { maxLength: 2048, pattern: /^https?:\/\/[^\s/$.?#].[^\s]*$/i, patternHint: 'URL с http:// или https://' });
+      if (urlProblem) return sendJson(res, err(7, urlProblem.message, null, { field: urlProblem.field }), 400);
+      shop.siteUrl = body.siteUrl.trim();
+    }
+    if (body.bankAccount !== undefined) {
+      const bankProblem = validateAcqapiBankAccount(body.bankAccount);
+      if (bankProblem) return sendJson(res, err(7, bankProblem.message, null, { field: bankProblem.field }), 400);
+      shop.bankAccount = body.bankAccount;
+    }
+    if (body.addresses !== undefined) {
+      if (!Array.isArray(body.addresses) || body.addresses.length === 0) return sendJson(res, err(7, 'addresses должен быть непустым массивом', null, { field: 'addresses' }), 400);
+      for (let index = 0; index < body.addresses.length; index += 1) {
+        const addressProblem = validateAcqapiAddress(body.addresses[index], index);
+        if (addressProblem) return sendJson(res, err(7, addressProblem.message, null, { field: addressProblem.field }), 400);
+      }
+      shop.addresses = body.addresses;
+    }
     shop.updatedAt = clock.iso();
     persist();
     return sendJson(res, shop);
@@ -2553,12 +2846,15 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
   if (p === '/av/v1/payment' && req.method === 'POST') {
     if (!verifyToken(body)) return sendJson(res, err(13, 'Неверный Token (подпись) запроса'));
     const code = String(body.VerificationCode || '');
-    const amount = parseInt(body.Amount, 10);
     const payerInn = String(body.PayerInn || '');
     const payerName = String(body.PayerName || '');
-    if (!code || !Number.isFinite(amount) || amount <= 0 || !payerInn) {
-      return sendJson(res, err(7, 'Обязательные параметры не заполнены (VerificationCode, Amount, PayerInn)'));
+    // F-24: строгая сумма «прогона рубля» — до счётчика поступлений и state.
+    const money = core.parseMoneyKopeks(body.Amount, { field: 'Amount' });
+    if (!code || !money.ok || !payerInn) {
+      const moneyPart = money.ok ? '' : `: ${money.message}`;
+      return sendJson(res, err(7, `Обязательные параметры не заполнены (VerificationCode, Amount, PayerInn)${moneyPart}`, null, money.ok ? undefined : { field: 'Amount' }));
     }
+    const amount = money.value;
     const incomingId = 'IN-' + String(state.counters.incomingId++);
     const account = '40702810' + String(Math.floor(1e12 + Math.random() * 9e12));
     const incoming = {
@@ -2847,10 +3143,13 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
   if (p === '/av/v1/verification' && req.method === 'POST') {
     if (!verifyToken(body)) return sendJson(res, err(13, 'Неверный Token (подпись) запроса'));
     const code = String(body.VerificationCode || '');
-    const amount = parseInt(body.Amount, 10);
-    if (!code || !Number.isFinite(amount) || amount <= 0) {
-      return sendJson(res, err(7, 'Обязательные параметры не заполнены (VerificationCode, Amount)'));
+    // F-24: строгая сумма верификации счёта — до счётчика verificationId и state.
+    const money = core.parseMoneyKopeks(body.Amount, { field: 'Amount' });
+    if (!code || !money.ok) {
+      const moneyPart = money.ok ? '' : `: ${money.message}`;
+      return sendJson(res, err(7, `Обязательные параметры не заполнены (VerificationCode, Amount)${moneyPart}`, null, money.ok ? undefined : { field: 'Amount' }));
     }
+    const amount = money.value;
     const verificationId = String(state.counters.verificationId++);
     const now = () => clock.iso();
     const verification = {

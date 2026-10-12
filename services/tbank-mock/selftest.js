@@ -40,6 +40,9 @@ process.env.MOCK_PROFILE = 'multisplit';
 process.env.MOCK_RETRY_MS = '1000';
 process.env.MOCK_STATE_FILE = '';
 process.env.MOCK_PUBLIC_BASE_URL = 'http://mock.test';
+// acqapi reference credentials from docs/reference/tbank/03-payouts-and-deals.md.
+process.env.MOCK_ACQAPI_CLIENT_ID = 'partner';
+process.env.MOCK_ACQAPI_CLIENT_SECRET = 'mock-acqapi-secret';
 
 const { server, state, tokenOf, TERMINAL_KEY, TERMINAL_PASSWORD } = require('./server.js');
 
@@ -117,16 +120,45 @@ async function fundedDeal(port, amountKopeks = 100000, orderPrefix = 'fund') {
  * Партнёрская точка через acqapi (OAuth + sm-register): её shopCode используется
  * как PartnerId в выплатах `/e2c/v2/Init` (F-20).
  */
+let partnerFixtureNumber = 0;
+
+function partnerRegistrationFixture(descriptor, inn = '7701234567', article = '') {
+  partnerFixtureNumber += 1;
+  const safeArticle = article || `article-${partnerFixtureNumber}-${String(descriptor).toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 18)}`;
+  return {
+    shopArticleId: safeArticle,
+    billingDescriptor: descriptor,
+    fullName: `ООО «${descriptor}»`,
+    name: `ООО «${descriptor}»`,
+    inn,
+    kpp: '00000000',
+    ogrn: '1027700132195',
+    addresses: [{ type: 'legal', zip: '190000', country: 'RUS', city: 'Санкт-Петербург', street: 'Невский проспект, 1' }],
+    ceo: { phone: '+79991112233', citizenship: 'RUS' },
+    founders: { individuals: [{ fullName: 'Иванов Иван Иванович' }] },
+    email: 'shop@example.test',
+    siteUrl: 'https://shop.example.test',
+    bankAccount: {
+      account: '40702810000000000001',
+      korAccount: '30101810000000000001',
+      bankName: 'АО «Т-Банк»',
+      bik: '044525974',
+      details: 'Перевод средств по договору $(date). Сумма $(rub) руб. $(kop) коп.',
+    },
+    mcc: '5812',
+    nonResident: false,
+  };
+}
+
 async function registerPartner(port, descriptor, inn = '7701234567') {
-  const oauth = await request(port, 'POST', '/oauth/token', 'grant_type=client_credentials', {
+  const oauth = await request(port, 'POST', '/oauth/token', 'grant_type=password&username=partner&password=partner', {
     'Content-Type': 'application/x-www-form-urlencoded',
-    Authorization: 'Basic ' + Buffer.from('partner:partner').toString('base64'),
+    Authorization: 'Basic ' + Buffer.from('partner:mock-acqapi-secret').toString('base64'),
   });
+  if (oauth.statusCode !== 200) throw new Error(`OAuth не выдал токен: ${oauth.statusCode} ${oauth.body}`);
   const token = JSON.parse(oauth.body).access_token;
-  const shop = JSON.parse((await request(port, 'POST', '/sm-register/register', {
-    billingDescriptor: descriptor, inn, name: `ООО «${descriptor}»`,
-  }, { Authorization: `Bearer ${token}` })).body);
-  if (!shop.shopCode) throw new Error(`не удалось зарегистрировать партнёра: ${JSON.stringify(shop).slice(0, 200)}`);
+  const shop = JSON.parse((await request(port, 'POST', '/sm-register/register', partnerRegistrationFixture(descriptor, inn), { Authorization: `Bearer ${token}` })).body);
+  if (!shop.shopCode) throw new Error(`не удалось зарегистрировать партнёра: ${JSON.stringify(shop).slice(0, 300)}`);
   return shop.shopCode;
 }
 
@@ -600,6 +632,72 @@ process.env.MOCK_RETRY_MS = '1000';
     await request(mockPort, 'POST', '/mock/time', { reset: true });
   }
 
+  // 27c. F-05/F-06/F-24: виртуальные часы не принимают Date-overflow, chaos
+  // обрывает запрос до handler, а все денежные Amount endpoints отклоняют
+  // prefix/trailing junk и дроби без записи нового документа.
+  {
+    const offsetBefore = state.clockOffsetMs || 0;
+    for (const spec of [{ offsetMs: Number.MAX_VALUE }, { advance: '9999999999999d' }]) {
+      const badClock = await request(mockPort, 'POST', '/mock/time', spec);
+      assert.strictEqual(badClock.statusCode, 400, `некорректный virtual clock ${JSON.stringify(spec)} -> 400`);
+      assert.strictEqual(state.clockOffsetMs || 0, offsetBefore, 'невалидный offset не должен попадать в state');
+    }
+    const clockAfterReject = JSON.parse((await request(mockPort, 'GET', '/mock/time')).body);
+    assert.strictEqual(clockAfterReject.offsetMs, offsetBefore, 'после отказа clock остаётся пригодным');
+
+    const paymentsBeforeChaos = Object.keys(state.payments).length;
+    for (const status of [500, 504]) {
+      const chaos = await request(mockPort, 'POST', '/v2/Init', {
+        TerminalKey: TERMINAL, Amount: '1000', OrderId: `chaos-http-${status}`,
+      }, { 'X-Mock-Scenario': `http-${status}` });
+      assert.strictEqual(chaos.statusCode, status, `X-Mock-Scenario http-${status} должен вернуть HTTP ${status}`);
+      const chaosBody = JSON.parse(chaos.body);
+      assert.strictEqual(chaosBody.Success, false);
+      assert.strictEqual(chaosBody.ErrorCode, String(status));
+      assert.ok(chaosBody.Details && chaosBody.Details.Field === 'X-Mock-Scenario');
+    }
+    assert.strictEqual(Object.keys(state.payments).length, paymentsBeforeChaos, 'chaos http-500/504 не должен создавать платёж');
+
+    const invalidAmount = (raw) => String(raw);
+    const badInitOrder = 'money-strict-init';
+    for (const raw of ['1000xyz', '1000.9']) {
+      const bad = JSON.parse((await api(mockPort, 'Init', { Amount: invalidAmount(raw), OrderId: `${badInitOrder}-${raw}` })).body);
+      assert.strictEqual(bad.Success, false, `v2 Init отклоняет Amount=${raw}`);
+      assert.strictEqual(bad.ErrorCode, '7');
+    }
+    const authorized = JSON.parse((await api(mockPort, 'Init', { Amount: '50000', OrderId: 'money-strict-confirm', PayType: 'T', CreateDealWithType: 'NN' })).body);
+    await request(mockPort, 'POST', `/payment/${authorized.PaymentId}/pay`, 'pan=2201382000000013&exp=1227&cvv=123', { 'Content-Type': 'application/x-www-form-urlencoded' });
+    assert.strictEqual(state.payments[authorized.PaymentId].status, 'AUTHORIZED');
+    for (const raw of ['1000xyz', '1000.9']) {
+      const bad = JSON.parse((await api(mockPort, 'Confirm', { PaymentId: authorized.PaymentId, Amount: raw })).body);
+      assert.strictEqual(bad.Success, false, `v2 Confirm отклоняет Amount=${raw}`);
+      assert.strictEqual(state.payments[authorized.PaymentId].status, 'AUTHORIZED');
+    }
+    const confirmed = JSON.parse((await api(mockPort, 'Init', { Amount: '50000', OrderId: 'money-strict-cancel', PayType: 'O', CreateDealWithType: 'NN' })).body);
+    await request(mockPort, 'POST', `/payment/${confirmed.PaymentId}/pay`, 'pan=2201382000000013&exp=1227&cvv=123', { 'Content-Type': 'application/x-www-form-urlencoded' });
+    assert.strictEqual(state.payments[confirmed.PaymentId].status, 'CONFIRMED');
+    for (const raw of ['1000xyz', '1000.9']) {
+      const badCancel = JSON.parse((await api(mockPort, 'Cancel', { PaymentId: confirmed.PaymentId, Amount: raw })).body);
+      assert.strictEqual(badCancel.Success, false, `v2 Cancel отклоняет Amount=${raw}`);
+      assert.strictEqual(state.payments[confirmed.PaymentId].status, 'CONFIRMED');
+      const badChargeback = JSON.parse((await api(mockPort, 'Chargeback', { PaymentId: confirmed.PaymentId, Amount: raw })).body);
+      assert.strictEqual(badChargeback.Success, false, `v2 Chargeback отклоняет Amount=${raw}`);
+      assert.strictEqual(state.payments[confirmed.PaymentId].status, 'CONFIRMED');
+    }
+
+    const moneyDeal = await fundedDeal(mockPort, 60000, 'money-strict-e2c-fund');
+    const badE2c = JSON.parse((await e2c(mockPort, 'Init', {
+      Amount: '1000xyz', OrderId: 'money-strict-e2c', DealId: moneyDeal,
+    })).body);
+    assert.strictEqual(badE2c.Success, false, 'e2c Init отклоняет строгий Amount');
+    const avPayload = { TerminalKey: TERMINAL, VerificationCode: 'MONEY-STRICT', Amount: '1000.9', PayerInn: '7801111111' };
+    const badAvPayment = JSON.parse((await request(mockPort, 'POST', '/av/v1/payment', { ...avPayload, Token: tokenOf(avPayload) })).body);
+    assert.strictEqual(badAvPayment.Success, false, 'AV payment отклоняет дробный Amount');
+    const avVerificationPayload = { TerminalKey: TERMINAL, VerificationCode: 'MONEY-STRICT-2', Amount: '1000xyz' };
+    const badAvVerification = JSON.parse((await request(mockPort, 'POST', '/av/v1/verification', { ...avVerificationPayload, Token: tokenOf(avVerificationPayload) })).body);
+    assert.strictEqual(badAvVerification.Success, false, 'AV verification отклоняет мусорный Amount');
+  }
+
   // 28. Покрытие /e2c/v2/* и /av/v1/* (рекомендация аудита A-22)
   {
     // Выплата идёт по сделке с балансом (F-17): заводим и пополняем её
@@ -796,17 +894,31 @@ process.env.MOCK_RETRY_MS = '1000';
 
   // 32. Регистрация партнёров acqapi (POST /oauth/token + /sm-register/register*)
   {
-    const tokResp = JSON.parse((await request(
+    const badBasicResp = await request(mockPort, 'POST', '/oauth/token', 'grant_type=password', {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Authorization: 'Basic ' + Buffer.from('partner:wrong-secret').toString('base64'),
+    });
+    assert.strictEqual(badBasicResp.statusCode, 401, 'OAuth должен отклонять неверный Basic secret');
+
+    const tokResponse = await request(
       mockPort,
       'POST',
       '/oauth/token',
-      'grant_type=client_credentials',
+      'grant_type=password&username=partner&password=partner',
       {
         'Content-Type': 'application/x-www-form-urlencoded',
-        Authorization: 'Basic ' + Buffer.from('partner:secret').toString('base64'),
+        Authorization: 'Basic ' + Buffer.from('partner:mock-acqapi-secret').toString('base64'),
       },
-    )).body);
-    assert.ok(tokResp.access_token, 'OAuth /oauth/token должен выдать access_token');
+    );
+    assert.strictEqual(tokResponse.statusCode, 200, `OAuth с фактическим Basic должен проходить: ${tokResponse.body}`);
+    const tokResp = JSON.parse(tokResponse.body);
+    assert.ok(tokResp.access_token && tokResp.scope === 'partner' && tokResp.expires_in === 3600, 'OAuth должен выдать opaque Bearer со scope и TTL');
+    assert.ok(!tokResp.access_token.includes(String(Date.now())), 'Bearer не должен быть предсказуемым из времени');
+
+    const anonymousGet = await request(mockPort, 'GET', '/sm-register/register/shop/does-not-exist');
+    assert.strictEqual(anonymousGet.statusCode, 401, 'GET регистрации без Bearer должен быть закрыт');
+    const arbitraryGet = await request(mockPort, 'GET', '/sm-register/register/shop/does-not-exist', undefined, { Authorization: 'Bearer arbitrary-token' });
+    assert.strictEqual(arbitraryGet.statusCode, 401, 'GET регистрации с произвольным Bearer должен быть закрыт');
 
     // Невалидный billingDescriptor (>14 символов или кириллица) -> ошибка 7
     const badShop = JSON.parse((await request(
@@ -823,15 +935,54 @@ process.env.MOCK_RETRY_MS = '1000';
       mockPort,
       'POST',
       '/sm-register/register',
-      { billingDescriptor: 'LOVII MARKET', inn: '7701234567', name: 'ООО Ловии Партнёр', email: 'shop@lovii.ru' },
+      partnerRegistrationFixture('LOVII MARKET', '7701234567', 'article-lovii-market'),
       { Authorization: `Bearer ${tokResp.access_token}` },
     )).body);
     assert.ok(goodShop.shopCode);
     assert.strictEqual(goodShop.billingDescriptor, 'LOVII MARKET');
 
-    const getShop = JSON.parse((await request(mockPort, 'GET', `/sm-register/register/shop/${goodShop.shopCode}`)).body);
-    assert.strictEqual(getShop.inn, '7701234567');
+    // Контрактные негативы F-27: каждая обязательная часть схемы должна
+    // отклоняться до записи нового shop.
+    const requiredNegativeCases = [
+      ['shopArticleId', (p) => { delete p.shopArticleId; }],
+      ['billingDescriptor', (p) => { delete p.billingDescriptor; }],
+      ['fullName', (p) => { delete p.fullName; }],
+      ['name', (p) => { delete p.name; }],
+      ['inn', (p) => { delete p.inn; }],
+      ['kpp', (p) => { delete p.kpp; }],
+      ['ogrn', (p) => { delete p.ogrn; }],
+      ['addresses', (p) => { p.addresses = []; }],
+      ['ceo', (p) => { delete p.ceo; }],
+      ['ceo.phone', (p) => { delete p.ceo.phone; }],
+      ['ceo.citizenship', (p) => { delete p.ceo.citizenship; }],
+      ['founders.individuals', (p) => { p.founders.individuals = []; }],
+      ['email', (p) => { delete p.email; }],
+      ['siteUrl', (p) => { delete p.siteUrl; }],
+      ['bankAccount', (p) => { delete p.bankAccount; }],
+      ['bankAccount.account', (p) => { delete p.bankAccount.account; }],
+      ['bankAccount.korAccount', (p) => { delete p.bankAccount.korAccount; }],
+      ['bankAccount.bankName', (p) => { delete p.bankAccount.bankName; }],
+      ['bankAccount.bik', (p) => { delete p.bankAccount.bik; }],
+      ['bankAccount.details', (p) => { delete p.bankAccount.details; }],
+      ['nonResident', (p) => { delete p.nonResident; }],
+    ];
+    for (const [field, mutate] of requiredNegativeCases) {
+      const payload = partnerRegistrationFixture('NEGATIVE', '7701234567', `negative-${partnerFixtureNumber}-${field.replace(/[^A-Za-z0-9]+/g, '-')}`);
+      mutate(payload);
+      const response = await request(mockPort, 'POST', '/sm-register/register', payload, { Authorization: `Bearer ${tokResp.access_token}` });
+      assert.strictEqual(response.statusCode, 400, `missing ${field} -> 400`);
+      assert.ok(response.body.includes(field.split('.')[0]), `error for missing ${field} names the field`);
+    }
 
+    const getShopResponse = await request(mockPort, 'GET', `/sm-register/register/shop/${goodShop.shopCode}`, undefined, { Authorization: `Bearer ${tokResp.access_token}` });
+    assert.strictEqual(getShopResponse.statusCode, 200, 'GET регистрации требует действующий Bearer и возвращает точку');
+    const getShop = JSON.parse(getShopResponse.body);
+    assert.strictEqual(getShop.inn, '7701234567');
+    assert.strictEqual(getShop.shopCode, 'article-lovii-market', 'shopArticleId должен маппиться в shopCode');
+    assert.strictEqual(getShop.shopArticleId, 'article-lovii-market');
+
+    const anonymousPatch = await request(mockPort, 'PATCH', `/sm-register/register/${goodShop.shopCode}`, { billingDescriptor: 'NOPE' });
+    assert.strictEqual(anonymousPatch.statusCode, 401, 'PATCH регистрации без Bearer должен быть закрыт');
     const patchShop = JSON.parse((await request(
       mockPort,
       'PATCH',
@@ -840,6 +991,13 @@ process.env.MOCK_RETRY_MS = '1000';
       { Authorization: `Bearer ${tokResp.access_token}` },
     )).body);
     assert.strictEqual(patchShop.billingDescriptor, 'LOVII PRO');
+
+    // TTL токена считается виртуальными часами и не позволяет использовать
+    // истёкший Bearer после +1h: произвольный новый токен нужен снова.
+    await request(mockPort, 'POST', '/mock/time', { advance: '1h 1s' });
+    const expiredGet = await request(mockPort, 'GET', `/sm-register/register/shop/${goodShop.shopCode}`, undefined, { Authorization: `Bearer ${tokResp.access_token}` });
+    assert.strictEqual(expiredGet.statusCode, 401, 'Bearer после TTL должен быть отклонён');
+    await request(mockPort, 'POST', '/mock/time', { reset: true });
   }
 
   // 33. Мульти-песочницы (X-Mock-Sandbox), экспорт состояния, активный экзаменатор вебхуков и curl в журнале
@@ -1004,7 +1162,7 @@ process.env.MOCK_RETRY_MS = '1000';
   {
     // Уникальный валидный по Luhn PAN («Мир»), которого нет среди тестовых карт.
     const sentinelPan = '2200770012345676';
-    const sentinelSecret = `sentinel-secret-${process.pid}`;
+    const sentinelSecret = 'mock-acqapi-secret';
     const basicHeader = Buffer.from(`partner:${sentinelSecret}`).toString('base64');
 
     // Выплаты идут по сделке (F-17) — заводим и пополняем её до захвата console,
@@ -1047,7 +1205,7 @@ process.env.MOCK_RETRY_MS = '1000';
       const oauth = await request(mockPort, 'POST', '/oauth/token', {}, { Authorization: `Basic ${basicHeader}` });
       assert.strictEqual(oauth.statusCode, 200, 'POST /oauth/token с Basic должен проходить');
       bearerToken = JSON.parse(oauth.body).access_token;
-      const shopPayload = { billingDescriptor: 'SENTINEL', inn: '7801111111', shopCode: '700999', name: 'ООО «Сентинел»' };
+      const shopPayload = partnerRegistrationFixture('SENTINEL', '7801111111', 'article-sentinel');
       const shop = await request(mockPort, 'POST', '/sm-register/register', shopPayload, { Authorization: `Bearer ${bearerToken}` });
       assert.strictEqual(shop.statusCode, 200, `POST /sm-register/register должен проходить: ${shop.body.slice(0, 120)}`);
 

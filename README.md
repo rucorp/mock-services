@@ -43,6 +43,11 @@
 # 1. Стенд «банк + касса + ЮKassa + АТОЛ Онлайн» целиком
 docker compose up            # tbank-mock :3100, kassa-mock :3101, yookassa-mock :3102, atol-mock :3103
 
+# Порты root compose по умолчанию слушают только 127.0.0.1.
+# Для осознанного сетевого доступа задайте bind отдельно для нужного сервиса:
+MOCK_TBANK_BIND_IP=0.0.0.0 MOCK_KASSA_BIND_IP=0.0.0.0 docker compose up
+# Не используйте 0.0.0.0 на публичном хосте без operator/admin auth, firewall и TLS.
+
 # 2. Без Docker (только Node >= 18, зависимостей нет)
 npm run start:tbank          # http://localhost:3100
 npm run start:kassa          # http://localhost:3101

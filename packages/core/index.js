@@ -1149,13 +1149,38 @@ function parseDuration(input) {
   return Math.round(sign * total);
 }
 
+// Максимальный сдвиг даты, представимый Date (±100 000 000 суток от epoch):
+// за его пределами new Date(ts).toISOString() бросает RangeError.
+const MAX_DATE_OFFSET_MS = 8.64e15;
+
+/**
+ * Проверка сдвига виртуальных часов ДО записи (F-05). Возвращает текст ошибки
+ * или null. Смещение должно оставаться конечным числом, а «текущее время +
+ * смещение» — попадать в диапазон Date, иначе snapshot()/toISOString() падают
+ * уже после того, как невалидный offset сохранён в state.
+ */
+function checkClockOffset(offsetMs, baseMs = Date.now()) {
+  if (typeof offsetMs !== 'number' || !Number.isFinite(offsetMs)) {
+    return `Некорректный сдвиг виртуальных часов: ${JSON.stringify(offsetMs)} (ожидается конечное число миллисекунд)`;
+  }
+  const target = baseMs + offsetMs;
+  if (!Number.isFinite(target) || Math.abs(target) > MAX_DATE_OFFSET_MS) {
+    return `Сдвиг виртуальных часов ${offsetMs} мс вне диапазона дат: текущее время + сдвиг не представимо Date (|сдвиг| ≤ ${MAX_DATE_OFFSET_MS} мс от текущего времени)`;
+  }
+  return null;
+}
+
 /**
  * Виртуальные часы (этап 7 роадмапа, бриф §3.2):
  * позволяют мгновенно сдвигать время стенда на «+7d» / «+60d» / «+36h» без
  * ожидания реальных суток. Инициализируются из MOCK_VIRTUAL_CLOCK (смещение
  * вида "+7d", миллисекунды или ISO-дата) и могут храниться в state-файле.
+ *
+ * F-05: любое изменение смещения валидируется до записи в state и до
+ * изменения локального значения — при ошибке сохранённое время не меняется,
+ * а wall-clock операции continue работать на прежнем смещении.
  */
-function createVirtualClock({ initial = process.env.MOCK_VIRTUAL_CLOCK || '', getStateOffset, setStateOffset } = {}) {
+function createVirtualClock({ initial = process.env.MOCK_VIRTUAL_CLOCK || '', getStateOffset, setStateOffset, log = console.error } = {}) {
   let localOffsetMs = 0;
   if (initial && String(initial).trim() !== '0' && String(initial).toLowerCase() !== 'false' && String(initial).toLowerCase() !== 'true') {
     const dur = parseDuration(initial);
@@ -1167,22 +1192,51 @@ function createVirtualClock({ initial = process.env.MOCK_VIRTUAL_CLOCK || '', ge
     }
   }
 
+  // Восстановление после отказа (F-05): если в state уже лежит сдвиг, который
+  // нельзя представить Date (например, из state-файла старой версии), часы
+  // работают на безопасном локальном значении, а не падают на toISOString().
+  let warnedAboutStoredOffset = false;
   const readOffset = () => {
     if (typeof getStateOffset === 'function') {
       const v = getStateOffset();
-      if (typeof v === 'number' && Number.isFinite(v)) return v;
+      if (typeof v === 'number' && Number.isFinite(v)) {
+        const problem = checkClockOffset(v);
+        if (!problem) return v;
+        if (!warnedAboutStoredOffset) {
+          warnedAboutStoredOffset = true;
+          log(`[core] сохранённый сдвиг виртуальных часов игнорирован: ${problem}`);
+        }
+        return localOffsetMs;
+      }
     }
     return localOffsetMs;
   };
 
+  /**
+   * Атомарная запись сдвига: сначала проверка диапазона Date, затем локальное
+   * значение и внешнее состояние. Ошибка валидации не меняет ни то, ни другое.
+   */
   const writeOffset = (next) => {
     const normalized = Math.round(Number(next) || 0);
+    const problem = checkClockOffset(normalized);
+    if (problem) {
+      throw new Error(problem);
+    }
     localOffsetMs = normalized;
     if (typeof setStateOffset === 'function') setStateOffset(normalized);
     return normalized;
   };
 
-  if (localOffsetMs !== 0) writeOffset(localOffsetMs);
+  // Дефолт из MOCK_VIRTUAL_CLOCK: невалидное значение не должно ронять старт
+  // сервиса — фиксируем предупреждение и работаем на нулевом сдвиге.
+  if (localOffsetMs !== 0) {
+    try {
+      writeOffset(localOffsetMs);
+    } catch (e) {
+      log(`[core] MOCK_VIRTUAL_CLOCK=${JSON.stringify(initial)} игнорирован: ${e.message}`);
+      localOffsetMs = 0;
+    }
+  }
 
   function now() {
     return Date.now() + readOffset();
@@ -1242,6 +1296,61 @@ function createVirtualClock({ initial = process.env.MOCK_VIRTUAL_CLOCK || '', ge
   }
 
   return { now, iso, advance, set, reset, snapshot, parseDuration };
+}
+
+/* ------------------------------------------------------------ money input */
+
+/**
+ * Верхняя граница денежной суммы в копейках для мок-стенда (F-24): только
+ * безопасные целые Number. Это не добавляет искусственный лимит провайдера:
+ * граница ровно соответствует диапазону, в котором JS-арифметика сохраняет
+ * точность целых чисел.
+ */
+const MAX_MONEY_KOPEKS = Number.MAX_SAFE_INTEGER;
+
+/**
+ * Строгий разбор денежной суммы в копейках (F-24).
+ *
+ * `parseInt` принимает мусор (`"1000xyz"` → 1000, `"1000.9"` → 1000, `"0x10"` → 16)
+ * и подменяет сумму в подписанном запросе. Здесь принимаются только:
+ *   • JSON-number без дробной части (1000, 1e3);
+ *   • строка из одних десятичных цифр ("1000").
+ * Отклоняются дроби (`"1000.9"`, 1000.9), знаки/пробелы/шестнадцатеричный вид
+ * (`"+1000"`, `" 1000"`, `"0x10"`), trailing junk (`"1000xyz"`), нечисловые типы,
+ * сумма 0/отрицательная, значения вне [1 … MAX_MONEY_KOPEKS].
+ *
+ * Возвращает { ok: true, value } | { ok: false, reason, message }.
+ */
+function parseMoneyKopeks(raw, { field = 'Amount', required = true, max = MAX_MONEY_KOPEKS } = {}) {
+  const reject = (reason, message) => ({ ok: false, reason, field, message });
+  if (raw === undefined || raw === null || raw === '') {
+    return required
+      ? reject('missing', `${field} обязателен: целое число копеек больше нуля`)
+      : reject('missing', `${field} не передан`);
+  }
+  let value;
+  if (typeof raw === 'number') {
+    if (!Number.isFinite(raw)) return reject('not-finite', `${field} должен быть конечным числом копеек`);
+    if (!Number.isInteger(raw)) {
+      return reject('fraction', `${field}=${JSON.stringify(raw)} — дробное значение; передайте целое число копеек (1000.9 → 100090)`);
+    }
+    value = raw;
+  } else if (typeof raw === 'string') {
+    if (!/^\d+$/.test(raw)) {
+      return reject('format', `${field}=${JSON.stringify(raw)} — не целое число копеек: допустимы только цифры без знака, пробелов и мусора`);
+    }
+    value = Number(raw);
+  } else {
+    return reject('type', `${field} должен быть целым числом копеек (string или number), получено ${typeof raw}`);
+  }
+  if (!Number.isSafeInteger(value)) {
+    return reject('not-safe', `${field}=${JSON.stringify(raw)} больше безопасного целочисленного диапазона`);
+  }
+  if (value <= 0) return reject('non-positive', `${field} должен быть больше нуля`);
+  if (value > max) {
+    return reject('out-of-range', `${field}=${value} превышает допустимый максимум мок-стенда ${max} копеек`);
+  }
+  return { ok: true, value };
 }
 
 /* ----------------------------------------------------- scenario registry */
@@ -2526,6 +2635,9 @@ module.exports = {
   createErrorCatalog,
   parseDuration,
   createVirtualClock,
+  checkClockOffset,
+  parseMoneyKopeks,
+  MAX_MONEY_KOPEKS,
   parseMsOr,
   parseScenarioSpec,
   createScenarioRegistry,

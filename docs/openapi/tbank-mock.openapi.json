@@ -27,6 +27,17 @@
         "in": "header",
         "name": "X-Sandbox-Token",
         "description": "Owner-token песочницы (RFC-001): выдаётся один раз при POST /sandboxes; также Authorization: Bearer <ownerToken> или ?sandbox_token=. В режиме MOCK_TENANCY=on / MOCK_HOSTED=1 знание id песочницы без owner-token доступа не даёт."
+      },
+      "acqapiBasic": {
+        "type": "http",
+        "scheme": "basic",
+        "description": "Basic client credentials acqapi: по умолчанию partner:partner; переопределяются MOCK_ACQAPI_CLIENT_ID и MOCK_ACQAPI_CLIENT_SECRET."
+      },
+      "acqapiBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "opaque",
+        "description": "Bearer access_token из /oauth/token, scope partner, TTL по умолчанию 3600 секунд."
       }
     },
     "parameters": {
@@ -72,6 +83,27 @@
           "field": { "type": "string" },
           "hint": { "type": "string" },
           "doc": { "type": "string" }
+        }
+      },
+      "AcqapiRegistration": {
+        "type": "object",
+        "required": ["shopArticleId", "billingDescriptor", "fullName", "name", "inn", "kpp", "ogrn", "addresses", "ceo", "founders", "email", "siteUrl", "bankAccount", "nonResident"],
+        "properties": {
+          "shopArticleId": { "type": "string", "maxLength": 32 },
+          "billingDescriptor": { "type": "string", "maxLength": 14 },
+          "fullName": { "type": "string" },
+          "name": { "type": "string" },
+          "inn": { "type": "string", "pattern": "^[0-9]{10}([0-9]{2})?$" },
+          "kpp": { "type": "string", "pattern": "^[0-9]{8,9}$" },
+          "ogrn": { "type": "string", "pattern": "^[0-9]{13}([0-9]{2})?$" },
+          "addresses": { "type": "array", "minItems": 1 },
+          "ceo": { "type": "object", "required": ["phone", "citizenship"] },
+          "founders": { "type": "object", "required": ["individuals"] },
+          "email": { "type": "string", "format": "email" },
+          "siteUrl": { "type": "string", "format": "uri" },
+          "bankAccount": { "type": "object", "required": ["account", "korAccount", "bankName", "bik", "details"] },
+          "mcc": { "type": "string", "pattern": "^[0-9]{4}$" },
+          "nonResident": { "type": "boolean" }
         }
       }
     }
@@ -222,14 +254,48 @@
     },
     "/oauth/token": {
       "post": {
+        "security": [{ "acqapiBasic": [] }],
         "summary": "Получение OAuth 2.0 Bearer-токена для API регистрации партнёров acqapi",
-        "responses": { "200": { "description": "Bearer access_token" } }
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": { "type": "object", "properties": { "grant_type": { "type": "string", "enum": ["password", "client_credentials"] }, "username": { "type": "string" }, "password": { "type": "string" } } }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Opaque Bearer access_token со scope partner и expires_in" }, "400": { "description": "Неподдерживаемый grant_type" }, "401": { "description": "Неверный Basic client" } }
       }
     },
     "/sm-register/register": {
       "post": {
-        "summary": "Регистрация партнёра (ShopCode) в Мультирасчётах с валидацией billingDescriptor и ИНН",
-        "responses": { "200": { "description": "Зарегистрированный партнёр с shopCode и терминалами" } }
+        "security": [{ "acqapiBearer": [] }],
+        "summary": "Регистрация партнёра: полная схема реквизитов ЮЛ, addresses[], ceo, founders и bankAccount",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AcqapiRegistration" } } } },
+        "responses": { "200": { "description": "Зарегистрированный партнёр: shopArticleId маппится в shopCode" }, "400": { "description": "Схема регистрации невалидна" }, "401": { "description": "Нет/истёк/неверен Bearer" } }
+      }
+    },
+    "/sm-register/register/shop/{shopCode}": {
+      "get": {
+        "security": [{ "acqapiBearer": [] }],
+        "summary": "Получение зарегистрированной точки",
+        "parameters": [{ "name": "shopCode", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Карточка точки" }, "401": { "description": "Нет/истёк/неверен Bearer" }, "404": { "description": "Точка не найдена" } }
+      }
+    },
+    "/sm-register/register/{shopCode}": {
+      "patch": {
+        "security": [{ "acqapiBearer": [] }],
+        "summary": "Обновление точки; при передаче bankAccount обязательны реквизиты счёта",
+        "parameters": [{ "name": "shopCode", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": { "content": { "application/json": { "schema": { "type": "object" } } } },
+        "responses": { "200": { "description": "Точка обновлена" }, "400": { "description": "Невалидные поля обновления" }, "401": { "description": "Нет/истёк/неверен Bearer" }, "404": { "description": "Точка не найдена" } }
+      },
+      "post": {
+        "security": [{ "acqapiBearer": [] }],
+        "summary": "Совместимый alias PATCH для обновления точки",
+        "parameters": [{ "name": "shopCode", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": { "content": { "application/json": { "schema": { "type": "object" } } } },
+        "responses": { "200": { "description": "Точка обновлена" }, "401": { "description": "Нет/истёк/неверен Bearer" } }
       }
     },
     "/av/v1/payment": {

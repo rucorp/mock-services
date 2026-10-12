@@ -72,6 +72,26 @@ TBANK_NOTIFICATION_URL=https://<домен ядра>/api/v1/payments/tbank/webho
 | `GET /admin` | консоль платежей, споров, сделок, уведомлений, поступлений и верификаций; действия форм защищены подписанным CSRF-токеном и same-origin проверкой |
 | `GET /admin/journal`, `GET /openapi.json`, `GET /health` | журнал API с редактированием секретов/PII, OpenAPI 3.1 и health-check |
 
+### acqapi: OAuth и регистрация точки
+
+`POST /oauth/token` принимает только фактический Basic-клиент: по умолчанию
+`partner:partner`, либо `MOCK_ACQAPI_CLIENT_ID` + `MOCK_ACQAPI_CLIENT_SECRET`.
+Поддерживаются `grant_type=password` (документированный контур) и
+`client_credentials`; ответ выдаёт случайный opaque Bearer со `scope=partner` и
+TTL 3600 секунд (переопределяется `MOCK_ACQAPI_TOKEN_TTL_MS`). Токен проверяется
+на POST/GET/PATCH `/sm-register/register*`; произвольная строка Bearer, истёкший
+токен и запрос без Authorization возвращают 401.
+
+Регистрация требует полную JSON-схему из `docs/reference/tbank/03-payouts-and-deals.md`:
+`shopArticleId` (латиница/цифры/`._-`, до 32 символов), `billingDescriptor`,
+`fullName`, `name`, `inn`, `kpp`, `ogrn`, непустые `addresses[]` (`type`, `zip`,
+`country` ISO-3, `city`, `street`), `ceo.phone`/`ceo.citizenship`,
+`founders.individuals[]`, `email`, `siteUrl`, `bankAccount` (`account`,
+`korAccount`, `bankName`, `bik`, `details`) и boolean `nonResident`. `kbk` и
+`oktmo` при передаче обязательны парой; `mcc` допускается как 4-значный override.
+`shopArticleId` без генерации маппится в `shopCode`, который используется как
+`PartnerId` в e2c-выплате. Валидация выполняется до записи state.
+
 Терминал проверяется вместе с подписью во всех payout-операциях, включая
 `Payment`, `GetState`, `GetSbpMembers` и `CancelPayment`; неверный или отсутствующий
 `TerminalKey` возвращает provider-shaped ошибку до поиска/изменения выплаты.
@@ -141,6 +161,8 @@ Owner-token принимается в `Authorization: Bearer`, `X-Sandbox-Token`
 | `MOCK_PROFILE` | `plain` | `plain` — обычный эквайринг; `multisplit` — требования Мультирасчётов и валидация сделок |
 | `MOCK_TERMINAL_KEY` / `MOCK_TERMINAL_PASSWORD` | `TBANK_TERMINAL_*` из env ядра, иначе `TBANKMOCKTEST`/`mockpass123` | ключи терминала мока |
 | `MOCK_PUBLIC_BASE_URL` | `http://localhost:3100` | база для `PaymentURL` (виден покупателю!) |
+| `MOCK_ACQAPI_CLIENT_ID` / `MOCK_ACQAPI_CLIENT_SECRET` | `partner` / `partner` | фактические Basic-креды acqapi; секрет не печатается и не хранится в state |
+| `MOCK_ACQAPI_TOKEN_TTL_MS` | `3600000` (1 ч) | TTL Bearer-токена acqapi; виртуальные часы применяются для проверки истечения |
 | `MOCK_DEFAULT_NOTIFICATION_URL` | — | куда слать нотификации, если Init без `NotificationURL` |
 | `MOCK_RETRY_MS` / `MOCK_MAX_ATTEMPTS` | `60000` / `24` | политика ретраев нотификаций |
 | `MOCK_STRICT_TOKEN` | `true` | отклонять запросы без валидного Token |
