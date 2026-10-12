@@ -64,7 +64,7 @@ npm test                     # selftest ядра + всех адаптеров
 (ЮKassa), [`docs/integration/atol.md`](docs/integration/atol.md)
 (АТОЛ Онлайн v4) и [`docs/integration/lovii.md`](docs/integration/lovii.md)
 (подключение как внешнего сервиса в платформу Lovii). Контракты и переменные окружения — в README каждого сервиса
-(`services/tbank-mock`, `services/kassa-mock`, `services/yookassa-mock`, `services/atol-mock`).
+(`services/tbank-mock`, `services/kassa-mock`, `services/yookassa-mock`, `services/atol-mock`). Для acqapi Т-Банка тестовые Basic-креды по умолчанию `partner:partner`, а регистрация точки требует полной схемы реквизитов из `docs/reference/tbank/03-payouts-and-deals.md`.
 
 ## Структура
 
