@@ -1,4 +1,6 @@
-# Стенд «банк + касса»: docker compose up
+# © 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
+# Стенд «банк + касса + ЮKassa»: docker compose up
 # Конфиг — переменными окружения (см. services/*/README.md).
 services:
   tbank-mock:
@@ -44,6 +46,33 @@ services:
     mem_limit: "${MOCK_MEM_LIMIT:-128m}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3101,path:'/healthz'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    restart: unless-stopped
+
+  yookassa-mock:
+    build: .
+    image: mock-services:local
+    working_dir: /app
+    command: node services/yookassa-mock/server.js
+    ports: ["3102:3102"]
+    environment:
+      MOCK_PORT: "3102"
+      MOCK_HEALTH_PATH: /health
+      # Персистентность между рестартами: состояние на volume ниже.
+      MOCK_STATE_FILE: /data/yookassa-state.json
+      # Публичный адрес стенда глазами покупателя (confirmation_url, return-редиректы).
+      MOCK_PUBLIC_BASE_URL: "http://localhost:3102"
+      # Адрес приёмника вебхуков магазина (ACK по протоколу — ровно 200).
+      MOCK_DEFAULT_WEBHOOK_URL: "${MOCK_DEFAULT_WEBHOOK_URL:-}"
+      # Для публичного размещения включите защиту исходящих вебхуков от SSRF:
+      # MOCK_BLOCK_PRIVATE_WEBHOOKS: "1"
+    volumes: ["mock-data:/data"]
+    mem_limit: "${MOCK_MEM_LIMIT:-128m}"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3102,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 10s
       timeout: 3s
       retries: 3

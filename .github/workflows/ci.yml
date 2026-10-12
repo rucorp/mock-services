@@ -28,6 +28,8 @@ jobs:
         run: npm run test:tbank
       - name: selftest мока кассы
         run: npm run test:kassa
+      - name: selftest мока ЮKassa
+        run: npm run test:yookassa
       - name: офлайн selftest синхронизатора upstream snapshot
         run: npm run test:upstream
       - name: детектор дрейфа протоколов и OpenAPI 3.1
@@ -51,25 +53,27 @@ jobs:
           echo "Сервисы в профиле mock: $SERVICES_MOCK"
           echo "$SERVICES_MOCK" | grep -q "tbank-mock"
           echo "$SERVICES_MOCK" | grep -q "kassa-mock"
+          echo "$SERVICES_MOCK" | grep -q "yookassa-mock"
       - name: Сборка образа
         run: docker build -t mock-services:local .
       - name: Запуск compose-стенда и ожидание healthcheck
         run: |
           docker compose up -d
           for i in $(seq 1 30); do
-            if curl -fsS http://localhost:3100/health >/dev/null && curl -fsS http://localhost:3101/healthz >/dev/null; then
+            if curl -fsS http://localhost:3100/health >/dev/null && curl -fsS http://localhost:3101/healthz >/dev/null && curl -fsS http://localhost:3102/health >/dev/null; then
               echo "стенд поднялся"; exit 0
             fi
             sleep 1
           done
           echo "стенд не поднялся за 30 с"; docker compose logs; exit 1
-      - name: Black-box selftest против контейнеров compose (:3100 и :3101)
+      - name: Black-box selftest против контейнеров compose (:3100, :3101, :3102)
         run: npm run test:compose
       - name: Прогон selftest-наборов внутри собранного образа
         run: |
           docker compose exec -T tbank-mock node packages/core/selftest.js
           docker compose exec -T tbank-mock node services/tbank-mock/selftest.js
           docker compose exec -T kassa-mock node services/kassa-mock/selftest.js
+          docker compose exec -T yookassa-mock node services/yookassa-mock/selftest.js
       - name: Логи и остановка
         if: always()
         run: docker compose down -v
