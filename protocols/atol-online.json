@@ -1,0 +1,175 @@
+{
+  "id": "atol-online-direct-v4",
+  "title": "АТОЛ Онлайн — прямой API v4 (ФФД 1.05)",
+  "version": "2026.10",
+  "apiVersion": "v4",
+  "ffd": "1.05",
+  "upstreamDocs": [
+    "docs/reference/atol-online/01-api-v4-v5.md",
+    "docs/reference/atol-online/02-testing-and-callbacks.md"
+  ],
+  "upstreamSources": [
+    {
+      "title": "API v4, полный PDF (версия документа 5.15)",
+      "url": "https://atol.online/files/API_atol_online_v4.pdf"
+    },
+    {
+      "title": "Выбор протокола: v5 (ФФД 1.2) для маркировки, v4 (ФФД 1.05) в остальных случаях",
+      "url": "https://help.atol.online/article/11244"
+    },
+    {
+      "title": "Обновление VAT 22/122 (vat22, vat122)",
+      "url": "https://help.atol.online/article/26152"
+    },
+    {
+      "title": "Назначение тестовой кассы",
+      "url": "https://help.atol.online/article/11254"
+    },
+    {
+      "title": "Публичные тестовые реквизиты (тестовая среда)",
+      "url": "https://atol.online/files/ffd/test_sreda.txt"
+    }
+  ],
+  "baseUrls": {
+    "test": "https://testonline.atol.ru/possystem/v4/",
+    "production": "https://online.atol.ru/possystem/v4/"
+  },
+  "auth": {
+    "endpoint": "/possystem/v4/getToken",
+    "request": ["login", "pass", "source"],
+    "tokenField": "token",
+    "tokenHeader": "Token",
+    "tokenTtlHours": 24,
+    "note": "В отличие от облачных касс Ferma токен передаётся заголовком, а не в query."
+  },
+  "operations": [
+    "sell",
+    "sell_refund",
+    "sell_correction",
+    "buy",
+    "buy_refund",
+    "buy_correction"
+  ],
+  "routes": [
+    "/possystem/v4/getToken",
+    "/possystem/v4/{group}/{operation}",
+    "/possystem/v4/{group}/report/{uuid}"
+  ],
+  "mockRoutes": [
+    "/health",
+    "/receipts/{uuid}",
+    "/openapi.json",
+    "/admin",
+    "/admin/journal"
+  ],
+  "mockControlRoutes": [
+    "/mock/time",
+    "/mock/scenarios",
+    "/mock/reset",
+    "/mock/state",
+    "/sandboxes",
+    "/sandboxes/me",
+    "/sandboxes/me/reset",
+    "/sandboxes/me/reset-creds",
+    "/mock/sandboxes"
+  ],
+  "documentFields": ["external_id", "timestamp", "receipt", "service.callback_url", "correction_info"],
+  "receiptFields": ["client", "company", "items", "payments", "total"],
+  "vatTypes": [
+    "none",
+    "vat0",
+    "vat5",
+    "vat7",
+    "vat10",
+    "vat20",
+    "vat22",
+    "vat105",
+    "vat107",
+    "vat110",
+    "vat120",
+    "vat122"
+  ],
+  "vatSyntaxNote": "Расчётные ставки пишутся слитно (vat120 = 20/120, vat122 = 22/122). Синтаксис Ferma (vat20_120) в v4 не принимается.",
+  "paymentMethods": [
+    "full_prepayment",
+    "partial_prepayment",
+    "advance",
+    "full_payment",
+    "partial_payment",
+    "credit",
+    "credit_payment",
+    "consideration"
+  ],
+  "paymentObjects": [
+    "commodity",
+    "excise",
+    "job",
+    "service",
+    "payment",
+    "agent_commission",
+    "composite",
+    "another"
+  ],
+  "paymentTypes": [0, 1, 2, 3, 4],
+  "paymentTypeNote": "Форма расчёта, ФФД тег 1081: 0 наличные, 1 электронными, 2 аванс, 3 кредит, 4 встречное предоставление. У Ferma нумерация 1..5 — не переносить.",
+  "snoTypes": ["osn", "usn_income", "usn_income_outcome", "envd", "esn", "patent"],
+  "reportStatuses": ["wait", "done", "fail"],
+  "payloadFields": [
+    "fiscal_document_number",
+    "fiscal_document_attribute",
+    "fiscal_receipt_number",
+    "fn_number",
+    "ecr_registration_number",
+    "fiscal_folder_number",
+    "shift_number",
+    "receipt_datetime",
+    "total",
+    "taxation_type",
+    "vat_amounts",
+    "ofd_receipt_url"
+  ],
+  "idempotency": {
+    "field": "external_id",
+    "maxLength": 128,
+    "scope": "group",
+    "onDuplicate": "return-existing-uuid",
+    "duplicateErrorCode": null,
+    "note": "Повтор external_id возвращает ранее назначенный UUID, а не ошибку. Ferma отвечает кодом 12 «уже существует» — это ключевое отличие контрактов."
+  },
+  "callback": {
+    "source": "service.callback_url",
+    "method": "POST",
+    "trigger": "после завершения обработки документа (done или fail)",
+    "ack": "не документирован",
+    "signature": "не документирована — мок её не добавляет",
+    "retries": "не документированы",
+    "reconciliation": "GET /possystem/v4/{group}/report/{uuid}",
+    "handlerRequirement": "идемпотентный приём"
+  },
+  "polling": {
+    "maxReportsPerSecond": 3,
+    "callbackWaitSeconds": 300,
+    "afterSystemErrorWaitSeconds": 1
+  },
+  "limits": {
+    "tokenTtlHours": 24,
+    "externalIdMaxLength": 128,
+    "itemNameMaxLength": 128,
+    "moneyScale": 2,
+    "quantityScale": 3
+  },
+  "errorCodes": [4, 5, 10, 11, 14, 57],
+  "errorCodeNote": "Числовая таблица кодов v4 в конспекте не снята: мок использует общую таблицу кодов платформы АТОЛ/Ferma (те же коды, что в kassa-mock). Сверка с PDF API v4 5.15 не проводилась — см. services/atol-mock/README.md («Границы и форки»).",
+  "testCredentials": {
+    "login": "v4-online-atol-ru",
+    "group": "v4-online-atol-ru_4179",
+    "inn": "5544332219",
+    "paymentAddress": "https://v4.online.atol.ru",
+    "note": "Публичные креды общего тестового контура; фискализация идёт на МГМ и в ФНС не отправляется. Не применять к production."
+  },
+  "outOfScope": [
+    "v5 (ФФД 1.2) — отдельный шаг после v4",
+    "маркировка «Честный ЗНАК»: коды маркировки, permissive_mode, use_tspiot, tspiot_user_id, проверка КМ",
+    "неопределённости v5 из конспекта не домысляются"
+  ]
+}
