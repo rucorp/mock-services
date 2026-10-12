@@ -237,6 +237,7 @@
     создания документа, включая dry-run `/validate` и возвраты (F-30).
 
 ### Security
+- **Авторизация target песочницы и fail-closed при TTL-sweep во время `await` (#50, PA-50, PA-54—PA-56, PG-03, PG-10; все 5 сервисов).** В `createSandboxRuntime` операции с явным target (`exportState`, `importState`, `reset`, `updateCreds`, `remove`) проверяют, что вызывающий — оператор либо владелец именно целевой песочницы; автосоздание чужой песочницы через `importState`/`reset` закрыто. Все пять адаптеров (`tbank-mock`, `kassa-mock`, `yookassa-mock`, `atol-mock`, `alfa-mock`) передают контекст запроса для авторизации управляющих маршрутов. Контекст песочницы закреплён на всё время запроса: истечение TTL или удаление записи во время `await` завершает запрос `410 Gone` (`SANDBOX_EXPIRED`) без отката к глобальному `activeId` или чтения состояния другого арендатора. Политики `public`/`form` в owned-режиме fail-closed: `public` не раскрывает защищённое состояние, а `form` ограничен capability-путями и не открывает защищённую `default` в обход `MOCK_SANDBOX_TOKEN`; `switchActive` не меняет песочницу параллельных запросов без селектора, а `run()` не исполняется при неуспешном admission.
 - **SSRF-обход через IPv4-mapped и NAT64 закрыт (#45, MS-09 — ядро).** `isPrivateAddress`
   снимал `::ffff:` и разбирал остаток только как dotted-IPv4, поэтому
   `new URL('http://[::ffff:127.0.0.1]/')` (hostname `[::ffff:7f00:1]`), адреса
