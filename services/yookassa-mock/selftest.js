@@ -415,7 +415,12 @@ async function main() {
 
     await waitForCondition(() => hitsFor(payId, 'payment.succeeded').length >= 1, { description: 'webhook payment.succeeded' });
     check('webhook payment.succeeded доставлен (ACK 200)', hitsFor(payId, 'payment.succeeded')[0].status === 200);
-    const succeededNotif = Object.values(state.notifications).find((n) => n.event === 'payment.succeeded' && n.payload.object.id === payId);
+    // #56: флаг done выставляется ПОСЛЕ завершения postJson — ждём именно состояние done,
+    // а не только факт хита (иначе окно гонки «ACK получен» vs «done записан» и флак CI).
+    const succeededNotif = await waitForCondition(() => {
+      const n = Object.values(state.notifications).find((x) => x.event === 'payment.succeeded' && x.payload.object.id === payId);
+      return n && n.done && n.attempts >= 1 ? n : null;
+    }, { description: 'уведомление done после ACK 200' });
     check('уведомление done после ACK 200', succeededNotif && succeededNotif.done && succeededNotif.attempts >= 1);
 
     // 3DS-сценарий.
