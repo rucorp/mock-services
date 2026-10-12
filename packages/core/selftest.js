@@ -496,6 +496,46 @@ async function main() {
     assert.strictEqual(core.isPrivateHost('file:///etc/passwd'), true, 'чужая схема — блок');
   });
 
+  check('isPrivateAddress: IPv4-mapped в dotted и hex форме и 4-частная SIIT-форма (#45, SSRF-обход)', () => {
+    // dotted и hex — обе формы, в которых WHATWG-парсер отдаёт адрес (new URL нормализует в hex)
+    for (const ip of [
+      '::ffff:127.0.0.1', '::ffff:7f00:1',
+      '::ffff:169.254.169.254', '::ffff:a9fe:a9fe',
+      '::ffff:10.0.0.1', '::ffff:0a00:1',
+      '::ffff:192.168.0.1', '::ffff:c0a8:1',
+      '0:0:0:0:0:ffff:7f00:1', '[::ffff:7f00:1]',
+      '::ffff:0:7f00:1', '::ffff:0:127.0.0.1', '::ffff:0:a9fe:a9fe', // 4-частная (SIIT ::ffff:0:0/96)
+      '::ffff:0:0', '::ffff:0:1:2',
+    ]) {
+      assert.strictEqual(core.isPrivateAddress(ip), true, `${ip} должен быть приватным`);
+    }
+    for (const ip of ['::ffff:8.8.8.8', '::ffff:808:808']) {
+      assert.strictEqual(core.isPrivateAddress(ip), false, `${ip}: встроенный публичный IPv4 — публичный адрес`);
+    }
+  });
+
+  check('isPrivateAddress: NAT64 64:ff9b::/96 решается по встроенному IPv4 (#45)', () => {
+    for (const ip of ['64:ff9b::7f00:1', '64:ff9b::a9fe:a9fe', '64:ff9b::a00:1', '64:ff9b::127.0.0.1', '[64:ff9b::a9fe:a9fe]']) {
+      assert.strictEqual(core.isPrivateAddress(ip), true, `${ip} должен быть приватным`);
+    }
+    // DNS64 отдаёт так IPv4-only хосты публичных сетей — они не должны блокироваться
+    assert.strictEqual(core.isPrivateAddress('64:ff9b::808:808'), false, 'NAT64 к публичному IPv4 — публичный');
+  });
+
+  check('isPrivateAddress: публичные IPv6 не задеты, hex-подобные имена — это имена (#45)', () => {
+    for (const ip of ['2606:4700::1111', '2001:4860:4860::8888', '2a00:1450:4001::1', '2400:cb00::1', '::ffff:0:0:0:1']) {
+      assert.strictEqual(core.isPrivateAddress(ip), false, `${ip} должен быть публичным`);
+    }
+    // Имена из hex-символов без двоеточия раньше классифицировались как публичный IPv6 и не проверялись DNS
+    for (const name of ['dead', 'cafe', 'bee', 'add', 'face']) {
+      assert.strictEqual(core.isPrivateAddress(name), null, `${name} — имя хоста, не IP-литерал`);
+    }
+    // Битый IPv6-литерал — блок (fail-closed), как и битый IPv4
+    for (const ip of ['1:2:3:4:5:6:7:8:9', '1::2::3', ':1', '::ffff:999.1.1.1']) {
+      assert.strictEqual(core.isPrivateAddress(ip), true, `${ip}: битый литерал — блок`);
+    }
+  });
+
   await acheck('assertPublicHost блокирует приватные адреса, имена и опасные схемы (F-08)', async () => {
     const blocked = async (url, opts) => {
       try {
@@ -522,6 +562,60 @@ async function main() {
       await core.assertPublicHost('https://merchant.example.com/hook', { lookup: async () => [{ address: '93.184.216.34', family: 4 }] }),
       true,
     );
+  });
+
+  await acheck('assertPublicHost: URL со скобками (IPv4-mapped, NAT64) → SSRF_BLOCKED (#45)', async () => {
+    const blocked = async (url) => {
+      try {
+        await core.assertPublicHost(url);
+      } catch (e) {
+        assert.strictEqual(e.code, 'SSRF_BLOCKED', `${url}: ожидался SSRF_BLOCKED, получено ${e.code}`);
+        return;
+      }
+      assert.fail(`${url} должен быть заблокирован`);
+    };
+    // Обе формы: WHATWG отдаёт hex, пользователь может написать dotted
+    await blocked('http://[::ffff:127.0.0.1]:3100/webhook');
+    await blocked('http://[::ffff:7f00:1]:3100/webhook');
+    await blocked('http://[::ffff:169.254.169.254]/latest/meta-data/');
+    await blocked('http://[::ffff:a9fe:a9fe]/latest/meta-data/');
+    await blocked('http://[::ffff:0:7f00:1]/webhook');
+    await blocked('http://[64:ff9b::7f00:1]/webhook');
+    await blocked('http://[64:ff9b::a9fe:a9fe]/latest/meta-data/');
+    // Публичный IPv6-литерал по-прежнему проходит без DNS
+    assert.strictEqual(await core.assertPublicHost('http://[2606:4700::1111]:8080/hook'), true);
+  });
+
+  await acheck('assertPublicHost: hex-подобное имя проходит через DNS-проверку (#45)', async () => {
+    let calls = 0;
+    const lookup = async (host) => {
+      calls += 1;
+      assert.strictEqual(host, 'dead');
+      return [{ address: '10.0.0.5', family: 4 }];
+    };
+    await assert.rejects(
+      () => core.assertPublicHost('http://dead:8080/hook', { lookup }),
+      (e) => e.code === 'SSRF_BLOCKED',
+    );
+    assert.strictEqual(calls, 1, 'имя dead должно разрешаться и проверяться');
+  });
+
+  await acheck('verifyMerchantWebhook с blockPrivateHosts: IPv4-mapped цель не получает ни одного соединения (#45, регресс)', async () => {
+    // Живой listener на эфемерном порту: доказываем, что запрос до него не дошёл
+    let hits = 0;
+    const server = http.createServer((req, res) => { res.end('OK'); });
+    server.on('connection', () => { hits += 1; });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const { port } = server.address();
+      await assert.rejects(
+        () => core.verifyMerchantWebhook({ url: `http://[::ffff:127.0.0.1]:${port}/hook`, blockPrivateHosts: true }),
+        (e) => e.code === 'SSRF_BLOCKED',
+      );
+      assert.strictEqual(hits, 0, 'соединение с приватным адресом не должно открываться');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   await acheck('postJson отклоняет не-http(s) схемы до открытия сокета (F-08)', async () => {
