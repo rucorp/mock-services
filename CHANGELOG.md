@@ -9,6 +9,37 @@
 ## [Unreleased]
 
 ### Added
+- **Первый внешний банк-адаптер: ЮKassa end-to-end (Stage 2, #33).**
+  - `services/yookassa-mock` — независимый zero-dep мок мерчантского API ЮKassa на :3102:
+    REST `/v3` (Basic Auth `shopId:secretKey`, обязательный `Idempotence-Key` для POST с replay
+    сохранённого ответа и отказом на конфликте ключа), `POST /v3/payments`,
+    `GET /v3/payments[/{id}]`, `POST .../capture` (в т.ч. частичный) и `.../cancel`,
+    `POST /v3/refunds`, `GET /v3/refunds[/{id}]`, списки `{type:"list", items, next_cursor}`;
+    статусы `pending → waiting_for_capture → succeeded | canceled`, `test:true`,
+    decimal-строки сумм, только `RUB`;
+  - ошибки в официальном формате ЮKassa `{type:"error", id, code, description, parameter}`
+    + DX-слой мока `hint`/`doc` (официальные тексты для Idempotence-Key и 404 `payment_id`;
+    форк по решению координатора: `405`/`415` — пустое тело, как в response-handling);
+  - confirmation-страница `/payment/{id}` с тестовыми картами из `03-testing.md`
+    (успех/3DS/11 отказов), честные `cancellation_details` по официальной таблице
+    declined-payments (`merchant|yoo_money|payment_network`), минимизация PAN (F-10);
+  - вебхуки `{type:"notification", event, object}` без подписи (`payment.succeeded`,
+    `payment.waiting_for_capture`, `payment.canceled`, `refund.succeeded`) через
+    core-очередь: ACK ровно HTTP 200, ретраи/дамп, `webhook-drop|no-webhook`,
+    `webhook-duplicate`; mock-расширение `metadata.webhook_url`;
+  - слои ядра переиспользованы по паттерну tbank-mock: сценарный реестр
+    (`fail`/`hang`/`latency`/`http-500|504` + `/mock/scenarios`), виртуальные часы
+    (`/mock/time`, авто-истечение холда 7 дней → `expired_on_capture`, TTL pending),
+    журнал `/v3` с curl и редакцией секретов, control-plane токены, sandbox runtime
+    RFC-001 (собственные Basic-креды песочницы);
+  - `selftest.js` (227 проверок) включён в `npm test` (`test:yookassa`), CI-шаг,
+    compose: сервис `yookassa-mock :3102` с healthcheck в обоих compose-файлах,
+    black-box сценарий в `scripts/compose-selftest.js`; документация:
+    `services/yookassa-mock/README.md`, гайд `docs/integration/yookassa.md`,
+    обновлены корневой README, Dockerfile и старт-скрипты.
+  - контракты `tbank-mock` и `kassa-mock` не менялись; `/mock/verify-merchant`
+    для ЮKassa не реализован (вебхуки без подписи, ветка ядра не применима —
+    вопрос координатору вынесен в отчёт PR).
 - **Изоляция песочниц: request-local контекст и hosted tenancy за env-флагом (#8, RFC-001, A-21, F-11—F-15).**
   - ядро `createSandboxRuntime`: контекст песочницы разрешается на каждый запрос ровно один раз
     (`X-Mock-Sandbox` → `?sandbox=` → поддомен при `MOCK_SANDBOX_HOST_SUFFIX`) и резолвится

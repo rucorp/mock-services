@@ -4,10 +4,11 @@
 
 /*
  * Black-box selftest против поднятого стенда (docker compose / внешние контейнеры).
- * Проверяет оба сервиса (tbank-mock на :3100 и kassa-mock на :3101) снаружи по HTTP:
- *   1. Healthchecks (/health, /healthz)
+ * Проверяет сервисы (tbank-mock на :3100, kassa-mock на :3101, yookassa-mock на :3102) снаружи по HTTP:
+ *   1. Healthchecks (/health, /healthz, /health)
  *   2. Т-Банк: Init -> форма оплаты -> Confirm -> Chargeback (DISPUTED -> REPRESENTMENT -> ARBITRATION -> WON) -> виртуальные часы /mock/time -> /admin/journal
  *   3. Ferma (54-ФЗ): getToken -> sell (предоплата с расчётным НДС vat20_120) -> sell (зачёт предоплаты) -> buy (расход) -> маркировка -> очередь ОФД -> печать с ускорением через /mock/time -> /receipts/:uuid
+ *   4. ЮKassa: POST /v3/payments -> confirmation-страница -> оплата -> succeeded -> POST /v3/refunds -> списки
  *
  * F-33: прогон выполняется в одноразовой песочнице (X-Mock-Sandbox, в hosted —
  * через POST /sandboxes с owner-token) и убирает её в finally, чтобы повторные
@@ -23,10 +24,14 @@ const http = require('http');
 
 const TBANK_BASE = (process.env.MOCK_TBANK_URL || 'http://127.0.0.1:3100').replace(/\/$/, '');
 const KASSA_BASE = (process.env.MOCK_KASSA_URL || 'http://127.0.0.1:3101').replace(/\/$/, '');
+const YOOKASSA_BASE = (process.env.MOCK_YOOKASSA_URL || 'http://127.0.0.1:3102').replace(/\/$/, '');
 const TERMINAL_KEY = process.env.MOCK_TERMINAL_KEY || 'TBANKMOCKTEST';
 const TERMINAL_PASSWORD = process.env.MOCK_TERMINAL_PASSWORD || 'mockpass123';
 const FERMA_LOGIN = process.env.MOCK_FERMA_LOGIN || 'loviitest';
 const FERMA_PASSWORD = process.env.MOCK_FERMA_PASSWORD || 'mockpass123';
+const YOOKASSA_SHOP_ID = process.env.MOCK_SHOP_ID || process.env.YOOKASSA_SHOP_ID || 'YOOKASSAMOCKTEST';
+const YOOKASSA_SECRET_KEY = process.env.MOCK_SECRET_KEY || process.env.YOOKASSA_SECRET_KEY || 'mockpass123';
+const YOOKASSA_AUTH = `Basic ${Buffer.from(`${YOOKASSA_SHOP_ID}:${YOOKASSA_SECRET_KEY}`).toString('base64')}`;
 
 /*
  * F-33 (RFC-001 §8): прогон идёт в одноразовой песочнице, чтобы не накапливать
@@ -41,7 +46,9 @@ const SANDBOX_ID = (process.env.MOCK_SANDBOX_ID
 const SANDBOX = {
   [TBANK_BASE]: { id: SANDBOX_ID, token: '', creds: null },
   [KASSA_BASE]: { id: SANDBOX_ID, token: '', creds: null },
+  [YOOKASSA_BASE]: { id: SANDBOX_ID, token: '', creds: null },
 };
+const ALL_BASES = [TBANK_BASE, KASSA_BASE, YOOKASSA_BASE];
 
 /** Заголовки песочницы прогона; вызов может переопределить их (например, default). */
 function sandboxHeaders(baseUrl) {
@@ -120,7 +127,7 @@ function tbankApi(method, body, headers = {}) {
 
 /** Выделение песочницы прогона: в owned — POST /sandboxes, в namespaces — селектор. */
 async function provisionSandboxes() {
-  for (const base of [TBANK_BASE, KASSA_BASE]) {
+  for (const base of ALL_BASES) {
     const slot = SANDBOX[base];
     try {
       const r = await httpReq(base, 'POST', '/sandboxes', { sandbox: slot.id }, { 'X-Mock-Sandbox': 'default' });
@@ -144,7 +151,7 @@ async function provisionSandboxes() {
 
 /** Уборка: clock платформы, удаление песочницы и fallback-сброс (F-33, finally). */
 async function cleanupSandboxes() {
-  for (const base of [TBANK_BASE, KASSA_BASE]) {
+  for (const base of ALL_BASES) {
     const slot = SANDBOX[base];
     const headers = sandboxHeaders(base);
     try {
@@ -274,10 +281,53 @@ async function scenario(runId) {
 
   // Сбрасываем виртуальные часы кассы обратно (в песочнице прогона)
   await httpReq(KASSA_BASE, 'POST', '/mock/time', { reset: true });
+
+  // 4. ЮKassa: create -> confirmation -> оплата -> succeeded -> возврат -> списки
+  const hYk = await httpReq(YOOKASSA_BASE, 'GET', '/health');
+  check('yookassa-mock /health === 200 ok', hYk.status === 200 && hYk.json() && hYk.json().ok === true);
+
+  const ykCreate = await httpReq(YOOKASSA_BASE, 'POST', '/v3/payments', {
+    amount: { value: '150.00', currency: 'RUB' },
+    capture: true,
+    confirmation: { type: 'redirect', return_url: 'https://compose.test/return' },
+    description: 'Compose прогон ЮKassa',
+  }, { Authorization: YOOKASSA_AUTH, 'Idempotence-Key': `cmp-${runId}-yk-1` });
+  const ykPay = ykCreate.json();
+  check('yookassa POST /v3/payments -> pending, test:true, decimal-строка',
+    ykCreate.status === 200 && ykPay && ykPay.status === 'pending' && ykPay.test === true && ykPay.amount.value === '150.00',
+    ykCreate.text.slice(0, 160));
+
+  const ykConf = await httpReq(YOOKASSA_BASE, 'GET', new URL(ykPay.confirmation.confirmation_url).pathname);
+  check('yookassa confirmation-страница отдаёт 200', ykConf.status === 200 && ykConf.text.includes('Тестовый стенд ЮKassa'));
+
+  const ykPayResp = await httpReq(YOOKASSA_BASE, 'POST', `/payment/${ykPay.id}/pay`,
+    'pan=4111111111111111&exp=1229&cvv=123');
+  check('yookassa оплата тестовой картой -> 302', ykPayResp.status === 302);
+
+  const ykGet = await httpReq(YOOKASSA_BASE, 'GET', `/v3/payments/${ykPay.id}`, null, { Authorization: YOOKASSA_AUTH });
+  check('yookassa GET /v3/payments/{id} -> succeeded, paid, refundable',
+    ykGet.status === 200 && ykGet.json() && ykGet.json().status === 'succeeded' && ykGet.json().paid === true && ykGet.json().refundable === true,
+    ykGet.text.slice(0, 160));
+
+  const ykRefund = await httpReq(YOOKASSA_BASE, 'POST', '/v3/refunds', {
+    payment_id: ykPay.id,
+    amount: { value: '150.00', currency: 'RUB' },
+  }, { Authorization: YOOKASSA_AUTH, 'Idempotence-Key': `cmp-${runId}-yk-rf` });
+  check('yookassa POST /v3/refunds -> succeeded',
+    ykRefund.status === 200 && ykRefund.json() && ykRefund.json().status === 'succeeded' && ykRefund.json().payment_id === ykPay.id,
+    ykRefund.text.slice(0, 160));
+
+  const ykList = await httpReq(YOOKASSA_BASE, 'GET', '/v3/refunds', null, { Authorization: YOOKASSA_AUTH });
+  check('yookassa GET /v3/refunds -> {type:list, items, next_cursor}',
+    ykList.status === 200 && ykList.json() && ykList.json().type === 'list' && Array.isArray(ykList.json().items) && 'next_cursor' in ykList.json());
+
+  const ykNoAuth = await httpReq(YOOKASSA_BASE, 'GET', `/v3/payments/${ykPay.id}`);
+  check('yookassa без Basic Auth -> 401 invalid_credentials',
+    ykNoAuth.status === 401 && ykNoAuth.json() && ykNoAuth.json().type === 'error' && ykNoAuth.json().code === 'invalid_credentials');
 }
 
 async function main() {
-  console.log(`\n== compose black-box selftest (${TBANK_BASE} & ${KASSA_BASE}) ==\n`);
+  console.log(`\n== compose black-box selftest (${TBANK_BASE} & ${KASSA_BASE} & ${YOOKASSA_BASE}) ==\n`);
   console.log(`  · одноразовая песочница прогона: ${SANDBOX_ID}`);
 
   // Базовая линия default-состояния: прогон не должен её изменить (два запуска
@@ -285,8 +335,10 @@ async function main() {
   const BANK_KEYS = ['payments', 'deals', 'payouts', 'disputes', 'shops'];
   const bankCounts = (j) => BANK_KEYS.map((k) => `${k}=${j[k]}`).join(',');
   const kassaCounts = (j) => `checks=${j.checks},ofdQueue=${j.ofdQueueCount},fnUsed=${j.fnUsed},shift=${j.shiftStatus}`;
+  const yookassaCounts = (j) => `payments=${j.payments},refunds=${j.refunds}`;
   const beforeBank = (await httpReq(TBANK_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const beforeKassa = (await httpReq(KASSA_BASE, 'GET', '/healthz?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
+  const beforeYookassa = (await httpReq(YOOKASSA_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
 
   await provisionSandboxes();
   try {
@@ -297,6 +349,7 @@ async function main() {
 
   const afterBank = (await httpReq(TBANK_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const afterKassa = (await httpReq(KASSA_BASE, 'GET', '/healthz?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
+  const afterYookassa = (await httpReq(YOOKASSA_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   if (beforeBank.tenancy && beforeBank.tenancy !== 'off') {
     check('tbank: прогон не изменил default-счётчики (F-33)', bankCounts(beforeBank) === bankCounts(afterBank),
       `${bankCounts(beforeBank)} -> ${bankCounts(afterBank)}`);
@@ -304,6 +357,10 @@ async function main() {
   if (beforeKassa.tenancy && beforeKassa.tenancy !== 'off') {
     check('kassa: прогон не изменил default-счётчики (F-33)', kassaCounts(beforeKassa) === kassaCounts(afterKassa),
       `${kassaCounts(beforeKassa)} -> ${kassaCounts(afterKassa)}`);
+  }
+  if (beforeYookassa.tenancy && beforeYookassa.tenancy !== 'off') {
+    check('yookassa: прогон не изменил default-счётчики (F-33)', yookassaCounts(beforeYookassa) === yookassaCounts(afterYookassa),
+      `${yookassaCounts(beforeYookassa)} -> ${yookassaCounts(afterYookassa)}`);
   }
 
   console.log(`\nИТОГ compose-selftest: ${passed} passed, ${failed} failed\n`);
