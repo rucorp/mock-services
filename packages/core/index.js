@@ -1290,7 +1290,13 @@ function createVirtualClock({ initial = process.env.MOCK_VIRTUAL_CLOCK || '', ge
   let warnedAboutStoredOffset = false;
   const readOffset = () => {
     if (typeof getStateOffset === 'function') {
-      const v = getStateOffset();
+      let v;
+      try {
+        v = getStateOffset();
+      } catch (e) {
+        if (e && e.code === 'SANDBOX_EXPIRED') return localOffsetMs;
+        throw e;
+      }
       if (typeof v === 'number' && Number.isFinite(v)) {
         const problem = checkClockOffset(v);
         if (!problem) return v;
@@ -2016,6 +2022,71 @@ function createSandboxRuntime({
     return isPlainObject(fresh) ? fresh : {};
   }
 
+  const ADMISSION_REQ = Symbol('sandbox.admission.req');
+  const ADMISSION_PUBLIC = Symbol('sandbox.admission.public');
+  const VALID_POLICIES = new Set(['business', 'control', 'form', 'public']);
+  const PUBLIC_INFRA_PATH_RE = /^\/(healthz?|openapi\.json|sandboxes(?:\/.*)?)$/;
+  const CAPABILITY_FORM_PATH_RE = /^\/(payment\/(?!rest\/)[^/?#]+(?:\/(pay|3ds|sbp|sbp-pay|tpay|otp|reject|done))?|receipts\/[^/?#]+|add-card\/[^/?#]+)$/;
+
+  function makeDetachedPublicRecord() {
+    return {
+      id: 'default',
+      isDefault: true,
+      createdAt: defaultRecord.createdAt,
+      updatedAt: defaultRecord.updatedAt,
+      expiresAt: 0,
+      ownerTokenHash: defaultRecord.ownerTokenHash,
+      creds: null,
+      profile: null,
+      state: freshState('public'),
+    };
+  }
+
+  function requestPathname(req) {
+    try {
+      const rawUrl = (req && req.url) ? String(req.url) : '';
+      if (!rawUrl) return '';
+      return new URL(rawUrl, 'http://mock.local').pathname;
+    } catch {
+      return '';
+    }
+  }
+
+  function attachAdmissionMeta(result, req, { detachedPublic = false } = {}) {
+    if (result && typeof result === 'object') {
+      Object.defineProperty(result, ADMISSION_REQ, {
+        value: req || null,
+        enumerable: false,
+        configurable: true,
+      });
+      Object.defineProperty(result, ADMISSION_PUBLIC, {
+        value: Boolean(detachedPublic),
+        enumerable: false,
+        configurable: true,
+      });
+    }
+    return result;
+  }
+
+  function removeRecord(id) {
+    const rec = sandboxes.get(sanitizeSandboxId(id));
+    if (!rec || rec.isDefault) return { ok: false, error: rec && rec.isDefault ? 'default-sandbox' : 'not-found', removed: null };
+    sandboxes.delete(rec.id);
+    if (activeId === rec.id) activeId = 'default';
+    flushRegistry();
+    return { ok: true, removed: rec.id };
+  }
+
+  function isRecordExpiredOrRemoved(rec) {
+    if (!rec || rec.isDefault) return false;
+    if (sandboxes.get(rec.id) !== rec) return true;
+    if (rec.expiresAt && rec.expiresAt <= now()) {
+      removeRecord(rec.id);
+      return true;
+    }
+    return false;
+  }
+
   const defaultRecord = {
     id: 'default',
     isDefault: true,
@@ -2119,10 +2190,10 @@ function createSandboxRuntime({
           state: restored,
         });
       }
-      const restoredActive = sanitizeSandboxId(raw && raw.activeId);
-      if (restoredActive && (restoredActive === 'default' || sandboxes.has(restoredActive))) {
-        activeId = restoredActive;
-      }
+      // PA-55 / PA-50: request-local runtime всегда имеет дефолтную точку входа
+      // 'default' для безселекторных вызовов; чужая песочница из файла не становится
+      // глобальным fallback.
+      activeId = 'default';
       log(`sandboxes restored from ${registryFile}: ${sandboxes.size - 1}`);
     } catch (e) {
       log(`sandbox registry restore failed: ${e.message}`);
@@ -2170,11 +2241,17 @@ function createSandboxRuntime({
     return Boolean(token) && operators.some((expected) => safeEqual(token, expected));
   }
 
+  function isOperatorRequest(req) {
+    if (!req) return false;
+    if (isOperatorToken(ownerTokenOf(req))) return true;
+    return operators.some((expected) => tokenMatches(req, expected));
+  }
+
   function recordAuthorized(rec, req) {
     if (!rec.ownerTokenHash) return true;
+    if (isOperatorRequest(req)) return true;
     const token = ownerTokenOf(req);
     if (!token) return false;
-    if (isOperatorToken(token)) return true;
     return safeEqual(hashSecret(token), rec.ownerTokenHash);
   }
 
@@ -2184,15 +2261,97 @@ function createSandboxRuntime({
     if (!token || isOperatorToken(token)) return null;
     const hash = hashSecret(token);
     for (const rec of sandboxes.values()) {
-      if (rec.ownerTokenHash && safeEqual(hash, rec.ownerTokenHash)) return rec;
+      if (rec.ownerTokenHash && safeEqual(hash, rec.ownerTokenHash)) {
+        if (!rec.isDefault && rec.expiresAt && rec.expiresAt <= now()) {
+          removeRecord(rec.id);
+          return null;
+        }
+        return rec;
+      }
     }
     return null;
   }
 
-  function currentRecord() {
-    const rec = als.getStore();
-    if (rec && sandboxes.get(rec.id) === rec) return rec;
-    return sandboxes.get(activeId) || defaultRecord;
+  /**
+   * Контекст песочницы текущего запроса (PA-50 §7.2 / PG-10):
+   * если вызов идёт внутри `run(admission, fn)`, запись закреплена за этим
+   * запросом и НИКОГДА не фолбэчится на `activeId` или `defaultRecord`. Если
+   * закреплённая песочница истекла по TTL или удалена во время `await`,
+   * обращение к state/creds/persist завершается fail-closed (`SANDBOX_EXPIRED`).
+   */
+  function currentRecord({ allowDead = false } = {}) {
+    const ctx = als.getStore();
+    if (ctx && ctx.record) {
+      const rec = ctx.record;
+      if (!ctx.detachedPublic && isRecordExpiredOrRemoved(rec)) {
+        if (allowDead) return rec;
+        const e = new Error(`Песочница «${rec.id}» истекла по TTL и удалена`);
+        e.code = 'SANDBOX_EXPIRED';
+        e.sandbox = rec.id;
+        throw e;
+      }
+      return rec;
+    }
+    return defaultRecord;
+  }
+
+  function extractAuthReq(auth) {
+    if (!auth) return null;
+    if (typeof auth === 'object') {
+      if (auth.headers || auth.url) return auth;
+      if (auth.req && (auth.req.headers || auth.req.url)) return auth.req;
+      if (typeof auth.ownerToken === 'string') {
+        return { headers: { 'x-sandbox-token': auth.ownerToken } };
+      }
+    }
+    if (typeof auth === 'string') {
+      return { headers: { 'x-sandbox-token': auth } };
+    }
+    return null;
+  }
+
+  /**
+   * Авторизация явных target-операций (PA-50 / PG-03):
+   * в owned-режиме чтение/импорт/сброс/смена кредов/удаление песочницы `rec`
+   * разрешены только её владельцу (owner-token) или оператору стенда.
+   */
+  function authorizeTarget(rec, auth = null) {
+    if (tenancy !== 'owned') return { ok: true, via: tenancy };
+    const ctx = als.getStore();
+    const reqObj = extractAuthReq(auth) || (ctx && ctx.req) || null;
+    const isOperator = Boolean(
+      (auth && typeof auth === 'object' && auth.operator === true)
+      || (ctx && ctx.via === 'operator')
+      || (reqObj && isOperatorRequest(reqObj))
+    );
+    if (isOperator) return { ok: true, via: 'operator' };
+
+    if (rec.ownerTokenHash) {
+      if (ctx && ctx.record && !ctx.record.isDefault && !ctx.detachedPublic && ctx.record.id !== rec.id) {
+        return { ok: false, error: 'unauthorized', sandbox: rec.id };
+      }
+      if (reqObj && recordAuthorized(rec, reqObj)) {
+        return { ok: true, via: 'owner' };
+      }
+      if (!reqObj && ctx && ctx.record === rec && ctx.via === 'owner') {
+        return { ok: true, via: 'owner' };
+      }
+      return { ok: false, error: 'unauthorized', sandbox: rec.id };
+    }
+
+    // rec.ownerTokenHash отсутствует (открытая default-песочница в owned-режиме):
+    // арендатор именованной песочницы, анонимная form/public-сессия или запрос
+    // с чужим токеном не вправе сбрасывать/перезаписывать/экспортировать default.
+    if (ctx && (ctx.via === 'form' || ctx.via === 'public' || ctx.detachedPublic)) {
+      return { ok: false, error: 'unauthorized', sandbox: rec.id };
+    }
+    if (ctx && ctx.record && !ctx.record.isDefault && ctx.record.id !== rec.id) {
+      return { ok: false, error: 'unauthorized', sandbox: rec.id };
+    }
+    if (reqObj && ownerTokenOf(reqObj)) {
+      return { ok: false, error: 'unauthorized', sandbox: rec.id };
+    }
+    return { ok: true, via: 'default' };
   }
 
   /* ---------------------------------------------- лимиты и квоты (F-14/F-15) */
@@ -2246,17 +2405,62 @@ function createSandboxRuntime({
   }
 
   /**
-   * Разрешение контекста запроса ровно один раз (F-11).
-   * policy: 'business' | 'control' | 'form' | 'public'.
+   * Разрешение контекста запроса ровно один раз (F-11, PA-54, PA-55).
+   * policy: 'business' | 'control' | 'form' | 'public' (неизвестная политика
+   * трактуется fail-closed как 'business').
    */
   function admit(req, policy = 'business') {
+    const effectivePolicy = VALID_POLICIES.has(policy) ? policy : 'business';
     const sel = selector(req);
-    if (tenancy === 'off') return { ok: true, record: defaultRecord, selector: sel, via: 'off' };
-    if (tenancy === 'owned' && policy === 'public') {
-      return { ok: true, record: defaultRecord, selector: sel, via: 'public' };
+    const pathname = requestPathname(req);
+    if (tenancy === 'off') {
+      return attachAdmissionMeta({ ok: true, record: defaultRecord, selector: sel, via: 'off' }, req);
     }
-    const fallback = tenancy === 'owned' ? 'default' : (activeId || 'default');
-    const id = sel.id || fallback;
+
+    if (tenancy === 'owned' && effectivePolicy === 'public') {
+      if (sel.id && sel.id !== 'default') {
+        const targetRec = sandboxes.get(sel.id);
+        if (targetRec && !isRecordExpiredOrRemoved(targetRec) && recordAuthorized(targetRec, req)) {
+          const via = isOperatorRequest(req) ? 'operator' : 'owner';
+          return attachAdmissionMeta({ ok: true, record: targetRec, selector: sel, via }, req);
+        }
+        if (PUBLIC_INFRA_PATH_RE.test(pathname)) {
+          return attachAdmissionMeta(
+            { ok: true, record: makeDetachedPublicRecord(), selector: sel, via: 'public' },
+            req,
+            { detachedPublic: true }
+          );
+        }
+        return { ok: false, kind: targetRec ? 'unauthorized' : 'not-found', sandbox: sel.id, selector: sel };
+      }
+      if (recordAuthorized(defaultRecord, req)) {
+        const via = defaultRecord.ownerTokenHash
+          ? (isOperatorRequest(req) ? 'operator' : 'owner')
+          : 'public';
+        return attachAdmissionMeta({ ok: true, record: defaultRecord, selector: sel, via }, req);
+      }
+      if (PUBLIC_INFRA_PATH_RE.test(pathname)) {
+        return attachAdmissionMeta(
+          { ok: true, record: makeDetachedPublicRecord(), selector: sel, via: 'public' },
+          req,
+          { detachedPublic: true }
+        );
+      }
+      return { ok: false, kind: 'unauthorized', sandbox: 'default', selector: sel };
+    }
+
+    let id = sel.id;
+    if (!id) {
+      if (tenancy === 'owned') {
+        const byToken = recordByOwnerToken(req);
+        id = byToken ? byToken.id : 'default';
+      } else {
+        // PA-55: запрос без селектора в namespaces всегда идёт в 'default',
+        // а не в глобально переключённый activeId.
+        id = 'default';
+      }
+    }
+
     let rec = sandboxes.get(id);
     if (!rec) {
       if (tenancy === 'owned') {
@@ -2273,32 +2477,62 @@ function createSandboxRuntime({
       rec = createRecord(id, { ttl: ttlMs });
       if (!rec) return { ok: false, kind: 'limit', sandbox: id, selector: sel };
     }
-    if (rec.expiresAt && rec.expiresAt <= now()) {
-      remove(rec.id);
+    if (!rec.isDefault && rec.expiresAt && rec.expiresAt <= now()) {
+      removeRecord(rec.id);
       return { ok: false, kind: 'expired', sandbox: rec.id, selector: sel };
     }
-    // 'form' — capability-ссылки покупателя (форма оплаты, страница чека): сам
-    // объект доступа (PaymentId/UUID) и есть секрет, owner-token не требуется.
-    if (tenancy === 'owned' && policy !== 'form' && !recordAuthorized(rec, req)) {
+
+    // PA-54: 'form' — capability-ссылки покупателя (/payment/{id}, /receipts/{uuid}).
+    // Если default закрыт MOCK_SANDBOX_TOKEN, обход без токена запрещён; для
+    // capability-путей именованной песочницы выставляется честный via:'form'.
+    const authorized = recordAuthorized(rec, req);
+    if (tenancy === 'owned' && !authorized) {
+      if (effectivePolicy === 'form' && !rec.isDefault && CAPABILITY_FORM_PATH_RE.test(pathname)) {
+        return attachAdmissionMeta({ ok: true, record: rec, selector: sel, via: 'form' }, req);
+      }
       return { ok: false, kind: 'unauthorized', sandbox: rec.id, selector: sel };
     }
-    const via = !rec.ownerTokenHash
-      ? (rec.isDefault ? 'default' : 'namespace')
-      : (isOperatorToken(ownerTokenOf(req)) ? 'operator' : 'owner');
-    return { ok: true, record: rec, selector: sel, via };
+
+    let via;
+    if (!rec.ownerTokenHash) {
+      if (isOperatorRequest(req)) via = 'operator';
+      else if (effectivePolicy === 'form') via = 'form';
+      else via = rec.isDefault ? 'default' : 'namespace';
+    } else {
+      via = isOperatorRequest(req) ? 'operator' : 'owner';
+    }
+    return attachAdmissionMeta({ ok: true, record: rec, selector: sel, via }, req);
   }
 
+  /**
+   * Выполняет `fn` в закреплённом контексте допущенной песочницы (PA-56, PA-50 §7.2):
+   * при неуспешном admission (`!admission || !admission.ok`) бросает ошибку и
+   * НЕ выполняет `fn` в default/чужой песочнице.
+   */
   function run(admission, fn) {
-    const rec = admission && admission.ok ? admission.record : currentRecord();
-    return als.run(rec, fn);
+    if (!admission || admission.ok !== true || !admission.record) {
+      const e = new Error('createSandboxRuntime.run: контекст песочницы не допущен (admission.ok !== true)');
+      e.code = 'SANDBOX_ADMISSION_FAILED';
+      e.admission = admission || null;
+      throw e;
+    }
+    const ctx = {
+      record: admission.record,
+      via: admission.via || null,
+      req: admission[ADMISSION_REQ] || null,
+      detachedPublic: Boolean(admission[ADMISSION_PUBLIC]),
+    };
+    return als.run(ctx, fn);
   }
 
   /* ------------------------------------------------------------- управление */
 
   function describe(rec) {
+    const ctx = als.getStore();
+    const currentActiveId = (ctx && ctx.record && !ctx.detachedPublic) ? ctx.record.id : activeId;
     return {
       id: rec.id,
-      active: rec.id === activeId,
+      active: rec.id === currentActiveId,
       default: Boolean(rec.isDefault),
       owned: Boolean(rec.ownerTokenHash),
       createdAt: rec.createdAt,
@@ -2313,7 +2547,9 @@ function createSandboxRuntime({
   }
 
   function find(id) {
-    return sandboxes.get(sanitizeSandboxId(id)) || null;
+    const rec = sandboxes.get(sanitizeSandboxId(id)) || null;
+    if (rec && isRecordExpiredOrRemoved(rec)) return null;
+    return rec;
   }
 
   function create({ id = '', creds = null, profile = null, ttlMs: ttlOverride = null, ip = '', owner = true } = {}) {
@@ -2346,22 +2582,25 @@ function createSandboxRuntime({
   }
 
   /** Смена кредов песочницы (RFC-001 §6, reset-creds): owner-token сохраняется. */
-  function updateCreds(id, creds) {
-    const rec = sandboxes.get(sanitizeSandboxId(id));
-    if (!rec || rec.isDefault) return { ok: false, error: 'not-found' };
+  function updateCreds(id, creds, auth = null) {
+    const wanted = sanitizeSandboxId(id);
+    const rec = sandboxes.get(wanted);
+    if (!rec || rec.isDefault || isRecordExpiredOrRemoved(rec)) return { ok: false, error: 'not-found' };
+    const authRes = authorizeTarget(rec, auth);
+    if (!authRes.ok) return { ok: false, error: authRes.error, sandbox: rec.id };
     rec.creds = creds || null;
     rec.updatedAt = isoNow();
     persistRecord(rec, true);
     return { ok: true, sandbox: rec.id, creds: rec.creds };
   }
 
-  function remove(id) {
-    const rec = sandboxes.get(sanitizeSandboxId(id));
-    if (!rec || rec.isDefault) return { ok: false, removed: null };
-    sandboxes.delete(rec.id);
-    if (activeId === rec.id) activeId = 'default';
-    flushRegistry();
-    return { ok: true, removed: rec.id };
+  function remove(id, auth = null) {
+    const wanted = sanitizeSandboxId(id);
+    const rec = sandboxes.get(wanted);
+    if (!rec || rec.isDefault) return { ok: false, error: rec && rec.isDefault ? 'default-sandbox' : 'not-found', removed: null };
+    const authRes = authorizeTarget(rec, auth);
+    if (!authRes.ok) return { ok: false, error: authRes.error, sandbox: rec.id, removed: null };
+    return removeRecord(rec.id);
   }
 
   function switchActive(id = 'default') {
@@ -2371,14 +2610,32 @@ function createSandboxRuntime({
       const rec = createRecord(wanted, { ttl: ttlMs });
       if (!rec) return { ok: false, error: 'limit', current: activeId };
     }
-    activeId = wanted;
+    // PA-55: создаём/проверяем песочницу, но не меняем глобальный fallback activeId,
+    // чтобы параллельные запросы без селектора не попадали в чужой namespace.
+    activeId = 'default';
     flushRegistry();
-    return { ok: true, current: activeId };
+    return { ok: true, current: wanted, sandbox: wanted };
   }
 
-  function reset(id = null) {
-    const rec = id === null || id === undefined ? currentRecord() : (sandboxes.get(sanitizeSandboxId(id)) || createRecord(sanitizeSandboxId(id), { ttl: ttlMs }));
+  function reset(id = null, auth = null) {
+    let rec;
+    if (id === null || id === undefined || id === '') {
+      rec = currentRecord();
+    } else {
+      const wanted = sanitizeSandboxId(id);
+      if (!wanted) return { ok: false, sandbox: String(id || ''), error: 'not-found' };
+      rec = sandboxes.get(wanted);
+      if (rec && isRecordExpiredOrRemoved(rec)) {
+        return { ok: false, sandbox: wanted, error: 'expired' };
+      }
+      if (!rec) {
+        if (tenancy === 'owned') return { ok: false, sandbox: wanted, error: 'not-found' };
+        rec = createRecord(wanted, { ttl: ttlMs });
+      }
+    }
     if (!rec) return { ok: false, sandbox: id || null, error: 'not-found' };
+    const authRes = authorizeTarget(rec, auth);
+    if (!authRes.ok) return { ok: false, sandbox: rec.id, error: authRes.error };
     const fresh = freshState(rec.id);
     mergeValidatedInto(rec.state, safeStateSnapshot(fresh, 'fresh sandbox state'));
     rec.updatedAt = isoNow();
@@ -2386,10 +2643,26 @@ function createSandboxRuntime({
     return { ok: true, sandbox: rec.id };
   }
 
-  function exportState(id = null) {
-    const rec = id === null || id === undefined ? currentRecord() : sandboxes.get(sanitizeSandboxId(id));
-    if (!rec) return { sandbox: sanitizeSandboxId(id) || null, exportedAt: isoNow(), state: {}, error: 'not-found' };
+  function exportState(id = null, auth = null) {
+    let rec;
+    if (id === null || id === undefined || id === '') {
+      rec = currentRecord();
+    } else {
+      const wanted = sanitizeSandboxId(id);
+      rec = wanted ? sandboxes.get(wanted) : null;
+      if (rec && isRecordExpiredOrRemoved(rec)) {
+        return { ok: false, sandbox: wanted, exportedAt: isoNow(), state: null, error: 'expired' };
+      }
+      if (!rec) {
+        return { ok: false, sandbox: wanted || null, exportedAt: isoNow(), state: tenancy === 'owned' ? null : {}, error: 'not-found' };
+      }
+    }
+    const authRes = authorizeTarget(rec, auth);
+    if (!authRes.ok) {
+      return { ok: false, sandbox: rec.id, exportedAt: isoNow(), state: null, error: authRes.error };
+    }
     return {
+      ok: true,
       sandbox: rec.id,
       exportedAt: isoNow(),
       state: safeStateSnapshot(JSON.parse(JSON.stringify(rec.state)), 'exported state'),
@@ -2397,21 +2670,34 @@ function createSandboxRuntime({
   }
 
   /**
-   * Импорт снимка в явно указанную песочницу (F-13): активная (текущая) песочница
-   * не переключается, соседние состояния не меняются.
+   * Импорт снимка в явно указанную песочницу (F-13, PA-50): активная (текущая)
+   * песочница не переключается, соседние состояния не меняются, в owned-режиме
+   * проверяется право владения target-песочницей и не создаются бесхозные записи.
    */
-  function importState(payload = {}, targetId = null) {
-    let rec;
-    if (targetId === null || targetId === undefined) {
-      rec = currentRecord();
-    } else {
-      const wanted = sanitizeSandboxId(targetId);
-      rec = sandboxes.get(wanted) || createRecord(wanted, { ttl: ttlMs });
-      if (!rec) throw new Error(`Песочница «${wanted}» не найдена`);
-    }
+  function importState(payload = {}, targetId = null, auth = null) {
     const next = payload && isPlainObject(payload.state) ? payload.state : payload;
     if (!isPlainObject(next)) throw new Error('Ожидается JSON-объект состояния');
     const safe = safeStateSnapshot(next, 'imported state');
+
+    let rec;
+    if (targetId === null || targetId === undefined || targetId === '') {
+      rec = currentRecord();
+    } else {
+      const wanted = sanitizeSandboxId(targetId);
+      if (!wanted) return { ok: false, sandbox: String(targetId || ''), error: 'not-found' };
+      rec = sandboxes.get(wanted);
+      if (rec && isRecordExpiredOrRemoved(rec)) {
+        return { ok: false, sandbox: wanted, error: 'expired' };
+      }
+      if (!rec) {
+        if (tenancy === 'owned') return { ok: false, sandbox: wanted, error: 'not-found' };
+        rec = createRecord(wanted, { ttl: ttlMs });
+        if (!rec) throw new Error(`Песочница «${wanted}» не найдена`);
+      }
+    }
+    const authRes = authorizeTarget(rec, auth);
+    if (!authRes.ok) return { ok: false, sandbox: rec.id, error: authRes.error };
+
     mergeValidatedInto(rec.state, safe);
     rec.updatedAt = isoNow();
     persistRecord(rec, true);
@@ -2446,9 +2732,11 @@ function createSandboxRuntime({
 
   /** Прогон fn в контексте каждой песочницы (очереди вебхуков, bank-timers). */
   function tickAll(fn) {
+    const ts = now();
     for (const rec of Array.from(sandboxes.values())) {
+      if (!rec.isDefault && rec.expiresAt && rec.expiresAt <= ts) continue;
       try {
-        als.run(rec, fn);
+        als.run({ record: rec, via: 'tick', req: null, detachedPublic: false }, fn);
       } catch (e) {
         log(`sandbox tick failed (${rec.id}): ${e.message}`);
       }
@@ -2506,8 +2794,10 @@ function createSandboxRuntime({
     selector,
     ownerTokenOf,
     isOperatorToken,
+    isOperatorRequest,
     recordAuthorized,
-    currentId: () => currentRecord().id,
+    authorizeTarget,
+    currentId: () => currentRecord({ allowDead: true }).id,
     recordByOwnerToken,
     current: () => currentRecord(),
     list,

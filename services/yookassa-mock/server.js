@@ -1194,7 +1194,13 @@ function page(body) {
 
 const esc = (v) => escapeHtml(v);
 
+function sandboxFormSuffix() {
+  const id = sandboxRuntime.currentId();
+  return id && id !== 'default' ? `?sandbox=${encodeURIComponent(id)}` : '';
+}
+
 function formPage(payment, errorMsg) {
+  const sfx = sandboxFormSuffix();
   const cardOptions = Object.entries(CARDS)
     .map(([pan, c]) => `<label><input type="radio" name="preset" value="${pan}" onchange="document.getElementById('pan').value='${pan}';document.getElementById('exp').value='1229';document.getElementById('cvv').value='123'"> ${esc(c.label)} <code>${pan.slice(0, 6)}**${pan.slice(-4)}</code></label>`)
     .join('');
@@ -1205,7 +1211,7 @@ function formPage(payment, errorMsg) {
     <div class="sum">${esc(payment.amount.value)} ₽</div>
     ${payment.description ? `<div class="muted">${esc(payment.description)}</div>` : ''}
     ${errorMsg ? `<div class="err">${esc(errorMsg)}</div>` : ''}
-    <form method="POST" action="/payment/${payment.id}/pay">
+    <form method="POST" action="/payment/${payment.id}/pay${sfx}">
       <div class="cards">${cardOptions}</div>
       <label>Номер карты</label><input type="text" id="pan" name="pan" value="5555555555554444" required>
       <label>Срок (MMYY)</label><input type="text" id="exp" name="exp" value="1229" required>
@@ -1216,12 +1222,13 @@ function formPage(payment, errorMsg) {
 }
 
 function tdsPage(payment, errorMsg) {
+  const sfx = sandboxFormSuffix();
   return page(`
     <span class="logo">Ю · мок</span>
     <h1>Подтверждение 3-D Secure</h1>
     <div class="muted">Платёж <code>${esc(payment.id)}</code> · тестовый ACS: любые цифры (≥4) проходят</div>
     ${errorMsg ? `<div class="err">${esc(errorMsg)}</div>` : ''}
-    <form method="POST" action="/payment/${payment.id}/3ds">
+    <form method="POST" action="/payment/${payment.id}/3ds${sfx}">
       <label>Код из SMS</label><input type="text" id="code" name="code" value="1234" required>
       <button type="submit">Подтвердить</button>
     </form>`);
@@ -1430,7 +1437,7 @@ function generateSandboxCreds(body = {}) {
 }
 
 function handleSandboxApi(req, res, url, body, admission) {
-  const operator = sandboxRuntime.isOperatorToken(sandboxRuntime.ownerTokenOf(req));
+  const operator = sandboxRuntime.isOperatorRequest(req);
   if (req.method === 'GET') {
     if (TENANCY === 'owned' && !operator) {
       const own = sandboxRuntime.recordByOwnerToken(req);
@@ -1484,8 +1491,13 @@ function handleSandboxApi(req, res, url, body, admission) {
     if (TENANCY === 'owned' && !operator && !sandboxRuntime.recordAuthorized(record, req)) {
       return sendJson(res, yerr('invalid_credentials', { description: `Only the sandbox owner (owner-token) or operator can delete "${target}"` }), 401);
     }
-    const result = sandboxRuntime.remove(target);
-    if (!result.ok) return sendJson(res, yerr('invalid_request', { description: `Sandbox "${target}" cannot be deleted (default stand)` }), 400);
+    const result = sandboxRuntime.remove(target, req);
+    if (!result.ok) {
+      if (result.error === 'unauthorized') {
+        return sendJson(res, yerr('invalid_credentials', { description: `Only the sandbox owner (owner-token) or operator can delete "${target}"` }), 401);
+      }
+      return sendJson(res, yerr('invalid_request', { description: `Sandbox "${target}" cannot be deleted (default stand)` }), 400);
+    }
     return sendJson(res, { ok: true, removed: result.removed });
   }
   return sendJson(res, yerr('invalid_request', { description: `Method ${req.method} is not supported for /sandboxes` }), 405);
@@ -1504,29 +1516,29 @@ function handleSandboxMe(req, res, p, body) {
     return sendJson(res, { ok: true, mode: TENANCY, sandbox: sandboxRuntime.describe(record), creds: record.creds || null });
   }
   if (p === '/sandboxes/me/reset' && req.method === 'POST') {
-    const result = sandboxRuntime.reset(record.id);
+    const result = sandboxRuntime.reset(record.id, req);
     return sendJson(res, { ok: true, sandbox: result.sandbox });
   }
   if (p === '/sandboxes/me/reset-creds' && req.method === 'POST') {
     const creds = generateSandboxCreds(body || {});
-    sandboxRuntime.updateCreds(record.id, creds);
+    sandboxRuntime.updateCreds(record.id, creds, req);
     return sendJson(res, { ok: true, sandbox: record.id, creds, ownerTokenChanged: false });
   }
   if (p === '/sandboxes/me' && req.method === 'DELETE') {
-    const result = sandboxRuntime.remove(record.id);
+    const result = sandboxRuntime.remove(record.id, req);
     if (!result.ok) return sendJson(res, yerr('invalid_request', { description: 'The default sandbox cannot be deleted' }), 400);
     return sendJson(res, { ok: true, removed: result.removed });
   }
   return sendJson(res, yerr('invalid_request', { description: `Method ${req.method} is not supported for ${p}` }), 405);
 }
 
-/** Политика admission по маршруту (F-11/F-12). */
+/** Политика admission по маршруту (F-11/F-12, PA-54): неописанный маршрут — fail-closed 'business'. */
 function sandboxPolicy(p) {
-  if (p.startsWith('/sandboxes')) return 'public';
+  if (p === '/health' || p === '/openapi.json' || p === '/sandboxes' || p.startsWith('/sandboxes/')) return 'public';
   if (p.startsWith('/admin') || p.startsWith('/mock/')) return 'control';
   if (p.startsWith('/payment/')) return 'form';
   if (p.startsWith('/v3/')) return 'business';
-  return 'public';
+  return 'business';
 }
 
 /** DX-ответ на ошибку admission песочницы (F-12). */
@@ -1705,9 +1717,11 @@ async function route(req, res) {
 }
 
 async function routeRequest(req, res, url, p, raw, body, admission) {
-  // Единый access-control управляющей поверхности (F-07).
+  // Единый access-control управляющей поверхности (F-07, PA-50).
   const surface = controlSurface(p);
-  const ownerSurface = surface === 'operator' && Boolean(sandboxRuntime.recordByOwnerToken(req));
+  const ownerRec = sandboxRuntime.recordByOwnerToken(req);
+  const ownerSurface = surface === 'operator'
+    && Boolean(ownerRec && admission.record && ownerRec.id === admission.record.id);
   if (surface && admission.via !== 'owner' && !ownerSurface) {
     const access = checkControlAccess(req, {
       adminToken: MOCK_ADMIN_TOKEN,
@@ -1750,6 +1764,7 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
     // Сетевые сбои ядра: X-Mock-Latency / X-Mock-Scenario: latency, http-500, http-504.
     const chaosSpec = parseScenarioSpec(req.headers['x-mock-scenario'] || '');
     const chaosResult = await applyRequestChaos(req, chaosSpec);
+    sandboxRuntime.current(); // PA-50 §7.2: fail-closed при истечении/удалении песочницы во время await
     if (chaosResult.abortStatus) {
       return sendJson(res, yerr('internal_server_error', {
         description: chaosResult.abortMessage,
@@ -1761,7 +1776,7 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
 
   if (req.method === 'GET' && p === '/health') {
     const health = { ok: true, sandbox: sandboxRuntime.currentId(), tenancy: TENANCY };
-    if (TENANCY !== 'owned' || admission.record.isDefault) {
+    if (TENANCY !== 'owned' || (admission.record.isDefault && !admission.record.ownerTokenHash) || admission.via === 'owner' || admission.via === 'operator') {
       Object.assign(health, {
         payments: Object.keys(state.payments).length,
         refunds: Object.keys(state.refunds).length,
@@ -1781,7 +1796,10 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
 
   if (p === '/mock/reset' && req.method === 'POST') {
     const target = (body && body.sandbox) || admission.record.id;
-    const resetName = sandboxRuntime.reset(target);
+    const resetName = sandboxRuntime.reset(target, req);
+    if (!resetName.ok) {
+      return sendSandboxError(res, { ok: false, kind: resetName.error || 'unauthorized', sandbox: resetName.sandbox || target });
+    }
     scenarios.clearRules();
     scenarios.clearHistory();
     journal.clear();
@@ -1791,7 +1809,10 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
   if (p === '/mock/state') {
     if (req.method === 'GET') {
       const targetSandbox = url.searchParams.get('sandbox') || undefined;
-      const snapshot = targetSandbox ? sandboxRuntime.exportState(targetSandbox) : sandboxRuntime.exportState();
+      const snapshot = targetSandbox ? sandboxRuntime.exportState(targetSandbox, req) : sandboxRuntime.exportState(null, req);
+      if (snapshot && snapshot.ok === false) {
+        return sendSandboxError(res, { ok: false, kind: snapshot.error || 'unauthorized', sandbox: snapshot.sandbox || targetSandbox || admission.record.id });
+      }
       return sendJson(res, {
         sandbox: snapshot.sandbox || admission.record.id,
         state: snapshot,
@@ -1809,7 +1830,10 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
       const targetSandbox = (body && body.sandbox) || admission.record.id;
       const snapshot = (body && body.state) || body || {};
       try {
-        const imported = sandboxRuntime.importState(snapshot, targetSandbox);
+        const imported = sandboxRuntime.importState(snapshot, targetSandbox, req);
+        if (!imported.ok) {
+          return sendSandboxError(res, { ok: false, kind: imported.error || 'unauthorized', sandbox: imported.sandbox || targetSandbox });
+        }
         return sendJson(res, { ok: true, sandbox: imported.sandbox });
       } catch (e) {
         return sendJson(res, yerr('invalid_request', {
@@ -2062,6 +2086,10 @@ async function sendV3(req, res, p, raw, body, target, handler, ...handlerArgs) {
 
 const server = http.createServer((req, res) => {
   route(req, res).catch((e) => {
+    if (e && e.code === 'SANDBOX_EXPIRED') {
+      try { sendSandboxError(res, { ok: false, kind: 'expired', sandbox: e.sandbox || 'default' }); } catch { /* headers sent */ }
+      return;
+    }
     if (e && e.code === 'BODY_TOO_LARGE') {
       try {
         sendJson(res, yerr('invalid_request', {

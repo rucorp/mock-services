@@ -1001,6 +1001,195 @@ async function main() {
     }
   });
 
+  check('createSandboxRuntime: PA-50 явная авторизация target в exportState/importState/reset/updateCreds/remove', () => {
+    const rt = core.createSandboxRuntime({
+      state: { payments: {} },
+      initialStateFactory: () => ({ payments: {} }),
+      mode: 'owned',
+      defaultOwnerToken: 'default-secret-token',
+      operatorTokens: ['op-secret-token'],
+      log: () => {},
+    });
+    const a = rt.create({ id: 'tenant-a' });
+    const b = rt.create({ id: 'tenant-b' });
+    const admitB = rt.admit({ headers: { 'x-mock-sandbox': 'tenant-b', 'x-sandbox-token': b.ownerToken }, url: '/v2/Init' }, 'business');
+    rt.run(admitB, () => {
+      rt.state.payments['pay-b'] = { canary: 'SECRET-B' };
+    });
+
+    const reqA = { headers: { 'x-mock-sandbox': 'tenant-a', 'x-sandbox-token': a.ownerToken }, url: '/mock/state' };
+    const admitA = rt.admit(reqA, 'control');
+    assert.strictEqual(admitA.ok, true);
+    rt.run(admitA, () => {
+      // Чужие песочницы из контекста A недоступны
+      const expB = rt.exportState('tenant-b', reqA);
+      assert.strictEqual(expB.ok, false);
+      assert.strictEqual(expB.error, 'unauthorized');
+      assert.strictEqual(expB.state, null);
+
+      const impB = rt.importState({ payments: { hacked: { by: 'a' } } }, 'tenant-b', reqA);
+      assert.strictEqual(impB.ok, false);
+      assert.strictEqual(impB.error, 'unauthorized');
+
+      const rstB = rt.reset('tenant-b', reqA);
+      assert.strictEqual(rstB.ok, false);
+      assert.strictEqual(rstB.error, 'unauthorized');
+
+      const updB = rt.updateCreds('tenant-b', { password: 'pwn' }, reqA);
+      assert.strictEqual(updB.ok, false);
+      assert.strictEqual(updB.error, 'unauthorized');
+
+      const remB = rt.remove('tenant-b', reqA);
+      assert.strictEqual(remB.ok, false);
+      assert.strictEqual(remB.error, 'unauthorized');
+
+      // Автосоздание чужих песочниц через importState/reset в owned запрещено
+      assert.strictEqual(rt.importState({ payments: {} }, 'forged-c', reqA).ok, false);
+      assert.strictEqual(rt.reset('forged-c', reqA).ok, false);
+      assert.strictEqual(rt.find('forged-c'), null);
+
+      // Своя песочница A доступна
+      assert.strictEqual(rt.importState({ payments: { own: { ok: 1 } } }, 'tenant-a', reqA).ok, true);
+      const expA = rt.exportState('tenant-a', reqA);
+      assert.deepStrictEqual(Object.keys(expA.state.payments), ['own']);
+      assert.strictEqual(rt.reset('tenant-a', reqA).ok, true);
+      assert.deepStrictEqual(Object.keys(rt.exportState('tenant-a', reqA).state.payments), []);
+    });
+
+    // Состояние B не пострадало
+    assert.deepStrictEqual(Object.keys(rt.find('tenant-b').state.payments), ['pay-b']);
+    assert.strictEqual(rt.find('tenant-b').state.payments['pay-b'].canary, 'SECRET-B');
+
+    // Оператор может обслуживать любую песочницу
+    const reqOp = { headers: { 'x-operator-token': 'op-secret-token' }, url: '/mock/state' };
+    const admitOp = rt.admit(reqOp, 'control');
+    assert.strictEqual(admitOp.ok, true);
+    assert.strictEqual(admitOp.via, 'operator');
+    rt.run(admitOp, () => {
+      const expB = rt.exportState('tenant-b', reqOp);
+      assert.strictEqual(expB.state.payments['pay-b'].canary, 'SECRET-B');
+      assert.strictEqual(rt.reset('tenant-b', reqOp).ok, true);
+      assert.deepStrictEqual(Object.keys(rt.find('tenant-b').state.payments), []);
+    });
+  });
+
+  await acheck('createSandboxRuntime: PA-50 §7.2 / PG-10 TTL-sweep посреди запроса закрывается fail-closed без отката к чужой песочнице', async () => {
+    let now = 1000;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sbx-ttl-race-'));
+    try {
+      const file = path.join(dir, 'sandboxes.json');
+      fs.writeFileSync(file, JSON.stringify({
+        activeId: 'victim',
+        sandboxes: [{
+          id: 'victim',
+          expiresAt: 0,
+          ownerTokenHash: core.hashSecret('victim-token'),
+          state: { canary: 'FOREIGN-VICTIM' },
+        }],
+      }));
+      const rt = core.createSandboxRuntime({
+        state: { canary: 'DEFAULT' },
+        initialStateFactory: ({ id }) => ({ canary: `STATE-${id}` }),
+        mode: 'owned',
+        sandboxFile: file,
+        ttlMs: 50,
+        now: () => now,
+        log: () => {},
+      });
+      assert.strictEqual(rt.activeId(), 'default', 'в owned-режиме activeId из файла не должен переключаться на чужую песочницу');
+      const a = rt.create({ id: 'tenant-a' });
+      const admission = rt.admit({
+        headers: { 'x-mock-sandbox': 'tenant-a', 'x-sandbox-token': a.ownerToken },
+        url: '/v2/GetState',
+      }, 'business');
+      assert.strictEqual(admission.ok, true);
+      assert.strictEqual(admission.via, 'owner');
+
+      await rt.run(admission, async () => {
+        assert.strictEqual(rt.state.canary, 'STATE-tenant-a');
+        await sleep(5);
+        now = 1060;
+        const swept = rt.sweep();
+        assert.strictEqual(swept.expired, 1);
+        assert.strictEqual(rt.find('tenant-a'), null);
+        // currentId() остаётся приколотым к tenant-a, а доступ к state бросает SANDBOX_EXPIRED (410)
+        assert.strictEqual(rt.currentId(), 'tenant-a');
+        assert.throws(() => rt.state.canary, (err) => err && err.code === 'SANDBOX_EXPIRED' && err.sandbox === 'tenant-a');
+      });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  check('createSandboxRuntime: PA-54 закрытая default-песочница, fail-closed политика и честный via="form"', () => {
+    const rt = core.createSandboxRuntime({
+      state: { payments: { p1: { secret: 'DEFAULT-SECRET' } } },
+      initialStateFactory: () => ({ payments: {} }),
+      mode: 'owned',
+      defaultOwnerToken: 'default-owner-secret',
+      operatorTokens: ['op-secret'],
+      log: () => {},
+    });
+    const b = rt.create({ id: 'tenant-b' });
+
+    // Неизвестная/пустая политика трактуется fail-closed как 'business'
+    assert.strictEqual(rt.admit({ headers: {}, url: '/v2/Init' }).ok, false);
+    assert.strictEqual(rt.admit({ headers: {}, url: '/unknown' }, 'unknown-policy').ok, false);
+
+    // Защищённая default-песочница не открывается ни через form, ни через непубличный путь с policy='public'
+    assert.strictEqual(rt.admit({ headers: {}, url: '/payment/1' }, 'form').ok, false);
+    assert.strictEqual(rt.admit({ headers: {}, url: '/not-public' }, 'public').ok, false);
+
+    // Инфраструктурный /health на public допускается только с изолированным пустым state
+    const pubHealth = rt.admit({ headers: {}, url: '/health' }, 'public');
+    assert.strictEqual(pubHealth.ok, true);
+    assert.strictEqual(pubHealth.via, 'public');
+    rt.run(pubHealth, () => {
+      assert.deepStrictEqual(rt.state.payments, {}, 'public без токена не видит секретный state защищённой default-песочницы');
+    });
+
+    // Форма покупателя для tenant-b открывается только на путях форм и помечается via='form' (не 'owner')
+    const formB = rt.admit({ headers: { 'x-mock-sandbox': 'tenant-b' }, url: '/payment/pay-1?sandbox=tenant-b' }, 'form');
+    assert.strictEqual(formB.ok, true);
+    assert.strictEqual(formB.via, 'form');
+    assert.strictEqual(rt.admit({ headers: { 'x-mock-sandbox': 'tenant-b' }, url: '/v2/Init' }, 'form').ok, false);
+  });
+
+  check('createSandboxRuntime: PA-55 switchActive в namespaces не переключает глобальный fallback для других запросов', () => {
+    const rt = core.createSandboxRuntime({
+      state: { payments: {} },
+      initialStateFactory: () => ({ payments: {} }),
+      mode: 'namespaces',
+      log: () => {},
+    });
+    const switched = rt.switchActive('ci-worker-b');
+    assert.strictEqual(switched.ok, true);
+    assert.strictEqual(switched.current, 'ci-worker-b');
+    assert.ok(rt.find('ci-worker-b'), 'песочница создаётся заранее');
+    assert.strictEqual(rt.activeId(), 'default', 'глобальный fallback остаётся default');
+
+    const noSelector = rt.admit({ headers: {}, url: '/v2/Init' }, 'business');
+    assert.strictEqual(noSelector.ok, true);
+    assert.strictEqual(noSelector.record.id, 'default', 'запрос без селектора идёт в default, а не в ci-worker-b');
+  });
+
+  check('createSandboxRuntime: PA-56 run() отказывается выполнять обработчик при неуспешном admission', () => {
+    const rt = core.createSandboxRuntime({
+      state: { payments: {} },
+      initialStateFactory: () => ({ payments: {} }),
+      mode: 'owned',
+      log: () => {},
+    });
+    const badAdmission = rt.admit({ headers: { 'x-mock-sandbox': 'missing' }, url: '/v2/Init' }, 'business');
+    assert.strictEqual(badAdmission.ok, false);
+    let executed = false;
+    assert.throws(() => {
+      rt.run(badAdmission, () => { executed = true; });
+    }, (err) => err && err.code === 'SANDBOX_ADMISSION_FAILED');
+    assert.strictEqual(executed, false);
+    assert.throws(() => rt.run(null, () => {}), (err) => err && err.code === 'SANDBOX_ADMISSION_FAILED');
+  });
+
   await acheck('createDeliveryQueue: entries-функция отправляет записи каждой песочницы', async () => {
     const hits = [];
     const srv = http.createServer((req, res) => {

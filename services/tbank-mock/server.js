@@ -1962,7 +1962,13 @@ ${autoRefresh ? '<meta http-equiv="refresh" content="2">' : ''}
 </style></head><body><div class="card">${body}</div></body></html>`;
 }
 
+function sandboxFormSuffix() {
+  const id = sandboxRuntime.currentId();
+  return id && id !== 'default' ? `?sandbox=${encodeURIComponent(id)}` : '';
+}
+
 function formPage(payment, errorMsg) {
+  const sfx = sandboxFormSuffix();
   const cardOptions = Object.entries(CARDS)
     .map(([pan, c]) => `<label><input type="radio" name="preset" value="${pan}" onchange="document.getElementById('pan').value='${pan}';document.getElementById('exp').value='1227';document.getElementById('cvv').value='123'"> ${c.label} <code>${maskPan(pan)}</code></label>`)
     .join('');
@@ -1973,23 +1979,24 @@ function formPage(payment, errorMsg) {
     <div class="sum">${(payment.amount / 100).toFixed(2).replace('.', ',')} ₽</div>
     <div class="muted">Заказ: ${esc(payment.orderId)}${payment.dealId ? ` · сделка ${esc(payment.dealId)}` : ''} · PayType ${esc(payment.payType)}</div>
     ${errorMsg ? `<div class="err">${errorMsg}</div>` : ''}
-    <form method="POST" action="/payment/${payment.paymentId}/pay">
+    <form method="POST" action="/payment/${payment.paymentId}/pay${sfx}">
       <div class="cards">${cardOptions}</div>
       <label>Номер карты</label><input type="text" id="pan" name="pan" value="2201382000000013" required>
       <label>Срок (MMYY)</label><input type="text" id="exp" name="exp" value="1227" required>
       <label>CVV</label><input type="password" id="cvv" name="cvv" value="123" required>
       <button type="submit">Оплатить ${(payment.amount / 100).toFixed(0)} ₽</button>
     </form>
-    <form method="POST" action="/payment/${payment.paymentId}/reject"><button type="submit" class="gray">Отклонить покупателем</button></form>`);
+    <form method="POST" action="/payment/${payment.paymentId}/reject${sfx}"><button type="submit" class="gray">Отклонить покупателем</button></form>`);
 }
 
 function otpPage(payment, errorMsg) {
+  const sfx = sandboxFormSuffix();
   return page(`
     <span class="logo">T · мок банка</span>
     <h1>Подтверждение 3-D Secure</h1>
     <div class="muted">Сессия ${payment.paymentId} · тестовый ACS, код <b>1qwezxc</b></div>
     ${errorMsg ? `<div class="err">${errorMsg} (осталось попыток: ${3 - payment.otpAttempts})</div>` : ''}
-    <form method="POST" action="/payment/${payment.paymentId}/otp">
+    <form method="POST" action="/payment/${payment.paymentId}/otp${sfx}">
       <label>Одноразовый пароль</label><input type="password" name="code" autofocus required>
       <button type="submit">Подтвердить</button>
     </form>`);
@@ -2380,7 +2387,7 @@ function generateSandboxCreds(body = {}) {
  * список/удаление — владельцу (owner-token) или оператору (F-12, RFC-001 §6/§7).
  */
 function handleSandboxApi(req, res, url, body, admission) {
-  const operator = sandboxRuntime.isOperatorToken(sandboxRuntime.ownerTokenOf(req));
+  const operator = sandboxRuntime.isOperatorRequest(req);
   if (req.method === 'GET') {
     if (TENANCY === 'owned' && !operator) {
       const own = sandboxRuntime.recordByOwnerToken(req);
@@ -2434,8 +2441,13 @@ function handleSandboxApi(req, res, url, body, admission) {
     if (TENANCY === 'owned' && !operator && !sandboxRuntime.recordAuthorized(record, req)) {
       return sendJson(res, err(13, `Удалить песочницу «${target}» может её владелец (owner-token) или оператор`), 401);
     }
-    const result = sandboxRuntime.remove(target);
-    if (!result.ok) return sendJson(res, err(7, `Песочницу «${target}» удалить нельзя (default-стенд)`), 400);
+    const result = sandboxRuntime.remove(target, req);
+    if (!result.ok) {
+      if (result.error === 'unauthorized') {
+        return sendJson(res, err(13, `Удалить песочницу «${target}» может её владелец (owner-token) или оператор`), 401);
+      }
+      return sendJson(res, err(7, `Песочницу «${target}» удалить нельзя (default-стенд)`), 400);
+    }
     return sendJson(res, { ok: true, removed: result.removed });
   }
   return sendJson(res, err(501, `Метод ${req.method} для /sandboxes не поддерживается`), 405);
@@ -2457,17 +2469,17 @@ function handleSandboxMe(req, res, p, body) {
     return sendJson(res, { ok: true, mode: TENANCY, sandbox: sandboxRuntime.describe(record), creds: record.creds || null });
   }
   if (p === '/sandboxes/me/reset' && req.method === 'POST') {
-    const result = sandboxRuntime.reset(record.id);
+    const result = sandboxRuntime.reset(record.id, req);
     return sendJson(res, { ok: true, sandbox: result.sandbox });
   }
   if (p === '/sandboxes/me/reset-creds' && req.method === 'POST') {
     // Смена кредов песочницы: owner-token не меняется, иначе интегратор потеряет доступ.
     const creds = generateSandboxCreds(body || {});
-    sandboxRuntime.updateCreds(record.id, creds);
+    sandboxRuntime.updateCreds(record.id, creds, req);
     return sendJson(res, { ok: true, sandbox: record.id, creds, ownerTokenChanged: false });
   }
   if (p === '/sandboxes/me' && req.method === 'DELETE') {
-    const result = sandboxRuntime.remove(record.id);
+    const result = sandboxRuntime.remove(record.id, req);
     if (!result.ok) return sendJson(res, err(7, 'default-песочницу стенда удалить нельзя'), 400);
     return sendJson(res, { ok: true, removed: result.removed });
   }
@@ -2475,15 +2487,16 @@ function handleSandboxMe(req, res, p, body) {
 }
 
 /**
- * Политика admission по маршруту (F-11/F-12): какие запросы требуют контекст
- * песочницы и owner-token в hosted-режиме.
+ * Политика admission по маршруту (F-11/F-12, PA-54): какие запросы требуют
+ * контекст песочницы и owner-token в hosted-режиме. Неописанный маршрут
+ * трактуется fail-closed как 'business'.
  */
 function sandboxPolicy(p) {
-  if (p.startsWith('/sandboxes')) return 'public'; // управление песочницами решает свои проверки само
+  if (p === '/health' || p === '/openapi.json' || p === '/sandboxes' || p.startsWith('/sandboxes/')) return 'public';
   if (p.startsWith('/admin') || p.startsWith('/mock/')) return 'control';
-  if (p.startsWith('/payment/')) return 'form';    // ссылка на оплату — capability, как форма банка
+  if (p.startsWith('/payment/') || p.startsWith('/add-card/')) return 'form';
   if (/^\/(v2|e2c\/v2|av\/v1|oauth|sm-register)\//.test(p)) return 'business';
-  return 'public';
+  return 'business';
 }
 
 /** DX-ответ на ошибку admission песочницы (F-12): знание ID ≠ доступ. */
@@ -2532,9 +2545,11 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
   // /admin* — MOCK_ADMIN_TOKEN; /mock/* и служебные чтения — MOCK_OPERATOR_TOKEN
   // (с fallback на админ-токен). В hosted-режиме без секрета — fail-closed.
   const surface = controlSurface(p);
-  // F-12: owner-token песочницы — равноправный доступ к её управляющей
-  // поверхности (RFC-001 §6), в т.ч. к алиасу /mock/sandboxes.
-  const ownerSurface = surface === 'operator' && Boolean(sandboxRuntime.recordByOwnerToken(req));
+  // F-12 / PA-50: owner-token песочницы даёт доступ только к управляющей
+  // поверхности СВОЕЙ песочницы (совпадает с допущенной admission.record).
+  const ownerRec = sandboxRuntime.recordByOwnerToken(req);
+  const ownerSurface = surface === 'operator'
+    && Boolean(ownerRec && admission.record && ownerRec.id === admission.record.id);
   if (surface && admission.via !== 'owner' && !ownerSurface) {
     const access = checkControlAccess(req, {
       adminToken: MOCK_ADMIN_TOKEN,
@@ -2577,6 +2592,7 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
     // (handler запроса не вызывается вовсе).
     const chaosSpec = parseScenarioSpec(req.headers['x-mock-scenario'] || '');
     const chaosResult = await applyRequestChaos(req, chaosSpec);
+    sandboxRuntime.current(); // PA-50 §7.2: fail-closed, если песочница истекла/удалена во время await
     if (chaosResult.abortStatus) {
       return sendJson(res, err(chaosResult.abortStatus, chaosResult.abortMessage, null, {
         field: 'X-Mock-Scenario',
@@ -2587,9 +2603,9 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
 
   if (req.method === 'GET' && p === '/health') {
     const health = { ok: true, sandbox: sandboxRuntime.currentId(), tenancy: TENANCY };
-    // Чужие счётчики не раскрываем: в owned-режиме health отвечает по default-стенду
-    // и не показывает состояние именованных песочниц других арендаторов.
-    if (TENANCY !== 'owned' || admission.record.isDefault) {
+    // Чужие счётчики не раскрываем: в owned-режиме health отвечает по открытому
+    // default-стенду или авторизованному владельцу/оператору.
+    if (TENANCY !== 'owned' || (admission.record.isDefault && !admission.record.ownerTokenHash) || admission.via === 'owner' || admission.via === 'operator') {
       Object.assign(health, {
         payments: Object.keys(state.payments).length,
         deals: Object.keys(state.deals).length,
@@ -2617,10 +2633,12 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
   }
 
   if (p === '/mock/reset' && req.method === 'POST') {
-    // F-11/F-13: сбрасываем ровно ту песочницу, в контексте которой пришёл запрос
-    // (selector/owner-token уже разрешены admission), без переключения singleton.
+    // F-11/F-13/PA-50: сбрасываем ровно ту песочницу, на которую авторизован запрос.
     const target = (body && body.sandbox) || admission.record.id;
-    const resetName = sandboxRuntime.reset(target);
+    const resetName = sandboxRuntime.reset(target, req);
+    if (!resetName.ok) {
+      return sendSandboxError(res, { ok: false, kind: resetName.error || 'unauthorized', sandbox: resetName.sandbox || target });
+    }
     scenarios.clearRules();
     scenarios.clearHistory();
     journal.clear();
@@ -2629,9 +2647,12 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
 
   if (p === '/mock/state') {
     if (req.method === 'GET') {
-      // F-13: target читается из query явно; active при этом не переключается.
+      // F-13/PA-50: target читается из query явно и авторизуется; active не переключается.
       const targetSandbox = url.searchParams.get('sandbox') || undefined;
-      const snapshot = targetSandbox ? sandboxRuntime.exportState(targetSandbox) : sandboxRuntime.exportState();
+      const snapshot = targetSandbox ? sandboxRuntime.exportState(targetSandbox, req) : sandboxRuntime.exportState(null, req);
+      if (snapshot && snapshot.ok === false) {
+        return sendSandboxError(res, { ok: false, kind: snapshot.error || 'unauthorized', sandbox: snapshot.sandbox || targetSandbox || admission.record.id });
+      }
       return sendJson(res, {
         sandbox: snapshot.sandbox || admission.record.id,
         state: snapshot,
@@ -2649,7 +2670,10 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
       const targetSandbox = (body && body.sandbox) || admission.record.id;
       const snapshot = (body && body.state) || body || {};
       try {
-        const imported = sandboxRuntime.importState(snapshot, targetSandbox);
+        const imported = sandboxRuntime.importState(snapshot, targetSandbox, req);
+        if (!imported.ok) {
+          return sendSandboxError(res, { ok: false, kind: imported.error || 'unauthorized', sandbox: imported.sandbox || targetSandbox });
+        }
         // F-10: импортированный снимок тоже не должен оставлять полный PAN;
         // F-15: снимок мог быть сделан до появления ссылочных индексов — индексы
         // пересобираются из фактического state, а не принимаются на веру.
@@ -3367,6 +3391,10 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
 
 const server = http.createServer((req, res) => {
   route(req, res).catch((e) => {
+    if (e && e.code === 'SANDBOX_EXPIRED') {
+      try { sendSandboxError(res, { ok: false, kind: 'expired', sandbox: e.sandbox || 'default' }); } catch { /* headers sent */ }
+      return;
+    }
     if (e && e.code === 'BODY_TOO_LARGE') {
       try {
         sendJson(res, err(7, 'Размер тела запроса превышает допустимый лимит', e.message, {
