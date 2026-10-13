@@ -521,6 +521,12 @@ process.env.MOCK_RETRY_MS = '1000';
     assert.ok(second.arriveAt >= first.respondAt, `вторая нотификация пришла до завершения ответа первой: ${JSON.stringify(orderedHook.records)}`);
     assert.strictEqual(orderedHook.maxConcurrent, 1, 'параллельных POST быть не должно');
     assert.strictEqual(orderedHook.records.length, 2, 'каждая нотификация доставлена ровно один раз');
+    // #76 (класс #56): флаг done выставляется ПОСЛЕ завершения postJson — ждём
+    // именно done-состояние обеих записей, а не только хук-сторону доставки.
+    await waitForCondition(() => {
+      const ns = Object.values(state.notifications).filter((n) => n.paymentId === orderInit.PaymentId);
+      return ns.length === 2 && ns.every((n) => n.done && n.attempts === 1);
+    }, { timeoutMs: 8000, description: 'обе нотификации помечены done с одной попыткой (#76)' });
     const queued = Object.values(state.notifications).filter((n) => n.paymentId === orderInit.PaymentId);
     assert.strictEqual(queued.length, 2, 'должно быть ровно две записи очереди');
     assert.ok(queued.every((n) => n.done && n.attempts === 1), `записи завершены с одной попыткой: ${JSON.stringify(queued.map((n) => ({ done: n.done, attempts: n.attempts })))}`);
