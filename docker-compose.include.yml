@@ -18,7 +18,7 @@
 #   3. Никакие домены потребителя не зашиты: Caddy-лейблы и публичные URL задаются
 #      переменными окружения (по умолчанию пустые / localhost).
 #   4. Релиз закреплён дайджестом (F-37): `MOCK_IMAGE_DIGEST` по умолчанию —
-#      проверенный дайджест образа `ghcr.io/rucorp/mock-services:0.5.0`
+#      проверенный дайджест образа `ghcr.io/rucorp/mock-services:0.6.0`
 #      (reproducible deployment). Обновление — только контролируемым bump
 #      (см. «Обновление базового образа» в CONTRIBUTING.md); пустое значение
 #      `MOCK_IMAGE_DIGEST=` снимает pin (например, для своего образа/тега).
@@ -30,7 +30,7 @@
 
 services:
   tbank-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.5.0}${MOCK_IMAGE_DIGEST-@sha256:403e1bd293c3ba18d345d22612b118b0fe788f83c51ae4b3ee79e70ba216b90d}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.6.0}${MOCK_IMAGE_DIGEST-@sha256:9ee0e08192cfcc0c04206fd7e05800039c51acf32dadd0a7a810b088981045f9}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/tbank-mock/server.js"]
@@ -82,7 +82,7 @@ services:
     restart: unless-stopped
 
   kassa-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.5.0}${MOCK_IMAGE_DIGEST-@sha256:403e1bd293c3ba18d345d22612b118b0fe788f83c51ae4b3ee79e70ba216b90d}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.6.0}${MOCK_IMAGE_DIGEST-@sha256:9ee0e08192cfcc0c04206fd7e05800039c51acf32dadd0a7a810b088981045f9}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/kassa-mock/server.js"]
@@ -131,7 +131,7 @@ services:
     restart: unless-stopped
 
   yookassa-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.5.0}${MOCK_IMAGE_DIGEST-@sha256:403e1bd293c3ba18d345d22612b118b0fe788f83c51ae4b3ee79e70ba216b90d}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.6.0}${MOCK_IMAGE_DIGEST-@sha256:9ee0e08192cfcc0c04206fd7e05800039c51acf32dadd0a7a810b088981045f9}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/yookassa-mock/server.js"]
@@ -178,7 +178,7 @@ services:
     restart: unless-stopped
 
   atol-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.5.0}${MOCK_IMAGE_DIGEST-@sha256:403e1bd293c3ba18d345d22612b118b0fe788f83c51ae4b3ee79e70ba216b90d}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.6.0}${MOCK_IMAGE_DIGEST-@sha256:9ee0e08192cfcc0c04206fd7e05800039c51acf32dadd0a7a810b088981045f9}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/atol-mock/server.js"]
@@ -228,7 +228,7 @@ services:
     restart: unless-stopped
 
   alfa-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.5.0}${MOCK_IMAGE_DIGEST-@sha256:403e1bd293c3ba18d345d22612b118b0fe788f83c51ae4b3ee79e70ba216b90d}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.6.0}${MOCK_IMAGE_DIGEST-@sha256:9ee0e08192cfcc0c04206fd7e05800039c51acf32dadd0a7a810b088981045f9}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/alfa-mock/server.js"]
@@ -285,7 +285,7 @@ services:
     restart: unless-stopped
 
   sber-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.5.0}${MOCK_IMAGE_DIGEST-@sha256:403e1bd293c3ba18d345d22612b118b0fe788f83c51ae4b3ee79e70ba216b90d}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.6.0}${MOCK_IMAGE_DIGEST-@sha256:9ee0e08192cfcc0c04206fd7e05800039c51acf32dadd0a7a810b088981045f9}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/sber-mock/server.js"]
@@ -335,7 +335,7 @@ services:
     restart: unless-stopped
 
   vtb-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.5.0}${MOCK_IMAGE_DIGEST-@sha256:403e1bd293c3ba18d345d22612b118b0fe788f83c51ae4b3ee79e70ba216b90d}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.6.0}${MOCK_IMAGE_DIGEST-@sha256:9ee0e08192cfcc0c04206fd7e05800039c51acf32dadd0a7a810b088981045f9}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/vtb-mock/server.js"]
