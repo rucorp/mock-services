@@ -1,0 +1,19 @@
+
+=== PF-02a: стартовый блок yookassa — все строки [yookassa-mock] ===
+ВЕРДИКТ: ТРЕБУЕТ ВНИМАНИЯ
+строк в стартовом блоке: 7; без префикса: 7
+[mock] YooKassa mock on http://127.0.0.1:36915
+[mock] basic auth: shopId=YOOKASSAMOCKTEST secret=mockpass123 (тестовые креды, MOCK_SHOP_ID/MOCK_SECRET_KEY переопределяют)
+[mock] tenancy=namespaces public_base=http://localhost:3102
+
+=== PF-02b: runtime-строка sandbox-sweep — с префиксом ===
+ВЕРДИКТ: ТРЕБУЕТ ВНИМАНИЯ (sweep-строки нет или без префикса)
+[yookassa-mock 2026-10-13 17:42:14] [mock] sandbox sweep: удалено по TTL — 1
+
+=== PF-02c: статика: обломков `ock]` в исходнике нет ===
+ВЕРДИКТ: ТРЕБУЕТ ВНИМАНИЯ
+строк с [yookassa-mock]: 0; обломков ock]: 17 → строки 169,601,616,628,948
+
+---- ИТОГ PF-02 ----
+До фикса (#58): часть литералов печаталась как `ock] …` (обрезанный тег) — лог некликабелен и ломает парсеры.
+После фикса: единый префикс [yookassa-mock] на старте и в runtime.
