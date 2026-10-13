@@ -1,0 +1,17 @@
+# Регресс-контур на 97dcb71 (2026-10-13, свежий клон)
+
+ИТОГ: 57 passed, 0 failed
+selftest: 31 webhook deliveries, 31 payment sessions
+SELFTEST PASSED ✅
+ИТОГ: 152 passed, 0 failed
+ИТОГ: 236 passed, 0 failed · вебхуков доставлено: 26
+SELFTEST PASSED ✅
+ИТОГ: 211 passed, 0 failed · callback-доставок: 8
+SELFTEST PASSED ✅
+ИТОГ: 297 passed, 0 failed · callback-доставок: 29
+SELFTEST PASSED ✅
+sync-upstream selftest: 11 passed, 0 failed
+check:upstream → sync-upstream selftest: 11 passed, 0 failed
+check:links → docs links OK: 74 файлов, битых ссылок нет
+check:drift → Проверено инвариантов контракта: 316, пройдено: 316, расхождений: 0
+CI на 97dcb71 → 5/5 check-runs success

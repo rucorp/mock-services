@@ -1,0 +1,27 @@
+
+=== PF-01a: статика: дефолт-литерал 'false' убивает HOSTED-дефолт; README обещает true ===
+ВЕРДИКТ: ЗАКРЫТО (статика: дефолт-литерал 'false' отсутствует — дефолт выровнен с остальными сервисами)
+server.js: MOCK_BLOCK_PRIVATE_WEBHOOKS = 'false' не найден (фикс волны #51: дефолт '' + core.defaultBlockPrivateHosts)
+server.js:90: flagEnabled(MOCK_BLOCK_PRIVATE_WEBHOOKS, HOSTED) — hosted-дефолт применяется
+[info] доставка не дождались (ожидаемо после #68 — гард режет loopback). Лог kassa (хвост):
+[kassa-mock 2026-10-13 08:24:03] [kassa-mock] doc b3a83dec-35fb-4bc8-a528-b7929829b02f: callback scheduled -> http://127.0.0.1:41201/callback
+[kassa-mock 2026-10-13 08:24:04] webhook 1 error: Исходящий запрос на «http://127.0.0.1:41201/callback» заблокирован политикой SSRF: приватный или локальный адрес. Приватные адреса запрещены (MOCK_BLOCK_PRIVATE_WEBHOOKS)., retry in 1000ms
+[kassa-mock 2026-10-13 08:24:05] webhook 1 error: Исходящий запрос на «http://127.0.0.1:41201/callback» заблокирован политикой SSRF: приватный или локальный адрес. Приватные адреса запрещены (MOCK_BLOCK_PRIVATE_WEBHOOKS)., retry in 1000ms
+[kassa-mock 2026-10-13 08:24:06] webhook 1 error: Исходящий запрос на «http://127.0.0.1:41201/callback» заблокирован политикой SSRF: приватный или локальный адрес. Приватные адреса запрещены (MOCK_BLOCK_PRIVATE_WEBHOOKS)., retry in 1000ms
+[kassa-mock 2026-10-13 08:24:07] webhook 1 error: Исходящий запрос на «http://127.0.0.1:41201/callback» заблокирован политикой SSRF: приватный или локальный адрес. Приватные адреса запрещены (MOCK_BLOCK_PRIVATE_WEBHOOKS)., retry in 1000ms
+[kassa-mock 2026-10-13 08:24:08] webhook 1 error: Исходящий запрос на «http://127.0.0.1:41201/callback» заблокирован политикой SSRF: приватный или локальный адрес. Приватные адреса запрещены (MOCK_BLOCK_PRIVATE_WEBHOOKS)., retry in 1000ms
+[kassa-mock 2026-10-13 08:24:09] webhook 1 error: Исходящий запрос на «http://127.0.0.1:41201/callback» заблокирован политикой SSRF: приватный или локальный адрес. Приватные адреса запрещены (MOCK_BLOCK_PRIVATE_WEBHOOKS)., retry in 1000ms
+
+
+=== PF-01b: MOCK_HOSTED=1 (без переопределений): callback кассы ДОСТАВЛЕН на 127.0.0.1 ===
+ВЕРДИКТ: ЗАКРЫТО (hosted-дефолт true: доставка на loopback блокирована SSRF-политикой)
+стартовый лог: block_private_webhooks=false при hosted=true: false; block_private_webhooks=true: true
+sell: status=200, uuid=b3a83dec-35fb-4bc8-a528-b7929829b02f; доставок на loopback-приёмник: 0 (после фикса: 0, ERR SSRF)
+
+=== PF-01c: контроль: явный MOCK_BLOCK_PRIVATE_WEBHOOKS=1 в hosted -> ERR SSRF, доставок нет ===
+ВЕРДИКТ: ПОДТВЕРЖДЕНО (механизм гарда работает — сломан именно дефолт)
+sell: status=200; новых доставок: 0; lastStatus callback: ERR SSRF_BLOCKED: Исходящий запрос на «http://127.0.0.1:41201/callback» заблокирован полит
+
+---- ИТОГ PF-01 ----
+До фикса (#51): в MOCK_HOSTED=1 SSRF-гард кассы выключен дефолт-литералом; callback по умолчанию уходит на приватные адреса.
+Ожидание после фикса (предрегистрация): hosted-старт кассы пишет block_private_webhooks=true; та же проба — доставок 0, lastStatus ERR SSRF; selftest кассы покрывает hosted-дефолт.
