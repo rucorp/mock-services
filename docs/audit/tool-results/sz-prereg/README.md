@@ -1,0 +1,71 @@
+# SZ prereg-бандл issue #64 — «до»-пробы дельты #54 и предрегистрация волн #51/#53/#58/#60
+
+Скрипты — живые пробы параллельного SZ-трека (issue #64) на ревизии **e133a6b** (main, до мержа #50).
+Запуск: `node docs/audit/tool-results/sz-prereg/<скрипт>.js` из корня репо (пути от `__dirname`, CWD не важен).
+Требования: Node >= 20, внешняя сеть не нужна. Безопасность: все listener'ы только `127.0.0.1:0`,
+исходящие доставки — только на локальные фикстуры; scratch-копии (PC-17, PD-02) живут в `os.tmpdir()` и
+удаляются; код репозитория скрипты не изменяют. Гигиена #64 соблюдена: main/чужие ветки не тронуты.
+
+Итог прогона на e133a6b: **все 9 проб, все 21 фазовый вердикт — ПОДТВЕРЖДЕНО** (ни одна находка дельты #54
+и ни одно «до»-состояние волн #51/#53 не опровергнуто). Полные выводы — «до»-выжимка комментарием в issue #64.
+
+## Маппинг скрипт -> находка -> «до»-вердикт
+
+| скрипт | находка (источник) | что доказывает («до») | фазы |
+|---|---|---|---|
+| `pb11-env-timeout.js` | PB-11 ≡ PG-05 (major, #58) | `MOCK_SESSION_TIMEOUT_SECS='1h'` -> `sessionTimeoutSecs=1` (/health); `'1h'` в retry -> `retry=1000ms` (старт-лог); поведенчески заказ отклонён по таймауту через ~1с; контроль `'3600'/'60000'` честен | 3/3 ✅ |
+| `pb12-quota-docs.js` | PB-12 (major, #53) | `MOCK_SANDBOX_MAX_DOCUMENTS=2` -> ровно 1 успешный register («Лимит документов исчерпан (2/2)»); состояние: orders=1 + orderNumbers=1 -> 1 заказ = 2 квот-единицы (server.js:201-204,1010) | 1/1 ✅ |
+| `pb13-journal-cross.js` | PB-13 (major, #52) | владелец A читает в /admin/journal запись register B (журнал глобален, server.js:1747); POST /mock/reset от A (своя песочница!) стирает журнал B (`journal.clear()`, server.js:1767). Креды в body журнала маскируются ([REDACTED]) — заслуга summarizeBody, не изоляции | 2/2 ✅ |
+| `pe19-admin-action-doc.js` | PE-19 (major, dx) | POST /admin/action жив (server.js:1847): без CSRF -> 403 c подсказкой консоли, с CSRF -> 302 и исполнение (expire-order: orderStatus 0 -> 6); при этом отсутствует в `mockRoutes`/`mockControlRoutes` (protocols/alfa-eacq.json), openapi (есть лишь /admin, /admin/journal) и README | 3/3 ✅ |
+| `pc17-drift-diagnostic.js` | PC-17 (minor, dx) | копипаст в check-protocol-drift.js:**273** — `openapi=${inServer}`; контроль 316/316; после удаления схемы `approved` из openapi проверка ПАДАЕТ (`exit=1`), но диагностика печатает `✗ [alfa:callback-operation] approved — server=true, openapi=true` — противоречие вердикту | 3/3 ✅ |
+| `pa52-queue-starvation.js` | PA-52 (major, #53) | общий флаг `ticking` (core:1093/1127) + `awaitSequential` (живая экспозиция tbank:574): 3 песочницы с due-вебхуками доставляются по ≤1 за проход tickAll — старты [7, 1689, 3372]мс (медленный приёмник 1.5с держит флаг); контроль (не-sequential, уникальные id, быстрый приёмник) — 3/3 в первом проходе | 3/3 ✅ |
+| `pd02-persist-amplification.js` | PD-02 (major, #53) | in-process: 5 мелких мутаций одной песочницы -> 5 полных перезаписей реестра: записано 10 МБ при файле 2 МБ (**×5.0**); live-альфа: импорт 2 «документов» × 1 МБ принят (200), реестр 2 МБ, register №3 отклонён квотой ДОКУМЕНТОВ — байтового предела нет | 3/3 ✅ |
+| `pa58-core-ssrf-default.js` | PA-58 (major, #51) | `createDeliveryQueue` без флага: loopback-доставка уходит (`entry.done=true`) — fail-open; с `true` — `ERR SSRF_BLOCKED`; обзор: alfa :505, kassa :778/:1407, tbank :580/:2687, yookassa :436, atol :829 — безопасность зависит от каждого адаптера | 3/3 ✅ |
+| `pf01-kassa-guard-hosted.js` | PF-01 (major, #51) | kassa при `MOCK_HOSTED=1` и НЕЗАДАННОЙ переменной: старт-лог `hosted=true block_private_webhooks=false` (README.md:122 обещает true), callback ДОСТАВЛЕН на 127.0.0.1; контроль с явным `=1` — `ERR SSRF_BLOCKED`, доставок 0 | 3/3 ✅ |
+
+## Предрегистрация пост-фиксных ожиданий (верификационные волны)
+
+Правило то же, что в бандле alfa-probes: ✅ ставится только по воспроизведённой пробе на ревизии из сигнала
+координатора (хеш фиксируется в сигнале), а не по осмотру диффа. Эталон «до» — этот прогон на e133a6b.
+
+| волна | позиции | скрипт | ожидание после фикса |
+|---|---|---|---|
+| #51 (SSRF/TOCTOU) | PF-01 | `pf01-kassa-guard-hosted.js` | hosted-старт кассы: `block_private_webhooks=true`; фаза b — доставок 0, `lastStatus ERR SSRF_BLOCKED`; контроль (c) без изменений; selftest кассы покрывает hosted-дефолт |
+| #51 (SSRF/TOCTOU) | PA-58 | `pa58-core-ssrf-default.js` | фаза a — `hits=0` + `ERR SSRF_BLOCKED` (дефолт fail-closed) ЛИБО каждый адаптер передаёт флаг явно и это покрыто selftest; фазы b/c без изменений |
+| #51 (SSRF/TOCTOU) | PG-11, PA-25, MS-09 | бандл alfa-probes (`alfa-dns-toctou.js`) | таблица в docs/audit/tool-results/alfa-probes/README.md — без изменений |
+| #52 (сценарии/журнал) | PB-13 | `pb13-journal-cross.js` | PB-13a: журнал A не содержит записей B (per-sandbox скоуп); PB-13b: после reset A журнал B сохраняет записи B |
+| #52 (сценарии/журнал) | PA-51, PG-04, PG-09 | бандл alfa-probes (P3, P7, P3c) | таблица в alfa-probes/README.md — без изменений |
+| #53 (hosted-устойчивость) | PA-52 | `pa52-queue-starvation.js` | фаза b: все 3 доставки стартуют в первом проходе (или максимум за 1 интервал), медленный приёмник A не задерживает B/C; контроль (c) без изменений |
+| #53 (hosted-устойчивость) | PD-02 | `pd02-persist-amplification.js` | фаза a: суммарная запись K мутаций ~ O(K×Δ), а не O(K×весь реестр) (амплификация → ×1..×2); фаза b/c: импорт 2 МБ отклонён байтовой квотой (413/422) |
+| #53 (hosted-устойчивость) | PB-12 | `pb12-quota-docs.js` | `MAX_DOCUMENTS=2` допускает 2 успешных register; счётчик не учитывает внутренние словари (orderNumbers) как документы |
+| #58 (DX) | PB-11 ≡ PG-05 | `pb11-env-timeout.js` + alfa-probes P5 | `'1h'` -> фолбэк 1200/10000 ИЛИ отказ старта с внятной ошибкой; никогда 1с/1000мс; контроль (c) без изменений |
+| #58 (DX) | PE-19 | `pe19-admin-action-doc.js` | `/admin/action` декларирован в mockRoutes+openapi+README (и покрыт drift-чекером), либо маршрут закрыт; фазы b/c (403/302) — по решению фиксa |
+| #58 (DX) | PC-17 | `pc17-drift-diagnostic.js` | та же проба печатает `server=true, openapi=false`; вхождений `openapi=${inServer}` в чекере нет |
+| #58 (DX) | PG-07, PG-08 | бандл alfa-probes (P5, P6) | таблица в alfa-probes/README.md — без изменений |
+| #60 (креды) | PG-01, PG-02 | бандл alfa-probes (P1, P1b) | таблица в alfa-probes/README.md — без изменений |
+
+## PB-14 (minor): гэпы selftest-покрытия alfa — статическое подтверждение (без прогонов)
+
+На e133a6b в `services/alfa-mock/selftest.js` (178 check-ов) отсутствуют регрессии на:
+`413` — 0 вхождений; `csrf` — 0; `__proto__`/`constructor` (import-негатив) — 0; `410` (TTL) — 0;
+`429` (CREATE_LIMIT) — 0; `MOCK_SANDBOX_MAX_DOCUMENTS` — 1 вхождение и это только env-сброс `:246`
+(квота-исчерпание не покрыто); `X-Mock-Scenario` — 12 вхождений, но только на REST-путях (негатив
+«сценарий не применяется на не-REST» не покрыт). DoD фикса: каждая ветка имеет ≥1 check, число проверок
+растёт с 287. Верификация позиции — по диффу selftest + числу check-ов, без отдельных проб.
+
+## Сопутствующие наблюдения для фиксa #51/#53 (зафиксировано пробами, вне текста находок)
+
+- **Нюанс PF-01/PA-58:** `flagEnabled(value, default)` различает «переменная не задана» (дефолт-литерал
+  `'false'` -> гард выключен) и «переменная пустая» (`''` -> дефолт-параметр HOSTED -> гард включён).
+  Экспозиция зависит от того, определяет ли compose/env-файл переменную. Фикс одной строкой
+  (литерал 'false' -> '') закрывает оба случая; проба проверяет именно кейс «не задана».
+- **Второй механизм PA-52:** общий `inFlight` в очереди ключован по id записи; id колбэков уникальны
+  в пределах песочницы (alfa: `counters.callbackId = 1 + seed*1e6`), но у НЕ-sequential очередей
+  коллизия id разных песочниц задерживает доставку на проход (проба с одинаковыми id даёт 1/проход
+  даже без awaitSequential). Per-sandbox ticker закрывает оба механизма.
+
+## Связанные артефакты
+
+- Бандл alfa-проб (PG-серия): `docs/audit/tool-results/alfa-probes/` (PR #61, мерж в e133a6b).
+- Отчёт: `docs/audit/AUDIT-SZ-ALFA-2026-10-12.md`; сверка дельты: issue #62.
+- База прогона: main `e133a6b`; регресс-контур репо: `npm test` + `check:links` + `check:drift 316/316`.
