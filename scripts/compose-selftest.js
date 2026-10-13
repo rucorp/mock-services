@@ -5,7 +5,7 @@
 /*
  * Black-box selftest против поднятого стенда (docker compose / внешние контейнеры).
  * Проверяет сервисы (tbank-mock на :3100, kassa-mock на :3101, yookassa-mock на :3102,
- * atol-mock на :3103, alfa-mock на :3104, sber-mock на :3105) снаружи по HTTP:
+ * atol-mock на :3103, alfa-mock на :3104, sber-mock на :3105, vtb-mock на :3106) снаружи по HTTP:
  *   1. Healthchecks (/health, /healthz, /health)
  *   2. Т-Банк: Init -> форма оплаты -> Confirm -> Chargeback (DISPUTED -> REPRESENTMENT -> ARBITRATION -> WON) -> виртуальные часы /mock/time -> /admin/journal
  *   3. Ferma (54-ФЗ): getToken -> sell (предоплата с расчётным НДС vat20_120) -> sell (зачёт предоплаты) -> buy (расход) -> маркировка -> очередь ОФД -> печать с ускорением через /mock/time -> /receipts/:uuid
@@ -17,6 +17,9 @@
  *      (креды, дубль orderNumber, дробный amount, неизвестный заказ)
  *   7. Сбербанк Ecom REST: JSON register -> hosted form -> orderStatus=2, preAuth/ACS -> deposit/refund
  *      и негативы; transport отличается от Альфа (не form-urlencoded, callback unsigned POST JSON).
+ *   8. ВТБ SMB E-commerce: OAuth client_credentials -> Bearer + X-IBM-Client-Id -> POST /orders
+ *      (десятичные рубли, идемпотентный orderId) -> payUrl -> PAID -> refunds; preauth -> complete;
+ *      callback {type,object} без подписи (Status/status не нормализуются).
  *
  * F-33: прогон выполняется в одноразовой песочнице (X-Mock-Sandbox, в hosted —
  * через POST /sandboxes с owner-token) и убирает её в finally, чтобы повторные
@@ -36,6 +39,7 @@ const YOOKASSA_BASE = (process.env.MOCK_YOOKASSA_URL || 'http://127.0.0.1:3102')
 const ATOL_BASE = (process.env.MOCK_ATOL_URL || 'http://127.0.0.1:3103').replace(/\/$/, '');
 const ALFA_BASE = (process.env.MOCK_ALFA_URL || 'http://127.0.0.1:3104').replace(/\/$/, '');
 const SBER_BASE = (process.env.MOCK_SBER_URL || 'http://127.0.0.1:3105').replace(/\/$/, '');
+const VTB_BASE = (process.env.MOCK_VTB_URL || 'http://127.0.0.1:3106').replace(/\/$/, '');
 const TERMINAL_KEY = process.env.MOCK_TERMINAL_KEY || 'TBANKMOCKTEST';
 const TERMINAL_PASSWORD = process.env.MOCK_TERMINAL_PASSWORD || 'mockpass123';
 const FERMA_LOGIN = process.env.MOCK_FERMA_LOGIN || 'loviitest';
@@ -54,6 +58,10 @@ const ALFA_PASSWORD = process.env.MOCK_ALFA_PASSWORD || process.env.ALFA_PASSWOR
 // Синтетические creds sber-mock; hosted owned-sandbox creds переопределяются при provision.
 const SBER_USERNAME = process.env.MOCK_SBER_USERNAME || 'SBERMOCKTEST';
 const SBER_PASSWORD = process.env.MOCK_SBER_PASSWORD || 'mockpass123';
+// Синтетические creds vtb-mock (OAuth client_credentials); hosted creds — при provision.
+const VTB_CLIENT_ID = process.env.MOCK_VTB_CLIENT_ID || 'vtbmocktest';
+const VTB_CLIENT_SECRET = process.env.MOCK_VTB_CLIENT_SECRET || 'mockpass123';
+const VTB_REST_PATH = '/openapi/smb/efcp/e-commerce/v1';
 
 /*
  * F-33 (RFC-001 §8): прогон идёт в одноразовой песочнице, чтобы не накапливать
@@ -72,8 +80,9 @@ const SANDBOX = {
   [ATOL_BASE]: { id: SANDBOX_ID, token: '', creds: null },
   [ALFA_BASE]: { id: SANDBOX_ID, token: '', creds: null },
   [SBER_BASE]: { id: SANDBOX_ID, token: '', creds: null },
+  [VTB_BASE]: { id: SANDBOX_ID, token: '', creds: null, accessToken: '' },
 };
-const ALL_BASES = [TBANK_BASE, KASSA_BASE, YOOKASSA_BASE, ATOL_BASE, ALFA_BASE, SBER_BASE];
+const ALL_BASES = [TBANK_BASE, KASSA_BASE, YOOKASSA_BASE, ATOL_BASE, ALFA_BASE, SBER_BASE, VTB_BASE];
 
 /** Заголовки песочницы прогона; вызов может переопределить их (например, default). */
 function sandboxHeaders(baseUrl) {
@@ -173,6 +182,36 @@ function sberApi(method, fields = {}, headers = {}) {
 
 function sberUrlForm(fields) {
   return new URLSearchParams(fields).toString();
+}
+
+/** OAuth client_credentials в контексте песочницы ВТБ; токен кэшируется на прогон. */
+async function vtbToken() {
+  const slot = SANDBOX[VTB_BASE];
+  if (slot.accessToken) return slot.accessToken;
+  const sbxCreds = slot.creds || {};
+  const r = await httpReq(VTB_BASE, 'POST', '/passport/oauth2/token', new URLSearchParams({
+    grant_type: 'client_credentials',
+    client_id: sbxCreds.clientId || VTB_CLIENT_ID,
+    client_secret: sbxCreds.clientSecret || VTB_CLIENT_SECRET,
+  }).toString());
+  const j = r.json() || {};
+  slot.accessToken = j.access_token || '';
+  return slot.accessToken;
+}
+
+/** Запрос к SMB REST с Bearer + X-IBM-Client-Id и кредами песочницы (ВТБ). */
+async function vtbApi(method, relPath, fields = null, extraHeaders = {}) {
+  const token = await vtbToken();
+  const sbxCreds = SANDBOX[VTB_BASE].creds || {};
+  return httpReq(VTB_BASE, method, `${VTB_REST_PATH}/${relPath}`, fields, {
+    'Authorization': `Bearer ${token}`,
+    'X-IBM-Client-Id': sbxCreds.clientId || VTB_CLIENT_ID,
+    ...extraHeaders,
+  });
+}
+
+async function vtbPay(orderId, card) {
+  return httpReq(VTB_BASE, 'POST', `/pay/${encodeURIComponent(orderId)}/pay`, new URLSearchParams(card).toString());
 }
 
 /** Выделение песочницы прогона: в owned — POST /sandboxes, в namespaces — селектор. */
@@ -615,10 +654,73 @@ async function scenario(runId) {
   const sberRefund = (await sberApi('refund.do', { orderId: sberPreAuth.orderId, amount: 2500 })).json();
   const sberRefundStatus = (await sberApi('getOrderStatusExtended.do', { orderId: sberPreAuth.orderId })).json() || {};
   check('sber partial refund -> orderStatus=4, refundedAmount=2500', sberRefund && sberRefund.errorCode === 0 && sberRefundStatus.orderStatus === 4 && sberRefundStatus.refundedAmount === 2500);
+
+  // 8. ВТБ SMB E-commerce: OAuth client_credentials + Bearer/X-IBM-Client-Id,
+  // десятичные рубли, идемпотентный orderId, payUrl, refunds/preauth/cancel.
+  const hVtb = await httpReq(VTB_BASE, 'GET', '/health');
+  check('vtb-mock /health === 200 ok (SMB JSON, OAuth2, callback POST без подписи)',
+    hVtb.status === 200 && hVtb.json() && hVtb.json().ok === true && hVtb.json().api === 'smb-ecommerce-json' && hVtb.json().callbackSignature === 'none');
+  const oaVtb = (await httpReq(VTB_BASE, 'GET', '/openapi.json')).json();
+  check('vtb-mock /openapi.json — OpenAPI 3.1 с orders и token endpoint',
+    Boolean(oaVtb && oaVtb.openapi === '3.1.0' && oaVtb.paths[`${VTB_REST_PATH}/orders`] && oaVtb.paths['/passport/oauth2/token']));
+
+  const vtbTokenRes = await httpReq(VTB_BASE, 'POST', '/passport/oauth2/token', new URLSearchParams({
+    grant_type: 'client_credentials', client_id: VTB_CLIENT_ID, client_secret: VTB_CLIENT_SECRET,
+  }).toString());
+  const vtbTok = vtbTokenRes.json() || {};
+  check('vtb token endpoint -> access_token + Bearer + expires_in',
+    vtbTokenRes.status === 200 && Boolean(vtbTok.access_token) && vtbTok.token_type === 'Bearer' && typeof vtbTok.expires_in === 'number');
+  const vtbBadBearer = (await httpReq(VTB_BASE, 'POST', `${VTB_REST_PATH}/orders`, { orderId: `${runId}-vtb-x`, orderName: 'x', amount: { value: 1, code: 'RUB' } }, {
+    'Authorization': 'Bearer deadbeef', 'X-IBM-Client-Id': VTB_CLIENT_ID,
+  })).json();
+  check('vtb неверный Bearer -> invalid_token', Boolean(vtbBadBearer && vtbBadBearer.error === 'invalid_token'));
+  const vtbBadClient = (await vtbApi('POST', 'orders', { orderId: `${runId}-vtb-y`, orderName: 'x', amount: { value: 1, code: 'RUB' } }, { 'X-IBM-Client-Id': 'WRONG@ext.vtb.ru' })).json();
+  check('vtb X-IBM-Client-Id с @ext.vtb.ru -> invalid_client', Boolean(vtbBadClient && vtbBadClient.error === 'invalid_client'));
+
+  const vtbOrderRes = await vtbApi('POST', 'orders', {
+    orderId: `${runId}-vtb-1`, orderName: 'Compose заказ', amount: { value: 10.56, code: 'RUB' },
+    returnUrl: 'https://compose.test/vtb/ok',
+  });
+  const vtbOrder = vtbOrderRes.json() || {};
+  check('vtb POST /orders -> status.value=CREATED, amount.value=10.56 (decimal), payUrl',
+    vtbOrderRes.status === 200 && vtbOrder.status && vtbOrder.status.value === 'CREATED' && vtbOrder.amount && vtbOrder.amount.value === 10.56 && Boolean(vtbOrder.payUrl));
+  const vtbReplay = (await vtbApi('POST', 'orders', { orderId: `${runId}-vtb-1`, orderName: 'x', amount: { value: 99, code: 'RUB' } }));
+  check('vtb повтор orderId идемпотентен (X-Mock-Replayed, тот же ордер)',
+    vtbReplay.status === 200 && vtbReplay.headers['x-mock-replayed'] === '1' && (vtbReplay.json() || {}).amount.value === 10.56);
+  const vtbBadAmount = (await vtbApi('POST', 'orders', { orderId: `${runId}-vtb-dec`, orderName: 'x', amount: { value: 10.567, code: 'RUB' } })).json();
+  check('vtb amount.value 10.567 -> invalid_amount (не более 2 знаков)', Boolean(vtbBadAmount && vtbBadAmount.error === 'invalid_amount'));
+
+  const vtbPayRes = await vtbPay(`${runId}-vtb-1`, { pan: '4242424242424242', exp: '1234', cvv: '123' });
+  check('vtb payUrl оплата синтетической [FORK]-картой -> 302 returnUrl', vtbPayRes.status === 302 && vtbPayRes.headers.location === 'https://compose.test/vtb/ok');
+  const vtbPaid = (await vtbApi('GET', `orders/${runId}-vtb-1`)).json() || {};
+  check('vtb после оплаты: order PAID, payment CONFIRMED (status.value на своём уровне)',
+    vtbPaid.status && vtbPaid.status.value === 'PAID' && vtbPaid.payments[0].status.value === 'CONFIRMED');
+
+  const vtbPreRes = await vtbApi('POST', 'orders/preauth', {
+    orderId: `${runId}-vtb-pre`, orderName: 'Preauth', amount: { value: 9, code: 'RUB' }, twoStageParams: { hold: true },
+  });
+  const vtbPre = vtbPreRes.json() || {};
+  check('vtb preauth (twoStageParams) -> CREATED без платежей', vtbPreRes.status === 200 && vtbPre.status.value === 'CREATED' && vtbPre.payments.length === 0);
+  await vtbPay(`${runId}-vtb-pre`, { pan: '4242424242424242', exp: '1234', cvv: '123' });
+  const vtbHeld = (await vtbApi('GET', `orders/${runId}-vtb-pre`)).json() || {};
+  check('vtb preauth payUrl -> холд payment NEW, ордер CREATED', vtbHeld.payments[0].status.value === 'NEW' && vtbHeld.status.value === 'CREATED');
+  const vtbCompleteOver = (await vtbApi('POST', `orders/complete/${runId}-vtb-pre`, { amount: { value: 9.01, code: 'RUB' } })).json();
+  check('vtb complete > авторизации -> amount_exceeds_limit', Boolean(vtbCompleteOver && vtbCompleteOver.error === 'amount_exceeds_limit'));
+  const vtbComplete = (await vtbApi('POST', `orders/complete/${runId}-vtb-pre`, { amount: { value: 4, code: 'RUB' } })).json() || {};
+  check('vtb partial complete ≤ авторизации -> PAID, payment CONFIRMED',
+    vtbComplete.status.value === 'PAID' && vtbComplete.payments[0].status.value === 'CONFIRMED');
+
+  const vtbRefund = (await vtbApi('POST', 'refunds', { refundId: `${runId}-vtb-ref-1`, paymentId: vtbComplete.payments[0].paymentId, amount: { value: 1, code: 'RUB' } })).json() || {};
+  check('vtb частичный refund -> refund status.value=CONFIRMED', vtbRefund.status && vtbRefund.status.value === 'CONFIRMED');
+  const vtbDupRefund = (await vtbApi('POST', 'refunds', { refundId: `${runId}-vtb-ref-1`, paymentId: vtbComplete.payments[0].paymentId, amount: { value: 1, code: 'RUB' } })).json();
+  check('vtb дубль refundId -> duplicate_refund_id (не replay)', Boolean(vtbDupRefund && vtbDupRefund.error === 'duplicate_refund_id'));
+  const vtbCancel = (await vtbApi('POST', 'orders', { orderId: `${runId}-vtb-cancel`, orderName: 'x', amount: { value: 3, code: 'RUB' } }));
+  const vtbCancelRes = (await vtbApi('POST', `orders/${runId}-vtb-cancel/cancel`, { cancelReason: 'compose' })).json() || {};
+  check('vtb cancel CREATED -> CANCELED с cancelReason', vtbCancel.status === 200 && vtbCancelRes.status.value === 'CANCELED');
 }
 
 async function main() {
-  console.log(`\n== compose black-box selftest (${TBANK_BASE} & ${KASSA_BASE} & ${YOOKASSA_BASE} & ${ATOL_BASE} & ${ALFA_BASE} & ${SBER_BASE}) ==\n`);
+  console.log(`\n== compose black-box selftest (${TBANK_BASE} & ${KASSA_BASE} & ${YOOKASSA_BASE} & ${ATOL_BASE} & ${ALFA_BASE} & ${SBER_BASE} & ${VTB_BASE}) ==\n`);
   console.log(`  · одноразовая песочница прогона: ${SANDBOX_ID}`);
 
   // Базовая линия default-состояния: прогон не должен её изменить (два запуска
@@ -630,12 +732,14 @@ async function main() {
   const atolCounts = (j) => `documents=${j.documents},waiting=${j.waiting},callbacks=${j.callbacks}`;
   const alfaCounts = (j) => `orders=${j.orders},awaiting=${j.awaiting},callbacks=${j.callbacks}`;
   const sberCounts = (j) => `orders=${j.orders},awaiting=${j.awaiting},callbacks=${j.callbacks}`;
+  const vtbCounts = (j) => `orders=${j.orders},refunds=${j.refunds},awaiting=${j.awaiting},callbacks=${j.callbacks}`;
   const beforeBank = (await httpReq(TBANK_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const beforeKassa = (await httpReq(KASSA_BASE, 'GET', '/healthz?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const beforeYookassa = (await httpReq(YOOKASSA_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const beforeAtol = (await httpReq(ATOL_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const beforeAlfa = (await httpReq(ALFA_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const beforeSber = (await httpReq(SBER_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
+  const beforeVtb = (await httpReq(VTB_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
 
   await provisionSandboxes();
   try {
@@ -650,6 +754,7 @@ async function main() {
   const afterAtol = (await httpReq(ATOL_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const afterAlfa = (await httpReq(ALFA_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const afterSber = (await httpReq(SBER_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
+  const afterVtb = (await httpReq(VTB_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   if (beforeBank.tenancy && beforeBank.tenancy !== 'off') {
     check('tbank: прогон не изменил default-счётчики (F-33)', bankCounts(beforeBank) === bankCounts(afterBank),
       `${bankCounts(beforeBank)} -> ${bankCounts(afterBank)}`);
@@ -673,6 +778,10 @@ async function main() {
   if (beforeSber.tenancy && beforeSber.tenancy !== 'off') {
     check('sber: прогон не изменил default-счётчики (F-33)', sberCounts(beforeSber) === sberCounts(afterSber),
       `${sberCounts(beforeSber)} -> ${sberCounts(afterSber)}`);
+  }
+  if (beforeVtb.tenancy && beforeVtb.tenancy !== 'off') {
+    check('vtb: прогон не изменил default-счётчики (F-33)', vtbCounts(beforeVtb) === vtbCounts(afterVtb),
+      `${vtbCounts(beforeVtb)} -> ${vtbCounts(afterVtb)}`);
   }
 
   console.log(`\nИТОГ compose-selftest: ${passed} passed, ${failed} failed\n`);

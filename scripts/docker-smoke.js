@@ -12,7 +12,7 @@
  *   1. tbank-mock (CMD по умолчанию) и kassa-mock (команда из шапки Dockerfile,
  *      БЕЗ переменных healthcheck) становятся healthy со стандартным
  *      HEALTHCHECK образа — F-35 (kassa слушает /healthz, а не /health); sber-mock
- *      на :3105 также проверяется с явной портовой парой;
+ *      на :3105 и vtb-mock на :3106 также проверяются с явными портовыми парами;
  *   2. процессы идут от непривилегированного UID 10001 — F-36;
  *   3. persist/restore переживает --read-only rootfs с volume /data: Init
  *      до рестарта виден после рестарта — F-36;
@@ -30,6 +30,7 @@ const PREFIX = `mock-smoke-${process.pid}`;
 const NAME_TBANK = `${PREFIX}-tbank`;
 const NAME_KASSA = `${PREFIX}-kassa`;
 const NAME_SBER = `${PREFIX}-sber`;
+const NAME_VTB = `${PREFIX}-vtb`;
 const NAME_RO = `${PREFIX}-ro`;
 const VOLUME = `${PREFIX}-data`;
 
@@ -88,7 +89,7 @@ function assertEqual(actual, expected, message) {
 }
 
 function cleanup() {
-  for (const name of [NAME_TBANK, NAME_KASSA, NAME_SBER, NAME_RO]) {
+  for (const name of [NAME_TBANK, NAME_KASSA, NAME_SBER, NAME_VTB, NAME_RO]) {
     try { docker(['rm', '-f', name]); } catch { /* не создан */ }
   }
   try { docker(['volume', 'rm', '-f', VOLUME]); } catch { /* не создан */ }
@@ -123,6 +124,16 @@ async function main() {
   if (JSON.parse(sberOpenApi.body).openapi !== '3.1.0') throw new Error('sber-mock /openapi.json недоступен в image');
   console.log('[smoke] sber-mock: healthy + OpenAPI ✅');
 
+  // 2c. ВТБ SMB E-commerce на выделенном порту :3106.
+  console.log('[smoke] vtb-mock: порт :3106 + /health');
+  docker(['run', '-d', '--name', NAME_VTB, '-p', '127.0.0.1:3904:3106', '-e', 'MOCK_PORT=3106', '-e', 'MOCK_HEALTH_PATH=/health', IMAGE, 'node', 'services/vtb-mock/server.js']);
+  await waitForHealth(NAME_VTB);
+  const vtbHealth = await request(3904, 'GET', '/health');
+  assertEqual(vtbHealth.statusCode, 200, 'vtb-mock /health');
+  const vtbOpenApi = await request(3904, 'GET', '/openapi.json');
+  if (JSON.parse(vtbOpenApi.body).openapi !== '3.1.0') throw new Error('vtb-mock /openapi.json недоступен в image');
+  console.log('[smoke] vtb-mock: healthy + OpenAPI ✅');
+
   // 3. Непривилегированный runtime-пользователь (F-36).
 
   const user = docker(['inspect', '--format', '{{.Config.User}}', NAME_TBANK]);
@@ -130,6 +141,7 @@ async function main() {
   assertEqual(docker(['exec', NAME_TBANK, 'id', '-u']), '10001', 'UID runtime-пользователя');
   assertEqual(docker(['exec', NAME_KASSA, 'id', '-u']), '10001', 'UID runtime-пользователя (kassa)');
   assertEqual(docker(['exec', NAME_SBER, 'id', '-u']), '10001', 'UID runtime-пользователя (sber)');
+  assertEqual(docker(['exec', NAME_VTB, 'id', '-u']), '10001', 'UID runtime-пользователя (vtb)');
   console.log('[smoke] непривилегированный пользователь mock (10001) ✅');
 
   // 4. persist/restore при --read-only rootfs (F-36): Init до рестарта виден

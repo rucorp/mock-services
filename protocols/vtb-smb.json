@@ -1,0 +1,192 @@
+{
+  "id": "vtb-smb-ecommerce",
+  "title": "ВТБ — SMB E-commerce API интернет-эквайринга",
+  "version": "2026.10",
+  "upstreamDocs": [
+    "docs/reference/vtb/01-smb-ecommerce-api.md",
+    "docs/reference/vtb/02-callbacks-and-testing.md"
+  ],
+  "guide": "docs/integration/vtb.md",
+  "readme": "services/vtb-mock/README.md",
+  "openapi": "docs/openapi/vtb-mock.openapi.json",
+  "upstreamSources": [
+    {
+      "title": "Публичный портал API интернет-эквайринга ВТБ (срез 2026-10-11)",
+      "url": "https://test-pay.vtb.ru/api-developer-docs/"
+    },
+    {
+      "title": "Операции с ордерами SMB API",
+      "url": "https://test-pay.vtb.ru/api-developer-docs/#/api-ecomm/orders"
+    },
+    {
+      "title": "Уведомления (callback / payment_callback / refund_callback)",
+      "url": "https://test-pay.vtb.ru/api-developer-docs/#/services/callback"
+    }
+  ],
+  "baseUrls": {
+    "test": "https://test3.api.vtb.ru:8443/openapi/smb/efcp/e-commerce/v1/",
+    "production": "https://gw.api.vtb.ru/openapi/smb/efcp/e-commerce/v1/"
+  },
+  "tokenUrl": {
+    "test": "https://epa-ift-sbp.vtb.ru:443/passport/oauth2/token",
+    "mock": "/passport/oauth2/token",
+    "note": "Для production адрес менеджера доступа берётся из production-инструкции банка; не выводить его из тестового."
+  },
+  "productionNote": "Координаты и допущенные операции подтверждать по merchant-настройкам; mock base URL задаётся MOCK_VTB_PUBLIC_BASE_URL. Legacy RBS (vtb.rbsuat.com, *.do) — другой контракт, не альтернативная база для /openapi/smb/.",
+  "transport": {
+    "method": "POST/GET JSON",
+    "requestFormat": "application/json",
+    "responseFormat": "application/json",
+    "encoding": "UTF-8",
+    "amountUnits": "десятичные рубли (amount.value, например 10.56), НЕ копейки",
+    "currency": "RUB"
+  },
+  "auth": {
+    "type": "oauth2-client-credentials",
+    "tokenGrant": "client_credentials",
+    "tokenRequestFormat": "application/x-www-form-urlencoded",
+    "tokenResponse": ["access_token", "token_type", "expires_in"],
+    "businessHeaders": ["Authorization: Bearer", "X-IBM-Client-Id", "Merchant-Authorization"],
+    "clientIdNormalization": "client_id в нижнем регистре, без @ext.vtb.ru; X-IBM-Client-Id и Merchant-Authorization отправляются только на API, не на token endpoint",
+    "merchantAuthorization": "опционален (одна политика; обязателен при нескольких ресурсах по настройке банка)",
+    "tokenTtlSecsDefault": 170,
+    "note": "Срок токена обычно около 170 с; клиент планирует обновление по expires_in. Дефолты мока vtbmocktest/mockpass123 — синтетические; реальные тестовые креды выдаёт банк."
+  },
+  "routes": [
+    "/openapi/smb/efcp/e-commerce/v1/orders",
+    "/openapi/smb/efcp/e-commerce/v1/orders/preauth",
+    "/openapi/smb/efcp/e-commerce/v1/orders/complete/{orderId}",
+    "/openapi/smb/efcp/e-commerce/v1/orders/{orderId}/cancel",
+    "/openapi/smb/efcp/e-commerce/v1/orders/{orderId}",
+    "/openapi/smb/efcp/e-commerce/v1/refunds",
+    "/openapi/smb/efcp/e-commerce/v1/refunds/{refundId}"
+  ],
+  "tokenRoute": "/passport/oauth2/token",
+  "formRoutes": [
+    "/pay/{orderId}",
+    "/pay/{orderId}/pay"
+  ],
+  "mockRoutes": [
+    "/health",
+    "/openapi.json",
+    "/admin",
+    "/admin/journal",
+    "/admin/action"
+  ],
+  "mockControlRoutes": [
+    "/mock/time",
+    "/mock/scenarios",
+    "/mock/state",
+    "/mock/reset",
+    "/sandboxes",
+    "/sandboxes/me",
+    "/sandboxes/me/reset",
+    "/sandboxes/me/reset-creds",
+    "/mock/sandboxes"
+  ],
+  "createOrderFields": ["orderId", "orderName", "amount"],
+  "createOrderOptionalFields": ["description", "expire", "returnUrl", "twoStageParams"],
+  "refundFields": ["refundId", "paymentId", "amount"],
+  "orderStatuses": {
+    "CREATED": "ордер создан, не оплачен",
+    "PAID": "ордер оплачен",
+    "REFUNDED": "по ордеру проведён полный возврат",
+    "PARTIALLY_REFUNDED": "по ордеру проведён частичный возврат",
+    "CANCELED": "ордер отменён"
+  },
+  "operationStatuses": {
+    "NEW": "операция создана (для preauth — сумма удержана)",
+    "CONFIRMED": "операция подтверждена",
+    "RECONCILED": "операция сверена"
+  },
+  "statusLevelNote": "status.value строго на своём уровне: ордер CREATED/PAID/REFUNDED/PARTIALLY_REFUNDED/CANCELED, операция (платёж/возврат) NEW/CONFIRMED/RECONCILED. Не смешивать статусы ордера, платежа и возврата.",
+  "statusSourceNote": "Значения сняты в docs/reference/vtb/01-smb-ecommerce-api.md (примеры и модели). Переход CREATED→CANCELED по истечении 20-минутного TTL — интерпретация мока [VERIFY]: явного статуса истечения в срезе нет.",
+  "callback": {
+    "method": "POST",
+    "contentType": "application/json",
+    "envelope": ["type", "object"],
+    "types": ["PAYMENT", "REFUND"],
+    "paymentObjectFields": ["paymentId", "paymentCode", "orderId", "orderCode", "createdAt", "description", "amount", "paymentData", "Status"],
+    "refundObjectFields": ["refundId", "paymentId", "paymentCode", "orderId", "orderCode", "createdAt", "amount", "status"],
+    "statusKeyQuirk": "В карточном примере платежа поле статуса — Status (заглавная), в примере возврата — status (строчные); это расхождение публичных примеров. Payload сохраняется и доставляется КАК ЕСТЬ, регистр ключа не нормализуется. Сценарий status-lowercase отдаёт СБП-вариант status у платежа для проверки парсеров.",
+    "statusValues": {
+      "CONFIRMED": "пример карты",
+      "RECONCILED": "пример СБП (out of scope; достижимо сценарием reconciled)"
+    },
+    "signature": "none",
+    "signatureNote": "В публичных SMB-инструкциях callback-подпись не обнаружена; не выдумывать подписи/legacy-правила RBS.",
+    "ack": "[FORK/mock-local] публичный срез ACK-код не фиксирует; мок считает доставкой любой HTTP 2xx — не утверждение протокола",
+    "retries": "[FORK/mock-local] расписание повторов публично не зафиксировано; локальный график MOCK_VTB_CALLBACK_RETRY_MS × MOCK_VTB_CALLBACK_MAX_ATTEMPTS (дефолт 3 × 60s)",
+    "urlSelection": "MOCK_VTB_CALLBACK_URL — один URL на ресурс (мерчант сообщает его представителю банка); per-order URL в SMB-контракте нет",
+    "reconciliation": "Официальная инструкция рекомендует после callback выполнить GET /orders/{orderId} или GET /refunds/{refundId}; уведомление — не единственный источник истины."
+  },
+  "testCards": [
+    "4242424242424242",
+    "5555555555554444",
+    "4000000000000002",
+    "4000000000009995",
+    "4000000000000069"
+  ],
+  "testCardNote": "[FORK] СИНТЕТИЧЕСКИЕ мок-карты: официальная тестовая карта SMB-доки 4111 1111 1111 1111 (12/24, CVV 123) истекла до среза 2026-10-11 и непригодна; legacy-карта 4000 0011 1111 1118 (12/2030) — только старая REST-песочница vtb.rbsuat.com, в SMB API не используется. PAN живёт только в matching формы; в состоянии/журнале/callback — маска.",
+  "amountValidation": {
+    "unit": "десятичные рубли",
+    "maxFractionDigits": 2,
+    "note": "Принимается number или цифровая строка вида 10.56; «10,56», экспоненты и >2 знаков дроби отклоняются (invalid_amount). code — строго RUB."
+  },
+  "idempotency": {
+    "orders": "повтор orderId в POST /orders идемпотентен: возвращается существующий ордер (X-Mock-Replayed: 1), новый не создаётся",
+    "refunds": "refundId уникален: повтор — ошибка duplicate_refund_id, НЕ replay (в отличие от orderId)"
+  },
+  "limits": {
+    "tokenTtlSecsDefault": 170,
+    "tokenTtlNote": "≈170 с по срезу; TTL живёт на виртуальных часах стенда.",
+    "orderTtlSecsDefault": 1200,
+    "orderTtlNote": "20 минут по срезу; expire можно задать при создании (ISO с timezone и миллисекундами).",
+    "callbackAttemptsDefault": 3,
+    "callbackRetryMsDefault": 60000,
+    "orderIdMaxLength": 128,
+    "orderNameMaxLength": 256,
+    "currency": "RUB",
+    "currencyNote": "Стенд работает только с RUB."
+  },
+  "preauth": {
+    "envFlag": "MOCK_VTB_PREAUTH",
+    "default": true,
+    "note": "POST /orders/preauth требует twoStageParams и отдельного разрешения банка; на стене доступность регулируется env-флагом."
+  },
+  "errorEnvelope": {
+    "shape": ["error", "error_description", "field", "hint", "doc"],
+    "note": "[FORK] публичный SMB-срез фиксирует HTTP-статусы, но не полную схему тела бизнес-ошибок; envelope {error, error_description} + DX {field, hint, doc} — явный мок-форк (по образцу errorCode-форка Сбера), не production-каталог ВТБ. OAuth-ошибки token endpoint следуют RFC 6749 §5.2."
+  },
+  "errorCodes": [
+    "invalid_request",
+    "invalid_token",
+    "invalid_client",
+    "invalid_amount",
+    "invalid_order_state",
+    "order_not_found",
+    "payment_not_found",
+    "refund_not_found",
+    "duplicate_refund_id",
+    "amount_exceeds_limit",
+    "preauth_disabled",
+    "limit_exceeded",
+    "unsupported_grant_type",
+    "unsupported_method",
+    "not_found",
+    "system_error"
+  ],
+  "testCredentials": {
+    "clientId": "vtbmocktest",
+    "clientSecret": "mockpass123",
+    "synthetic": true,
+    "note": "Синтетические дефолты мока (по образцу SBERMOCKTEST). Реальные тестовые client_id/client_secret ВТБ не добавлять в config, тесты или документацию."
+  },
+  "outOfScope": [
+    "legacy RBS REST (vtb.rbsuat.com, /payment/rest/, *.do, userName/password) — отдельный контракт",
+    "СБП-QR стенды qr-efcp.bankingapi.ru (/qr/success, /qr/fail) и sbpParams-ветка callback",
+    "callback-подпись/ACK-код/расписание ретраев — в публичных SMB-доках отсутствуют, не выдумывать",
+    "мульти-ресурсный Merchant-Authorization (одна политика: заголовок опционален)",
+    "production auth URL и реальные тестовые креды банка"
+  ]
+}

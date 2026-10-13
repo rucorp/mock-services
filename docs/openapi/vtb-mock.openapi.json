@@ -1,0 +1,1506 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "vtb-mock — ВТБ SMB E-commerce API (мок-стенд)",
+    "version": "0.5.0",
+    "description": "Zero-dependency mock adapter for the SMB E-commerce API slice documented in docs/reference/vtb/01-smb-ecommerce-api.md and docs/reference/vtb/02-callbacks-and-testing.md. This is NOT legacy RBS. Business methods are JSON REST at /openapi/smb/efcp/e-commerce/v1/; auth is OAuth 2.0 client_credentials (POST /passport/oauth2/token, form-urlencoded) plus Authorization: Bearer and X-IBM-Client-Id (client_id lowercase, no @ext.vtb.ru) on business calls. amount.value is decimal RUB (10.56), not kopecks. Order statuses CREATED/PAID/REFUNDED/PARTIALLY_REFUNDED/CANCELED and operation statuses NEW/CONFIRMED/RECONCILED each live in their own status.value. Callback is unsigned POST JSON {\"type\":\"PAYMENT|REFUND\",\"object\":{...}} — the payload key quirk (Status for card payments, status for refunds) is preserved as-is; ACK code and retry schedule are not documented publicly, mock-local 2xx/retry policy is a [FORK]."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3106",
+      "description": "Локальный ВТБ SMB mock"
+    }
+  ],
+  "tags": [
+    {
+      "name": "SMB E-commerce",
+      "description": "JSON REST API среза SMB E-commerce интернет-эквайринга ВТБ (не legacy RBS)"
+    },
+    {
+      "name": "OAuth2",
+      "description": "Token endpoint client_credentials (RFC 6749)"
+    },
+    {
+      "name": "Hosted pay page",
+      "description": "Тестовая страница оплаты по payUrl с синтетическими [FORK]-картами"
+    },
+    {
+      "name": "Mock control",
+      "description": "Часы, сценарии, sandbox и административная поверхность мока"
+    }
+  ],
+  "webhooks": {
+    "vtbCallback": {
+      "post": {
+        "tags": [
+          "SMB E-commerce"
+        ],
+        "summary": "Исходящий SMB callback: POST JSON {\"type\",\"object\"} без подписи",
+        "description": "The mock posts a JSON envelope {\"type\":\"PAYMENT|REFUND\",\"object\":{...}} to MOCK_VTB_CALLBACK_URL (one URL per resource). Public SMB docs define no callback signature and no ACK code: the mock treats any 2xx as delivered ([FORK], not a protocol claim) and retries on a mock-local schedule (default 3 × 60s). The payment object keeps the documented key quirk Status (card example) while the refund object keeps status (refund example) — no normalization. After a notification reconcile with GET /orders/{orderId} or GET /refunds/{refundId}.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallbackEnvelope"
+              }
+            }
+          }
+        },
+        "responses": {
+          "2xx": {
+            "description": "Любой 2xx считается доставкой ([FORK]: ACK-код публичным SMB-срезом не зафиксирован)."
+          },
+          "default": {
+            "description": "Не-2xx: повтор по локальному графику мока; SSRF_BLOCKED — терминальный отказ."
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/passport/oauth2/token": {
+      "post": {
+        "tags": [
+          "OAuth2"
+        ],
+        "summary": "Выдать access_token (client_credentials)",
+        "description": "Form-urlencoded grant_type=client_credentials&client_id=...&client_secret=.... Ответ {access_token, token_type: Bearer, expires_in} (≈170 с по срезу); клиент планирует обновление по expires_in. Заголовки X-IBM-Client-Id и Merchant-Authorization сюда не отправляются.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "grant_type",
+                  "client_id",
+                  "client_secret"
+                ],
+                "properties": {
+                  "grant_type": {
+                    "type": "string",
+                    "enum": [
+                      "client_credentials"
+                    ]
+                  },
+                  "client_id": {
+                    "type": "string"
+                  },
+                  "client_secret": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Токен выдан.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "unsupported_grant_type (RFC 6749 §5.2)."
+          },
+          "401": {
+            "description": "invalid_client (RFC 6749 §5.2)."
+          },
+          "415": {
+            "description": "Не form-urlencoded."
+          }
+        }
+      }
+    },
+    "/openapi/smb/efcp/e-commerce/v1/orders": {
+      "post": {
+        "tags": [
+          "SMB E-commerce"
+        ],
+        "summary": "Создать ордер (уникальный merchant orderId)",
+        "description": "Обязательны уникальный orderId, orderName и amount {value, code: \"RUB\"} — value в десятичных рублях. Возвращает ордер с payUrl и expire (tz/мс; дефолт — 20 минут). Повтор того же orderId идемпотентен и возвращает существующий ордер (заголовок X-Mock-Replayed: 1).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/XMockSandbox"
+          },
+          {
+            "$ref": "#/components/parameters/XMockScenario"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/CreateOrderBody"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RestResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/TransportError"
+          },
+          "401": {
+            "$ref": "#/components/responses/TransportError"
+          },
+          "415": {
+            "$ref": "#/components/responses/TransportError"
+          }
+        }
+      }
+    },
+    "/openapi/smb/efcp/e-commerce/v1/orders/preauth": {
+      "post": {
+        "tags": [
+          "SMB E-commerce"
+        ],
+        "summary": "Создать ордер с предавторизацией (twoStageParams)",
+        "description": "Доступность — отдельное разрешение банка; на стенде управляется MOCK_VTB_PREAUTH. twoStageParams обязателен (форма объекта в публичном срезе не зафиксирована — [VERIFY]).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/XMockSandbox"
+          },
+          {
+            "$ref": "#/components/parameters/XMockScenario"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/CreatePreauthBody"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RestResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/TransportError"
+          },
+          "401": {
+            "$ref": "#/components/responses/TransportError"
+          },
+          "403": {
+            "description": "preauth_disabled: предавторизация не подключена (MOCK_VTB_PREAUTH)."
+          }
+        }
+      }
+    },
+    "/openapi/smb/efcp/e-commerce/v1/orders/complete/{orderId}": {
+      "post": {
+        "tags": [
+          "SMB E-commerce"
+        ],
+        "summary": "Завершить холд (сумма ≤ авторизации)",
+        "description": "Передаётся amount {value, code}. Сумма не больше авторизованной; частичное подтверждение поддержано (остаток холда снимается).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          },
+          {
+            "$ref": "#/components/parameters/XMockSandbox"
+          },
+          {
+            "$ref": "#/components/parameters/XMockScenario"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AmountBody"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RestResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/TransportError"
+          },
+          "401": {
+            "$ref": "#/components/responses/TransportError"
+          },
+          "404": {
+            "$ref": "#/components/responses/TransportError"
+          },
+          "409": {
+            "$ref": "#/components/responses/TransportError"
+          }
+        }
+      }
+    },
+    "/openapi/smb/efcp/e-commerce/v1/orders/{orderId}/cancel": {
+      "post": {
+        "tags": [
+          "SMB E-commerce"
+        ],
+        "summary": "Отменить ордер",
+        "description": "Допускается опциональный cancelReason. Отменяется неоплаченный ордер (CREATED) либо preauth-ордер до complete (холд снимается; статуса reversal в словаре операций нет — [VERIFY], платёж помечается voided).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          },
+          {
+            "$ref": "#/components/parameters/XMockSandbox"
+          },
+          {
+            "$ref": "#/components/parameters/XMockScenario"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "cancelReason": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RestResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/TransportError"
+          },
+          "404": {
+            "$ref": "#/components/responses/TransportError"
+          },
+          "409": {
+            "$ref": "#/components/responses/TransportError"
+          }
+        }
+      }
+    },
+    "/openapi/smb/efcp/e-commerce/v1/orders/{orderId}": {
+      "get": {
+        "tags": [
+          "SMB E-commerce"
+        ],
+        "summary": "Получить ордер с транзакциями платежей/возвратов",
+        "description": "Источник истины после callback. status.value — на каждом уровне (ордер/платёж/возврат) строго свой.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          },
+          {
+            "$ref": "#/components/parameters/XMockSandbox"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RestResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/TransportError"
+          },
+          "404": {
+            "$ref": "#/components/responses/TransportError"
+          }
+        }
+      }
+    },
+    "/openapi/smb/efcp/e-commerce/v1/refunds": {
+      "post": {
+        "tags": [
+          "SMB E-commerce"
+        ],
+        "summary": "Полный/частичный возврат",
+        "description": "Обязательны уникальный merchant refundId, paymentId и amount. В отличие от orderId, повторный refundId — ошибка duplicate_refund_id, а не идемпотентный replay. Сумма возврата ограничена остатком списания по платежу.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/XMockSandbox"
+          },
+          {
+            "$ref": "#/components/parameters/XMockScenario"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/CreateRefundBody"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RestResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/TransportError"
+          },
+          "401": {
+            "$ref": "#/components/responses/TransportError"
+          },
+          "404": {
+            "$ref": "#/components/responses/TransportError"
+          },
+          "409": {
+            "$ref": "#/components/responses/TransportError"
+          }
+        }
+      }
+    },
+    "/openapi/smb/efcp/e-commerce/v1/refunds/{refundId}": {
+      "get": {
+        "tags": [
+          "SMB E-commerce"
+        ],
+        "summary": "Получить статус возврата",
+        "description": "GET-сверка после REFUND-callback; уведомление — не единственный источник истины.",
+        "parameters": [
+          {
+            "name": "refundId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/XMockSandbox"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RestResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/TransportError"
+          },
+          "404": {
+            "$ref": "#/components/responses/TransportError"
+          }
+        }
+      }
+    },
+    "/pay/{orderId}": {
+      "get": {
+        "tags": [
+          "Hosted pay page"
+        ],
+        "summary": "Тестовая страница оплаты (payUrl)",
+        "description": "Только синтетические [FORK]-карты: официальная тестовая карта SMB-доки (4111 1111 1111 1111, 12/24) истекла; legacy-карта RBS не действует. PAN не сохраняется — в состоянии остаётся маска.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          },
+          {
+            "$ref": "#/components/parameters/XMockSandbox"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/HtmlPage"
+          },
+          "404": {
+            "$ref": "#/components/responses/HtmlPage"
+          }
+        }
+      }
+    },
+    "/pay/{orderId}/pay": {
+      "post": {
+        "tags": [
+          "Hosted pay page"
+        ],
+        "summary": "Отправить карточные данные тестовой формы",
+        "description": "Form-urlencoded pan/exp/cvv. Успешная оплата: одностадийный ордер → PAID + PAYMENT callback; preauth → payment NEW (hold), callback после complete.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          },
+          {
+            "$ref": "#/components/parameters/XMockSandbox"
+          },
+          {
+            "$ref": "#/components/parameters/XMockScenario"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/HtmlPage"
+          },
+          "302": {
+            "description": "Redirect на returnUrl (mock-расширение поля returnUrl, [FORK])."
+          },
+          "404": {
+            "$ref": "#/components/responses/HtmlPage"
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Health/status конфигурации mock",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/XMockSandbox"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Состояние стенда.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "OpenAPI 3.1 спецификация",
+        "responses": {
+          "200": {
+            "description": "Этот документ."
+          }
+        }
+      }
+    },
+    "/admin": {
+      "get": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Консоль стенда (HTML)",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/HtmlPage"
+          }
+        }
+      }
+    },
+    "/admin/journal": {
+      "get": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Журнал запросов SMB REST (JSON, curl-сниппеты)",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonControl"
+          }
+        }
+      }
+    },
+    "/admin/action": {
+      "post": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Действие консоли (same-origin + CSRF)",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminActionBody"
+        },
+        "responses": {
+          "302": {
+            "description": "Redirect обратно в /admin."
+          },
+          "403": {
+            "description": "CSRF/same-origin отказ."
+          }
+        }
+      }
+    },
+    "/mock/time": {
+      "get": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Снимок виртуальных часов",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonControl"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Двинуть виртуальное время (TTL токена, истечение ордера, retry)",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/TimeRequestBody"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonControl"
+          },
+          "400": {
+            "description": "Некорректный advance/offset/iso."
+          }
+        }
+      }
+    },
+    "/mock/scenarios": {
+      "get": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Правила и история сценариев песочницы",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonControl"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Добавить правило сценария (fail/hang/http-500/status-lowercase/reconciled/...)",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ScenarioRequestBody"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonControl"
+          },
+          "400": {
+            "description": "Некорректное правило."
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Очистить правила и историю",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonControl"
+          }
+        }
+      }
+    },
+    "/mock/state": {
+      "get": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Снимок состояния песочницы",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonControl"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Импорт состояния песочницы",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/StateEnvelopeBody"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonControl"
+          },
+          "400": {
+            "description": "Недопустимый снимок."
+          }
+        }
+      }
+    },
+    "/mock/reset": {
+      "post": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Сброс состояния песочницы",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonControl"
+          }
+        }
+      }
+    },
+    "/sandboxes": {
+      "get": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Список песочниц (RFC-001)",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonControl"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Создать/выбрать песочницу",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonControl"
+          },
+          "201": {
+            "description": "Песочница создана (owner-token выдаётся один раз)."
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Удалить песочницу",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonControl"
+          }
+        }
+      }
+    },
+    "/sandboxes/me": {
+      "get": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Текущая песочница по owner-token",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonControl"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Удалить свою песочницу",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonControl"
+          }
+        }
+      }
+    },
+    "/sandboxes/me/reset": {
+      "post": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Сброс своей песочницы",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonControl"
+          }
+        }
+      }
+    },
+    "/sandboxes/me/reset-creds": {
+      "post": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Перевыпустить креды своей песочницы (clientId/clientSecret)",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonControl"
+          }
+        }
+      }
+    },
+    "/mock/sandboxes": {
+      "get": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Псевдоним списка песочниц",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonControl"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Псевдоним создания/выбора песочницы",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonControl"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Псевдоним удаления песочницы",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonControl"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "XMockSandbox": {
+        "name": "X-Mock-Sandbox",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Изоляция песочницы (RFC-001)."
+      },
+      "XMockScenario": {
+        "name": "X-Mock-Scenario",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Сценарий запроса: fail, hang, latency, http-500, http-504, webhook-drop, webhook-duplicate, status-lowercase, reconciled."
+      },
+      "OrderId": {
+        "name": "orderId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Merchant orderId (уникальный; повтор в POST /orders идемпотентен)."
+      }
+    },
+    "schemas": {
+      "Amount": {
+        "type": "object",
+        "required": [
+          "value",
+          "code"
+        ],
+        "properties": {
+          "value": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "ДЕСЯТИЧНЫЕ рубли (10.56), максимум 2 знака после точки; не копейки."
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "RUB"
+            ]
+          }
+        },
+        "description": "Сумма в десятичных рублях (amountUnits среза: value, не минимальные единицы)."
+      },
+      "TokenResponse": {
+        "type": "object",
+        "required": [
+          "access_token",
+          "token_type",
+          "expires_in"
+        ],
+        "properties": {
+          "access_token": {
+            "type": "string"
+          },
+          "token_type": {
+            "type": "string",
+            "enum": [
+              "Bearer"
+            ]
+          },
+          "expires_in": {
+            "type": "integer",
+            "description": "≈170 с по срезу; клиент планирует обновление по этому значению."
+          }
+        }
+      },
+      "OrderStatusValue": {
+        "type": "string",
+        "enum": [
+          "CREATED",
+          "PAID",
+          "REFUNDED",
+          "PARTIALLY_REFUNDED",
+          "CANCELED"
+        ],
+        "description": "Статус ОРДЕРА (status.value на уровне ордера): CREATED — ордер создан, не оплачен; PAID — ордер оплачен; REFUNDED — по ордеру проведён полный возврат; PARTIALLY_REFUNDED — по ордеру проведён частичный возврат; CANCELED — ордер отменён (в т.ч. по истечении 20-минутного TTL)."
+      },
+      "OperationStatusValue": {
+        "type": "string",
+        "enum": [
+          "NEW",
+          "CONFIRMED",
+          "RECONCILED"
+        ],
+        "description": "Статус ОПЕРАЦИИ (платёж/возврат, status.value на своём уровне): NEW — операция создана (для preauth — сумма удержана); CONFIRMED — операция подтверждена; RECONCILED — операция сверена. Не смешивать со статусом ордера."
+      },
+      "PaymentTransaction": {
+        "type": "object",
+        "required": [
+          "paymentId",
+          "amount",
+          "status"
+        ],
+        "properties": {
+          "paymentId": {
+            "type": "string"
+          },
+          "paymentCode": {
+            "type": "string",
+            "description": "[VERIFY]: смысл paymentCode в публичном срезе не зафиксирован; мок генерирует короткий код."
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Amount"
+          },
+          "status": {
+            "type": "object",
+            "required": [
+              "value"
+            ],
+            "properties": {
+              "value": {
+                "$ref": "#/components/schemas/OperationStatusValue"
+              }
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "paymentData": {
+            "type": "object",
+            "description": "[VERIFY]: форма paymentData не зафиксирована; мок отдаёт маску карты.",
+            "properties": {
+              "cardMask": {
+                "type": "string"
+              }
+            }
+          },
+          "voided": {
+            "type": "boolean",
+            "description": "[FORK]: холд снят отменой ордера (словарь операций не содержит reversal)."
+          }
+        }
+      },
+      "RefundTransaction": {
+        "type": "object",
+        "required": [
+          "refundId",
+          "paymentId",
+          "amount",
+          "status"
+        ],
+        "properties": {
+          "refundId": {
+            "type": "string"
+          },
+          "paymentId": {
+            "type": "string"
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Amount"
+          },
+          "status": {
+            "type": "object",
+            "required": [
+              "value"
+            ],
+            "properties": {
+              "value": {
+                "$ref": "#/components/schemas/OperationStatusValue"
+              }
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "OrderView": {
+        "type": "object",
+        "required": [
+          "orderId",
+          "orderName",
+          "amount",
+          "status",
+          "expire",
+          "payments",
+          "refunds"
+        ],
+        "properties": {
+          "orderId": {
+            "type": "string"
+          },
+          "orderName": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Amount"
+          },
+          "status": {
+            "type": "object",
+            "required": [
+              "value"
+            ],
+            "properties": {
+              "value": {
+                "$ref": "#/components/schemas/OrderStatusValue"
+              }
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expire": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO с миллисекундами и timezone; дефолт — 20 минут от создания."
+          },
+          "payUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "twoStageParams": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "returnUrl": {
+            "type": "string",
+            "description": "[FORK]: mock-расширение; в SMB-срезе поля returnUrl нет."
+          },
+          "cancelReason": {
+            "type": "string"
+          },
+          "payments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PaymentTransaction"
+            }
+          },
+          "refunds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RefundTransaction"
+            }
+          }
+        }
+      },
+      "RefundView": {
+        "type": "object",
+        "required": [
+          "refundId",
+          "paymentId",
+          "amount",
+          "status"
+        ],
+        "properties": {
+          "refundId": {
+            "type": "string"
+          },
+          "paymentId": {
+            "type": "string"
+          },
+          "orderId": {
+            "type": "string"
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Amount"
+          },
+          "status": {
+            "type": "object",
+            "required": [
+              "value"
+            ],
+            "properties": {
+              "value": {
+                "$ref": "#/components/schemas/OperationStatusValue"
+              }
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "PaymentCallbackObject": {
+        "type": "object",
+        "required": [
+          "paymentId",
+          "orderId",
+          "amount",
+          "Status"
+        ],
+        "properties": {
+          "paymentId": {
+            "type": "string"
+          },
+          "paymentCode": {
+            "type": "string"
+          },
+          "orderId": {
+            "type": "string"
+          },
+          "orderCode": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "description": {
+            "type": "string"
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Amount"
+          },
+          "paymentData": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "Status": {
+            "type": "object",
+            "required": [
+              "value"
+            ],
+            "properties": {
+              "value": {
+                "$ref": "#/components/schemas/OperationStatusValue"
+              }
+            },
+            "description": "Карточный пример среза пишет Status (заглавная). Нормализация регистра ключа запрещена; СБП-пример (out of scope) использует status."
+          }
+        },
+        "additionalProperties": true,
+        "description": "object PAYMENT-callback: поля карточного примера среза (paymentId, paymentCode, orderId, orderCode, createdAt, description, amount, paymentData, Status)."
+      },
+      "RefundCallbackObject": {
+        "type": "object",
+        "required": [
+          "refundId",
+          "paymentId",
+          "orderId",
+          "amount",
+          "status"
+        ],
+        "properties": {
+          "refundId": {
+            "type": "string"
+          },
+          "paymentId": {
+            "type": "string"
+          },
+          "paymentCode": {
+            "type": "string"
+          },
+          "orderId": {
+            "type": "string"
+          },
+          "orderCode": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Amount"
+          },
+          "status": {
+            "type": "object",
+            "required": [
+              "value"
+            ],
+            "properties": {
+              "value": {
+                "$ref": "#/components/schemas/OperationStatusValue"
+              }
+            },
+            "description": "Пример возврата в срезе использует status (строчные) — сохраняется как есть."
+          }
+        },
+        "additionalProperties": true,
+        "description": "object REFUND-callback: refundId, paymentId, paymentCode, orderId, orderCode, createdAt, amount, status."
+      },
+      "CallbackEnvelope": {
+        "type": "object",
+        "required": [
+          "type",
+          "object"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "PAYMENT",
+              "REFUND"
+            ]
+          },
+          "object": {
+            "description": "PAYMENT — PaymentCallbackObject (Status); REFUND — RefundCallbackObject (status)."
+          }
+        },
+        "description": "SMB callback envelope: POST JSON без подписи/ACK-кода в публичном срезе."
+      },
+      "ProviderError": {
+        "type": "object",
+        "required": [
+          "error",
+          "error_description"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "enum": [
+              "invalid_request",
+              "invalid_token",
+              "invalid_client",
+              "invalid_amount",
+              "invalid_order_state",
+              "order_not_found",
+              "payment_not_found",
+              "refund_not_found",
+              "duplicate_refund_id",
+              "amount_exceeds_limit",
+              "preauth_disabled",
+              "limit_exceeded",
+              "unsupported_grant_type",
+              "unsupported_method",
+              "not_found",
+              "system_error"
+            ]
+          },
+          "error_description": {
+            "type": "string"
+          },
+          "field": {
+            "type": "string"
+          },
+          "hint": {
+            "type": "string"
+          },
+          "doc": {
+            "type": "string"
+          }
+        },
+        "description": "[FORK] mock envelope: публичный SMB-срез фиксирует HTTP-статусы, но не полную схему тела бизнес-ошибок; OAuth-ошибки token endpoint следуют RFC 6749 §5.2. field/hint/doc — DX-расширение мока."
+      },
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "ok",
+          "api",
+          "base"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "api": {
+            "type": "string",
+            "enum": [
+              "smb-ecommerce-json"
+            ]
+          },
+          "base": {
+            "type": "string"
+          },
+          "tokenTtlSecs": {
+            "type": "integer"
+          },
+          "orderTtlSecs": {
+            "type": "integer"
+          },
+          "preauth": {
+            "type": "boolean"
+          },
+          "callbackSignature": {
+            "type": "string",
+            "enum": [
+              "none"
+            ]
+          }
+        }
+      },
+      "TimeRequest": {
+        "type": "object",
+        "properties": {
+          "advance": {
+            "type": "string",
+            "description": "Например \"+20m\" (истечение ордера) или \"+60s\" (retry callback)."
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "iso": {
+            "type": "string"
+          },
+          "reset": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ScenarioRequest": {
+        "type": "object",
+        "required": [
+          "scenario"
+        ],
+        "properties": {
+          "scenario": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "match": {
+            "type": "object"
+          },
+          "times": {
+            "type": "integer"
+          },
+          "persistent": {
+            "type": "boolean"
+          }
+        }
+      },
+      "AdminActionRequest": {
+        "type": "object",
+        "required": [
+          "action",
+          "id"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "expire-order",
+              "duplicate-callback"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "_csrf": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "requestBodies": {
+      "CreateOrderBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "orderId",
+                "orderName",
+                "amount"
+              ],
+              "properties": {
+                "orderId": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "orderName": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "amount": {
+                  "$ref": "#/components/schemas/Amount"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "expire": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "Опционально: ISO с timezone и миллисекундами."
+                },
+                "returnUrl": {
+                  "type": "string",
+                  "description": "[FORK] mock-расширение."
+                }
+              }
+            }
+          }
+        }
+      },
+      "CreatePreauthBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "orderId",
+                "orderName",
+                "amount",
+                "twoStageParams"
+              ],
+              "properties": {
+                "orderId": {
+                  "type": "string"
+                },
+                "orderName": {
+                  "type": "string"
+                },
+                "amount": {
+                  "$ref": "#/components/schemas/Amount"
+                },
+                "twoStageParams": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "[VERIFY]: форма объекта в публичном срезе не зафиксирована."
+                },
+                "expire": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "returnUrl": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "AmountBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "amount"
+              ],
+              "properties": {
+                "amount": {
+                  "$ref": "#/components/schemas/Amount"
+                }
+              }
+            }
+          }
+        }
+      },
+      "CreateRefundBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "refundId",
+                "paymentId",
+                "amount"
+              ],
+              "properties": {
+                "refundId": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "paymentId": {
+                  "type": "string"
+                },
+                "amount": {
+                  "$ref": "#/components/schemas/Amount"
+                }
+              }
+            }
+          }
+        }
+      },
+      "TimeRequestBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/TimeRequest"
+            }
+          }
+        }
+      },
+      "ScenarioRequestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ScenarioRequest"
+            }
+          }
+        }
+      },
+      "StateEnvelopeBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
+      },
+      "AdminActionBody": {
+        "required": true,
+        "content": {
+          "application/x-www-form-urlencoded": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminActionRequest"
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "RestResponse": {
+        "description": "Успех: OrderView или RefundView (status.value на своём уровне)."
+      },
+      "TransportError": {
+        "description": "Provider-shaped ошибка {error, error_description, field, hint, doc}.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProviderError"
+            }
+          }
+        }
+      },
+      "HtmlPage": {
+        "description": "HTML-страница тестовой оплаты/консоли.",
+        "content": {
+          "text/html": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "JsonControl": {
+        "description": "JSON control-plane ответ.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
+      }
+    }
+  }
+}

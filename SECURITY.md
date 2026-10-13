@@ -65,19 +65,24 @@ owner-token; `off` — одна общая песочница. В `owned`:
 Креды адаптеров задаются переменными `MOCK_<ПРОВАЙДЕР>_*` (для Альфа-Банка —
 `MOCK_ALFA_USERNAME`, `MOCK_ALFA_PASSWORD`, `MOCK_ALFA_CALLBACK_SECRET`,
 `MOCK_ALFA_TERMINAL_ID`; для Сбера — `MOCK_SBER_USERNAME` и
-`MOCK_SBER_PASSWORD`). Дефолты в образе — **синтетические**; реальные
+`MOCK_SBER_PASSWORD`; для ВТБ — `MOCK_VTB_CLIENT_ID` и
+`MOCK_VTB_CLIENT_SECRET`). Дефолты в образе — **синтетические**; реальные
 тестовые креды банка зашивать в конфиг стенда нельзя. В частности, `SBERMOCKTEST` /
-`mockpass123` — локальные синтетические креды, не доступ к Ecom. Наружу
+`mockpass123` — локальные синтетические креды, не доступ к Ecom, а `vtbmocktest` /
+`mockpass123` — синтетические креды ВТБ-мока, не реквизиты банка. Наружу
 (HTTP-ответы, hint, stdout, `/admin/journal`) фактические env-креды не печатаются:
 при заданной переменной вместо секрета выводится пометка «задан через env, скрыт».
 
 Альфа callback — исходящий `GET` с query-параметрами, Сбер Ecom — unsigned
 JSON `POST` без checksum (target из `dynamicCallbackUrl` или
-`MOCK_SBER_CALLBACK_URL`). Оба используют `MOCK_BLOCK_PRIVATE_WEBHOOKS` (при
+`MOCK_SBER_CALLBACK_URL`), ВТБ — unsigned JSON `POST` `{"type":"PAYMENT|REFUND","object":{…}}`
+без подписи (ACK-код и расписание ретраев в публичных срезах не зафиксированы [VERIFY];
+расхождение `Status`/`status` сохраняется как есть; target из `MOCK_VTB_CALLBACK_URL`
+или `callbackUrl` запроса). Все используют `MOCK_BLOCK_PRIVATE_WEBHOOKS` (при
 `MOCK_HOSTED=1` включена по умолчанию); SSRF-отказ терминален — запись
-помечается `dumped` и не крутит retry-цикл. Ecom callback нельзя считать
-доказательством оплаты: merchant должен сверить `orderStatus` через
-`getOrderStatusExtended.do`.
+помечается `dumped` и не крутит retry-цикл. Callback нельзя считать
+доказательством оплаты: merchant должен сверить статус через
+`getOrderStatusExtended.do` (Сбер) / `GET /orders/{orderId}` (ВТБ).
 
 ## Что стенд хранит и показывает (F-09, F-10)
 
@@ -92,9 +97,11 @@ JSON `POST` без checksum (target из `dynamicCallbackUrl` или
   (`Content-Type`, `Content-Length`, `User-Agent`, `X-Mock-*`): `Authorization`
   с Basic/Bearer-кредами в журнал не попадает вовсе.
 - **Карточные данные минимизируются.** Выплата `/e2c/v2/Init` не хранит PAN,
-  а `sber-mock` принимает в карточной форме только официальные синтетические
+  `sber-mock` принимает в карточной форме только официальные синтетические
   test fixtures: форма не журналируется, заказ/state содержат только маску
-  `first6**last4`; реальные карточные реквизиты и ПДн недопустимы. Снимки
+  `first6**last4`; `vtb-mock` на странице оплаты принимает только синтетические
+  [FORK]-мок-карты (официальная тестовая карта ВТБ истекла), PAN не сохраняется
+  и в журнале/state не попадает. Реальные карточные реквизиты и ПДн недопустимы. Снимки
   состояния, созданные до соответствующих версий, вычищаются при загрузке.
   Любая строка журнала дополнительно сканируется на PAN (13–19 цифр, префикс
   платёжной системы, контрольная сумма Luhn).
@@ -112,7 +119,7 @@ JSON `POST` без checksum (target из `dynamicCallbackUrl` или
 ## Известные ограничения защиты
 
 - Проверка исходящих вебхуков (`MOCK_BLOCK_PRIVATE_WEBHOOKS`, при `MOCK_HOSTED=1`
-  включена по умолчанию во всех шести сервисах и в ядре — #51 PF-01, PA-58)
+  включена по умолчанию во всех семи сервисах и в ядре — #51 PF-01, PA-58)
   блокирует приватные и служебные IP-литералы (IPv4/IPv6, включая `ff00::/8`,
   TEST-NET-1/2/3, `2001:db8::/32` и `64:ff9b:1::/48` — PA-26) и имена, которые в них
   резолвятся, запрещает схемы кроме http/https и привязывает проверенный IP-адрес
