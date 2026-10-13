@@ -65,7 +65,7 @@ const path = require('path');
 
 const core = require('../../packages/core');
 const {
-  readBody, parseBody, send, sendJson, html, escapeHtml, checkControlAccess,
+  readBody, parseBody, send, sendJson, escapeHtml, checkControlAccess,
   parseScenarioSpec, applyRequestChaos, createSandboxRuntime, resolveTenancyMode, parseMsOr,
 } = core;
 
@@ -146,15 +146,56 @@ const PARTIAL_REFUND = core.flagEnabled(MOCK_PARTIAL_REFUND, true);
 const SSL_PERMITTED = core.flagEnabled(MOCK_SSL_PERMITTED, false);
 const TERMINAL_ID = String(MOCK_ALFA_TERMINAL_ID || 'ALFA-MOCK-1');
 
+/**
+ * PB-11/PG-05 (класс MS-08/PB-03/PF-03): числовые env — только через
+ * каноничный парсер ядра. `parseInt(x, 10) || N` запрещён (AGENTS §8): он
+ * молча съедает суффиксы (`'1h'` -> 1) и не даёт семантики нуля. Значение,
+ * которое не разбирается, — WARN и фолбэк: тихий фолбэк и есть дефект класса.
+ */
+function envNumber(name, raw, fallback, { min = 0, unit = '' } = {}) {
+  const text = String(raw ?? '').trim();
+  if (text && core.parseDuration(text) === null) {
+    log(`WARN ${name}=${JSON.stringify(text)} не разобран — используется ${fallback} (число${unit ? ` ${unit}` : ''} либо длительность вида '30s'/'1h')`);
+    return fallback;
+  }
+  const value = parseMsOr(raw, fallback);
+  if (value < min) {
+    log(`WARN ${name}=${value}${unit ? ` ${unit}` : ''} меньше минимума ${min} — используется ${min}`);
+    return min;
+  }
+  return value;
+}
+
+/**
+ * Секунды: голое число — секунды (обратная совместимость:
+ * `MOCK_SESSION_TIMEOUT_SECS=1200`), суффикс — длительность через
+ * parseDuration ядра (`'1h'` -> 3600). Меньше секунды смысла не имеет.
+ */
+function envSeconds(name, raw, fallback) {
+  const text = String(raw ?? '').trim();
+  if (!text) return fallback;
+  if (/^\d+$/.test(text)) {
+    const secs = parseInt(text, 10);
+    if (secs >= 1) return secs;
+    log(`WARN ${name}=${JSON.stringify(text)}: срок меньше 1 с не определён — используется ${fallback}`);
+    return fallback;
+  }
+  const ms = core.parseDuration(text);
+  if (ms === null || ms < 1000) {
+    log(`WARN ${name}=${JSON.stringify(text)} не разобран — используется ${fallback} (число секунд либо длительность вида '20m'/'1h')`);
+    return fallback;
+  }
+  return Math.round(ms / 1000);
+}
+
 // Ретраи callback: PDF не задаёт ни число попыток, ни интервал — это
 // mock-конфигурация (не копировать параметры Т-Банка/Сбера как «родные»).
-const CALLBACK_RETRY_MS = Math.max(1000, parseInt(MOCK_CALLBACK_RETRY_MS, 10) || 10000);
-const CALLBACK_MAX_ATTEMPTS = Math.max(1, parseInt(MOCK_CALLBACK_MAX_ATTEMPTS, 10) || 24);
-
-const SESSION_TIMEOUT_SECS = (() => {
-  const n = parseInt(MOCK_SESSION_TIMEOUT_SECS, 10);
-  return Number.isFinite(n) && n >= 1 ? n : 1200;
-})();
+// Семантика нуля (PB-11) явная: RETRY_MS=0 — повтор без паузы (на следующем
+// тике очереди), MAX_ATTEMPTS ниже 1 — не определён (WARN, ровно одна попытка
+// без ретраев). Выключить уведомления целиком — сценарий webhook-drop, а не env.
+const CALLBACK_RETRY_MS = envNumber('MOCK_CALLBACK_RETRY_MS', MOCK_CALLBACK_RETRY_MS, 10000, { unit: 'мс' });
+const CALLBACK_MAX_ATTEMPTS = envNumber('MOCK_CALLBACK_MAX_ATTEMPTS', MOCK_CALLBACK_MAX_ATTEMPTS, 24, { min: 1 });
+const SESSION_TIMEOUT_SECS = envSeconds('MOCK_SESSION_TIMEOUT_SECS', MOCK_SESSION_TIMEOUT_SECS, 1200);
 
 // Лимит orderNumber — интерпретация мока по общей практике RBS (в конспекте
 // не зафиксирован; см. protocols/alfa-eacq.json limits.orderNumberNote).
@@ -206,8 +247,15 @@ function createInitialAlfaState({ seed = 0 } = {}) {
 }
 
 /** Лимит документов песочницы (F-15): всё, что растёт от запросов интегратора. */
+/**
+ * Квота документов песочницы (PB-12, F-14/F-15): документы мерчанта — заказы
+ * и записи очереди callback. `orderNumbers` — внутренний индекс уникальности
+ * (orderNumber -> orderId), а не документ: его учёт давал двойное списание
+ * квоты на одну регистрацию (заказ + индекс), поэтому индекс исключён —
+ * «документ = заказ», как у tbank (`payments` + `notifications`).
+ */
 function countAlfaDocuments(snapshot) {
-  return ['orders', 'orderNumbers', 'callbacks']
+  return ['orders', 'callbacks']
     .reduce((sum, key) => sum + Object.keys(snapshot[key] || {}).length, 0);
 }
 
@@ -530,6 +578,19 @@ const deliveryQueue = core.createDeliveryQueue({
   onFailure: (entry, status, body) => {
     entry.lastStatus = status;
     entry.lastBody = body;
+    // PG-07: отказ SSRF-политики — терминальное состояние, а не сетевой сбой.
+    // Ядро ретраит любой throw (24×10 с по умолчанию), но приватность цели от
+    // повтора не меняется: цикл только жжёт интервал и держит запись «в полёте».
+    // Маркер ядро кладёт первым аргументом в формате `ERR <code>: <message>`
+    // (deliverOne: `ERR ${e.code}: ${e.message}`), webhookDiagnosticBody его не
+    // редактирует (лимит 1024 символа — не срабатывает). `due()` такие записи
+    // (dumped) уже пропускает. Ядро createDeliveryQueue не трогаем (PG-07).
+    if (String(status).includes('ERR SSRF_BLOCKED')) {
+      entry.dumped = true;
+      entry.nextAttemptAt = null;
+      log(`callback ${entry.id} не доставлен: цель заблокирована политикой SSRF (${entry.url}) — повтор не имеет смысла, терминальный статус зафиксирован`);
+      return;
+    }
     if (entry.attempts >= CALLBACK_MAX_ATTEMPTS) {
       entry.dumped = true;
       log(`callback ${entry.id} сброшен после ${entry.attempts} попыток`);
@@ -1170,6 +1231,26 @@ function handleRefund(body, spec) {
 }
 
 /* ------------------------------------------------------- платёжная страница */
+
+/**
+ * PG-08/MS-16: HTML отдаётся с security-заголовками (XFO/CSP/Referrer-Policy/
+ * nosniff + no-store): страница оплаты содержит формы, а `form-action 'self'`
+ * закрывает подмену назначения отправки. Набор — тот же, что у `/admin`;
+ * `Cache-Control: no-store, private` — чтобы карточные формы не залипали в
+ * кэше посредника. Политика не задаёт default-src: inline-стили страниц
+ * остаются рабочими.
+ */
+const PAGE_SECURITY_HEADERS = {
+  'Cache-Control': 'no-store, private',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'no-referrer',
+  'Content-Security-Policy': "form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+  'X-Content-Type-Options': 'nosniff',
+};
+
+function sendPage(res, body, code = 200) {
+  return send(res, code, body, { 'Content-Type': 'text/html; charset=utf-8', ...PAGE_SECURITY_HEADERS });
+}
 
 function page(body) {
   return `<!doctype html><html lang="ru"><head><meta charset="utf-8">
@@ -1874,13 +1955,7 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
   /* ------------------------------------------------------ admin-консоль */
 
   if (req.method === 'GET' && p === '/admin') {
-    return send(res, 200, adminPage(req), {
-      'Content-Type': 'text/html; charset=utf-8',
-      'Cache-Control': 'no-store, private',
-      'X-Frame-Options': 'DENY',
-      'Referrer-Policy': 'no-referrer',
-      'Content-Security-Policy': "form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
-    });
+    return sendPage(res, adminPage(req));
   }
 
   if (req.method === 'POST' && p === '/admin/action') {
@@ -1909,14 +1984,14 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
   const formMatch = p.match(/^\/payment\/([A-Za-z0-9-]+)$/);
   if (formMatch && req.method === 'GET') {
     const order = findOrder(decodeURIComponent(formMatch[1]));
-    if (!order) return send(res, 404, page('<span class="logo">А · мок</span><h1>Заказ не найден</h1><div class="muted">Проверьте orderId в formUrl из ответа register.do.</div>'));
+    if (!order) return sendPage(res, page('<span class="logo">А · мок</span><h1>Заказ не найден</h1><div class="muted">Проверьте orderId в formUrl из ответа register.do.</div>'), 404);
     // Просрочка сессии до тика: отклоняем здесь же (declinedByTimeout).
     if ((order.status === 0 || order.status === 5) && order.expiresAtMs && clock.now() >= order.expiresAtMs) {
       declineByTimeout(order);
     }
-    if (order.status === 0) return html(res, formPage(order, null));
-    if (order.status === 5) return html(res, acsPage(order, null));
-    return html(res, statusPage(order, null));
+    if (order.status === 0) return sendPage(res, formPage(order, null));
+    if (order.status === 5) return sendPage(res, acsPage(order, null));
+    return sendPage(res, statusPage(order, null));
   }
 
   const payMatch = p.match(/^\/payment\/([A-Za-z0-9-]+)\/pay$/);
@@ -1925,7 +2000,7 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
     if (!order || order.status !== 0) return send(res, 404, 'Платёжная сессия не найдена или уже завершена');
     if (order.expiresAtMs && clock.now() >= order.expiresAtMs) {
       declineByTimeout(order);
-      return html(res, statusPage(order, 'Срок оплаты истёк (sessionTimeoutSecs) — заказ отклонён: declinedByTimeout.'));
+      return sendPage(res, statusPage(order, 'Срок оплаты истёк (sessionTimeoutSecs) — заказ отклонён: declinedByTimeout.'));
     }
     const spec = resolveRequestSpec('pay', req, body, { orderId: order.orderId, orderNumber: order.orderNumber });
     if (spec.has('fail')) {
@@ -1933,8 +2008,8 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
       return send(res, 302, '', { Location: order.failUrl || order.returnUrl });
     }
     const result = processCardPay(order, body, spec);
-    if (result.stage === 'form') return html(res, formPage(order, result.error));
-    if (result.stage === '3ds') return html(res, acsPage(order, null));
+    if (result.stage === 'form') return sendPage(res, formPage(order, result.error));
+    if (result.stage === '3ds') return sendPage(res, acsPage(order, null));
     return send(res, 302, '', { Location: result.redirect });
   }
 
@@ -1944,11 +2019,11 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
     if (!order || order.status !== 5) return send(res, 404, 'Сессия 3DS не найдена или уже завершена');
     if (order.expiresAtMs && clock.now() >= order.expiresAtMs) {
       declineByTimeout(order);
-      return html(res, statusPage(order, 'Срок оплаты истёк (sessionTimeoutSecs) — заказ отклонён: declinedByTimeout.'));
+      return sendPage(res, statusPage(order, 'Срок оплаты истёк (sessionTimeoutSecs) — заказ отклонён: declinedByTimeout.'));
     }
     const spec = resolveRequestSpec('3ds', req, body, { orderId: order.orderId, orderNumber: order.orderNumber });
     const result = process3ds(order, body, spec);
-    if (result.stage === 'form') return html(res, acsPage(order, result.error));
+    if (result.stage === 'form') return sendPage(res, acsPage(order, result.error));
     return send(res, 302, '', { Location: result.redirect });
   }
 

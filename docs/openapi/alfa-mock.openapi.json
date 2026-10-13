@@ -459,6 +459,34 @@
         "responses": { "200": { "description": "{entries:[…]}" }, "401": { "description": "Требуется токен." } }
       }
     },
+    "/admin/action": {
+      "post": {
+        "tags": ["Служебные"],
+        "summary": "Действия консоли: deposit-order, reverse-order, expire-order, duplicate-callback",
+        "description": "Mock-расширение админ-консоли (не часть контракта банка). Требует same-origin и CSRF-токен `_csrf` из формы `/admin`; без него — 403. Ответ 302 на /admin; действие expire-order даёт declinedByTimeout, duplicate-callback кладёт в очередь копию доставленного callback.",
+        "security": [{ "adminToken": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "required": ["_csrf", "action"],
+                "properties": {
+                  "_csrf": { "type": "string", "description": "CSRF-токен формы /admin (привязан к песочнице)" },
+                  "action": { "type": "string", "enum": ["deposit-order", "reverse-order", "expire-order", "duplicate-callback"] },
+                  "id": { "type": "string", "description": "orderId для *-order либо id записи callback для duplicate-callback" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "302": { "description": "Действие выполнено, редирект на /admin." },
+          "403": { "description": "Запрос не same-origin или отсутствует/неверен CSRF-токен." }
+        }
+      }
+    },
     "/mock/time": {
       "get": {
         "tags": ["Управление"],

@@ -839,6 +839,10 @@ async function main() {
       const logText = logChild.output();
       const okLog = logText.includes('basic auth: shopId=YOOKASSAMOCKTEST') && logText.includes('mockpass123');
       check('стартовый лог печатает креды', okLog, logText.slice(0, 300));
+      // PF-02 (расширение волны #58): префикс строк — [yookassa-mock …], не [mock].
+      check('PF-02: лог использует префикс [yookassa-mock], вхождений [mock] нет',
+        logText.includes('[yookassa-mock') && !logText.includes('[mock]'),
+        (logText.split('\n').find((l) => l.includes('yookassa-mock')) || '').slice(0, 120));
     } finally {
       await logChild.stop();
     }
