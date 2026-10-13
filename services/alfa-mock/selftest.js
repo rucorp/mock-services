@@ -284,6 +284,22 @@ function startChild(env = {}) {
   return { proc, port, output: () => fullLog, stop };
 }
 
+/**
+ * Дождаться, пока стартовый лог дочернего стенда получит нужные строки.
+ * `port` резолвится по строке «on http://…», которая печатается РАНЬШЕ резюме
+ * (creds/callbacks/session_timeout); под нагрузкой контейнера снимок output()
+ * сразу после port их не застаёт — гонка PB-11/PG-02 (флейки main-прогонов
+ * #93/#94). Предикат — точные ожидания проверок; таймаут = честный провал.
+ */
+async function waitForLog(child, predicate, timeoutMs = 5000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    if (predicate(child.output())) return true;
+    await sleep(25);
+  }
+  return predicate(child.output());
+}
+
 /** Проверка provider-shaped ошибки: HTTP 200 + {errorCode, errorMessage} + DX hint/doc. */
 function checkError(name, r, { code, field, status = 200 } = {}) {
   const j = r.json() || {};
@@ -947,6 +963,7 @@ async function main() {
       String((preAuthOff.json() || {}).hint || '').includes('MOCK_TWO_STAGE') && String((preAuthOff.json() || {}).errorMessage).includes('не подключена'));
     const regStillOk = await rest(portTwo, 'register.do', { ...CREDS, orderNumber: nextOrderNumber('two-off-ok'), amount: '1000', returnUrl: 'https://shop.test/ok' });
     check('одностадийная регистрация при выключенной двухстадийной схеме работает', (regStillOk.json() || {}).errorCode === 0);
+    await waitForLog(childTwo, (o) => /creds: userName=/.test(o) && o.includes('вне области: асимметричный checksum'));
     check('стартовый лог печатает СИНТЕТИЧЕСКИЕ креды (требование #41)',
       childTwo.output().includes('userName=ALFAMOCKTEST') && childTwo.output().includes('password=mockpass123')
       && childTwo.output().includes('СИНТЕТИЧЕСКИЕ') && childTwo.output().includes('TBANKMOCKTEST'),
@@ -1018,6 +1035,7 @@ async function main() {
       check(`PG-01 [${label}]: фактические креды по-прежнему авторизуют (register.do → orderId)`,
         Boolean((pgOk.json() || {}).orderId), String(pgOk.body).slice(0, 120));
       check(`PG-01 [${label}]: успешный ответ тоже без кредов`, leaks(pgOk.body).length === 0);
+      await waitForLog(childPg, (o) => /creds: userName=/.test(o) && /отказ авторизации/.test(o));
       const pgLog = childPg.output();
       check(`PG-02 [${label}]: стартовый лог содержит строку creds и не содержит фактических кредов`,
         /creds: userName=/.test(pgLog) && leaks(pgLog).length === 0, JSON.stringify(leaks(pgLog)));
@@ -1031,6 +1049,7 @@ async function main() {
       children.push(childDef);
       const portDef = await childDef.port;
       const defBad = await rest(portDef, 'register.do', { orderNumber: nextOrderNumber(), amount: '10000', returnUrl: 'https://shop.test/ok', userName: 'ALFAMOCKTEST', password: 'wrong-pass' });
+      await waitForLog(childDef, (o) => /creds: userName=/.test(o) && o.includes('вне области: асимметричный checksum'));
       check('PG-02 (контроль): без env стартовый лог печатает синтетические дефолты',
         childDef.output().includes('userName=ALFAMOCKTEST password=mockpass123 callback_secret=mocksecret123'));
       check('PG-01 (контроль): без env hint по-прежнему называет синтетические дефолты',
@@ -1387,6 +1406,7 @@ async function main() {
       });
       children.push(childEnvConf);
       const portEnvConf = await childEnvConf.port;
+      await waitForLog(childEnvConf, (o) => /session_timeout=3600s/.test(o) && /retry 3600000ms x1/.test(o) && /WARN MOCK_CALLBACK_MAX_ATTEMPTS=0/.test(o));
       const logEnvConf = childEnvConf.output();
       check('PB-11: MOCK_SESSION_TIMEOUT_SECS=1h -> session_timeout=3600s (не 1 с)',
         /session_timeout=3600s/.test(logEnvConf), (logEnvConf.match(/session_timeout=\S+/) || [''])[0]);
@@ -1429,6 +1449,7 @@ async function main() {
       });
       children.push(childZero);
       const portZero = await childZero.port;
+      await waitForLog(childZero, (o) => /retry 0ms x3/.test(o));
       check('PB-11: RETRY_MS=0 честно доезжает до конфига (retry 0ms x3, не 10000ms)',
         /retry 0ms x3/.test(childZero.output()), (childZero.output().match(/retry \d+ms x\d+/) || [''])[0]);
       await fullFlow(portZero, { pan: CARD_3DS2_FRICTIONLESS, orderNumber: nextOrderNumber('zero'), amount: 1000 });
