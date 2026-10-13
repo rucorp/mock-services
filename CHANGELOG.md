@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+_(заполняется следующей волной)_
+
+## [0.6.0] — 2026-10-13
+
 ### Added
 - **Четвёртый внешний банк-адаптер — ВТБ SMB E-commerce API (Stage 2, #87).** Новый zero-dependency `services/vtb-mock`: JSON `/openapi/smb/efcp/e-commerce/v1/` (НЕ legacy RBS): OAuth 2.0 `client_credentials` (`POST /passport/oauth2/token`, form-urlencoded, `expires_in` ≈170 с на виртуальных часах) + бизнес-заголовки `Authorization: Bearer` и `X-IBM-Client-Id` (client_id lowercase, без `@ext.vtb.ru`); `POST/GET /orders`, `orders/preauth` (`twoStageParams`), `orders/complete/{orderId}` ≤ авторизации, `orders/{orderId}/cancel`, `POST/GET /refunds`; `amount.value` — десятичные рубли (`10.56`), статусы ордера `CREATED/PAID/REFUNDED/PARTIALLY_REFUNDED/CANCELED` и операций `NEW/CONFIRMED/RECONCILED` — `status.value` строго на своём уровне; повтор `orderId` идемпотентен, дубль `refundId` — ошибка; ордер живёт 20 минут. Hosted-страница оплаты `payUrl` с синтетическими [FORK]-картами (официальная тестовая карта ВТБ истекла, PAN не хранится). Callback — unsigned JSON POST `{"type":"PAYMENT|REFUND","object":{…}}`: расхождение ключей `Status`/`status` сохраняется как есть, ACK и расписание ретраев публично не зафиксированы — мок отвечает 2xx без выдуманной подписи [FORK]/[VERIFY]. Синтетические дефолты кредов `vtbmocktest`/`mockpass123`; per-sandbox сценарии/журнал/часы, terminal SSRF refusal, control-plane tokens и RFC-001 runtime.
   Манифест `protocols/vtb-smb.json`, OpenAPI 3.1, секция `check:drift`, `test:vtb` включён в `npm test` и CI, compose/include + healthcheck :3106, Docker smoke, root/service README и гайд `docs/integration/vtb.md`. Вне области: legacy RBS, СБП-QR (помечен), мультиресурсность `Merchant-Authorization`. Регресс/selftest: `services/vtb-mock/selftest.js`.
