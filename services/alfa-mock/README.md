@@ -34,8 +34,10 @@ npm run start:alfa          # http://localhost:3104
 docker compose up -d        # alfa-mock на :3104
 ```
 
-Zero npm dependencies, Node ≥ 18. Стартовый лог печатает **синтетические**
-креды стенда, режим checksum, флаги двухстадийной схемы и ретраев.
+Zero npm dependencies, Node ≥ 18. Стартовый лог печатает **синтетические
+дефолты** кредов (если значение задано через env — `<задан через env, скрыт>`,
+фактическое значение не печатается), режим checksum, флаги двухстадийной схемы и
+ретраев.
 
 ## API
 
@@ -69,6 +71,10 @@ checksum `mocksecret123`. Они **сконструированы по обра�
 (`docs/reference/alfa/03-test-contour.md`). Переопределение —
 `MOCK_ALFA_USERNAME`, `MOCK_ALFA_PASSWORD`, `MOCK_ALFA_CALLBACK_SECRET`;
 в owned-песочницах у каждого арендатора свои креды (`POST /sandboxes`).
+
+Фактические креды (env или per-sandbox) **не попадают ни в HTTP-ответы, ни в
+stdout**: hint ошибки `errorCode=2` называет только синтетические дефолты
+(PG-01/PG-02).
 
 ## Состояния заказа (`orderStatus`)
 

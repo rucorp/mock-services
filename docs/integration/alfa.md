@@ -34,10 +34,10 @@ docker compose up -d alfa-mock        # http://localhost:3104
 # или без docker: npm run start:alfa
 ```
 
-Стартовый лог печатает реквизиты стенда:
+Стартовый лог печатает синтетические дефолты стенда (значения, заданные через env, скрыты — `<задан через env, скрыт>`):
 
 ```
-creds: userName=ALFAMOCKTEST password=mockpass123 callback_secret=mocksecret123 (СИНТЕТИЧЕСКИЕ, по образцу TBANKMOCKTEST; ...)
+creds: userName=ALFAMOCKTEST password=mockpass123 callback_secret=mocksecret123 (дефолты СИНТЕТИЧЕСКИЕ, по образцу TBANKMOCKTEST; ...)
 ```
 
 **Это синтетические креды мока, а не реквизиты банка.** Реальные тестовые

@@ -121,10 +121,21 @@ const {
  * подключении, и ставить их в дефолты конфига нельзя
  * (docs/reference/alfa/03-test-contour.md).
  */
-const USER_NAME_CRED = MOCK_ALFA_USERNAME || ALFA_USERNAME || 'ALFAMOCKTEST';
-const PASSWORD_CRED = MOCK_ALFA_PASSWORD || ALFA_PASSWORD || 'mockpass123';
+const DEFAULT_USER_NAME = 'ALFAMOCKTEST';
+const DEFAULT_PASSWORD = 'mockpass123';
 // Секрет симметричного checksum (HMAC-SHA256) — тоже синтетический.
-const CALLBACK_SECRET_CRED = MOCK_ALFA_CALLBACK_SECRET || ALFA_CALLBACK_SECRET || 'mocksecret123';
+const DEFAULT_CALLBACK_SECRET = 'mocksecret123';
+const USER_NAME_CRED = MOCK_ALFA_USERNAME || ALFA_USERNAME || DEFAULT_USER_NAME;
+const PASSWORD_CRED = MOCK_ALFA_PASSWORD || ALFA_PASSWORD || DEFAULT_PASSWORD;
+const CALLBACK_SECRET_CRED = MOCK_ALFA_CALLBACK_SECRET || ALFA_CALLBACK_SECRET || DEFAULT_CALLBACK_SECRET;
+
+/*
+ * PG-01/PG-02: наружу (HTTP-ответы, hint, stdout) уходят ТОЛЬКО синтетические
+ * дефолты DEFAULT_*. Фактические значения (env или per-sandbox creds) —
+ * USER_NAME_CRED/PASSWORD_CRED/CALLBACK_SECRET_CRED, alfaUserName()/alfaPassword()
+ * — используются лишь для сравнения и подписи checksum и нигде не печатаются.
+ */
+const credLogView = (actual, dflt) => (actual === dflt ? dflt : '<задан через env, скрыт>');
 
 // Публичный адрес стенда: от него строится formUrl платёжной страницы.
 const PUBLIC_BASE_URL = String(MOCK_PUBLIC_BASE_URL || '').trim() || `http://localhost:${MOCK_PORT}`;
@@ -452,14 +463,14 @@ function verifyCreds(body) {
     log(`отказ авторизации: userName=${core.maskPiiValue('login', givenUser)} не найден`);
     return aerrBody(2, 'Merchant-логин не найден', {
       field: 'userName',
-      hint: `userName не совпадает с кредами стенда (дефолт ${USER_NAME_CRED} — синтетический, по образцу TBANKMOCKTEST). Свои креды — MOCK_ALFA_USERNAME/MOCK_ALFA_PASSWORD; в owned-песочнице — creds из POST /sandboxes. Реальные тестовые креды банка выдаются индивидуально и в дефолтах мока не используются.`,
+      hint: `userName не совпадает с кредами стенда (дефолт ${DEFAULT_USER_NAME} — синтетический, по образцу TBANKMOCKTEST; действует, только если не переопределён env). Свои креды — MOCK_ALFA_USERNAME/MOCK_ALFA_PASSWORD; в owned-песочнице — creds из POST /sandboxes. Реальные тестовые креды банка выдаются индивидуально и в дефолтах мока не используются.`,
     });
   }
   if (!constantTimeEqual(givenPass, alfaPassword())) {
     log(`отказ авторизации: неверный password для userName=${core.maskPiiValue('login', givenUser)}`);
     return aerrBody(2, 'Неверный пароль', {
       field: 'password',
-      hint: `password не совпадает с паролем стенда. Дефолты мока — синтетические (${USER_NAME_CRED}/${PASSWORD_CRED} по образцу TBANKMOCKTEST), печатаются в стартовом логе; переопределяются MOCK_ALFA_PASSWORD (в owned-песочнице — POST /sandboxes/me/reset-creds).`,
+      hint: `password не совпадает с паролем стенда. Дефолты мока — синтетические (${DEFAULT_USER_NAME}/${DEFAULT_PASSWORD} по образцу TBANKMOCKTEST; действуют, только если не переопределены env); переопределяются MOCK_ALFA_PASSWORD (в owned-песочнице — POST /sandboxes/me/reset-creds).`,
     });
   }
   return null;
@@ -2071,7 +2082,7 @@ if (require.main === module) {
     log(`alfa-mock (Альфа-Банк, интернет-эквайринг REST /payment/rest/*.do) on http://${MOCK_HOST}:${port}`);
     // Синтетические креды мока — их нужно вписывать в интеграцию; реальные
     // тестовые креды банка выдаются индивидуально и в дефолтах НЕ используются.
-    log(`creds: userName=${USER_NAME_CRED} password=${PASSWORD_CRED} callback_secret=${CALLBACK_SECRET_CRED} (СИНТЕТИЧЕСКИЕ, по образцу TBANKMOCKTEST; MOCK_ALFA_USERNAME/MOCK_ALFA_PASSWORD/MOCK_ALFA_CALLBACK_SECRET переопределяют)`);
+    log(`creds: userName=${credLogView(USER_NAME_CRED, DEFAULT_USER_NAME)} password=${credLogView(PASSWORD_CRED, DEFAULT_PASSWORD)} callback_secret=${credLogView(CALLBACK_SECRET_CRED, DEFAULT_CALLBACK_SECRET)} (дефолты СИНТЕТИЧЕСКИЕ, по образцу TBANKMOCKTEST; значения, заданные через MOCK_ALFA_USERNAME/MOCK_ALFA_PASSWORD/MOCK_ALFA_CALLBACK_SECRET, не печатаются)`);
     log(`callbacks: GET + checksum ${CHECKSUM_ENABLED ? 'HMAC-SHA256 (симметричный; асимметричный вне области — см. README)' : 'ВЫКЛЮЧЕН (MOCK_CALLBACK_CHECKSUM=false)'} · retry ${CALLBACK_RETRY_MS}ms x${CALLBACK_MAX_ATTEMPTS} (ACK ровно 200; параметры ретраев PDF не задаёт — это mock-конфиг)${process.env.MOCK_DEFAULT_CALLBACK_URL ? ` · default ${process.env.MOCK_DEFAULT_CALLBACK_URL}` : ' · default none (jsonParams.callback_url или MOCK_DEFAULT_CALLBACK_URL)'}`);
     log(`two-stage=${TWO_STAGE} (MOCK_TWO_STAGE) partial-refund=${PARTIAL_REFUND} ssl-permitted=${SSL_PERMITTED} session_timeout=${SESSION_TIMEOUT_SECS}s terminal=${TERMINAL_ID}`);
     log(`tenancy=${TENANCY} public_base=${PUBLIC_BASE_URL} state=${MOCK_STATE_FILE || 'memory'}`);

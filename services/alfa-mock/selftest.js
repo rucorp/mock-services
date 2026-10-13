@@ -958,6 +958,55 @@ async function main() {
     check('неподписанный callback: статус сверяется через REST (orderStatus=2)', flowNoCs.status.orderStatus === 2);
     await childNoChecksum.stop();
 
+    /* ------------------------------ PG-01 / PG-02: фактические креды не утекают */
+    console.log('— PG-01/PG-02: кастомные env-креды не попадают ни в ответ (hint), ни в stdout');
+    for (const [label, envSet] of [
+      ['MOCK_ALFA_*', { MOCK_ALFA_USERNAME: 'SENTINEL-USER-pg01', MOCK_ALFA_PASSWORD: 'SENTINEL-PASS-pg01', MOCK_ALFA_CALLBACK_SECRET: 'SENTINEL-SECRET-pg02' }],
+      ['ALFA_* (алиасы)', { ALFA_USERNAME: 'SENTINEL-USER-pg01', ALFA_PASSWORD: 'SENTINEL-PASS-pg01', ALFA_CALLBACK_SECRET: 'SENTINEL-SECRET-pg02' }],
+    ]) {
+      const childPg = startChild(envSet);
+      children.push(childPg);
+      const portPg = await childPg.port;
+      const sentinels = ['SENTINEL-USER-pg01', 'SENTINEL-PASS-pg01', 'SENTINEL-SECRET-pg02'];
+      const leaks = (text) => sentinels.filter((v) => String(text).includes(v));
+      const base = { orderNumber: nextOrderNumber(), amount: '10000', returnUrl: 'https://shop.test/ok' };
+      const pgNoCreds = await rest(portPg, 'register.do', base);
+      const pgBadUser = await rest(portPg, 'register.do', { ...base, userName: 'wrong-user', password: 'wrong-pass' });
+      const pgBadPass = await rest(portPg, 'register.do', { ...base, userName: 'SENTINEL-USER-pg01', password: 'wrong-pass' });
+      const pgDefaults = await rest(portPg, 'register.do', { ...base, ...CREDS });
+      checkError(`PG-01 [${label}]: неверный userName`, pgBadUser, { code: 2, field: 'userName' });
+      checkError(`PG-01 [${label}]: неверный password`, pgBadPass, { code: 2, field: 'password' });
+      checkError(`PG-01 [${label}]: дефолтные креды при env-кредах отклонены`, pgDefaults, { code: 2 });
+      check(`PG-01 [${label}]: ответы errorCode=2 (3 пробы + пустые креды) не содержат фактических кредов`,
+        [pgNoCreds, pgBadUser, pgBadPass, pgDefaults].every((r) => leaks(r.body).length === 0),
+        JSON.stringify([pgNoCreds, pgBadUser, pgBadPass, pgDefaults].map((r) => leaks(r.body))));
+      check(`PG-01 [${label}]: hint называет только синтетические дефолты`,
+        String((pgBadPass.json() || {}).hint || '').includes('ALFAMOCKTEST') && String((pgBadUser.json() || {}).hint || '').includes('ALFAMOCKTEST'));
+      // Креды при этом работают (сравнение и checksum не сломаны).
+      const pgOk = await rest(portPg, 'register.do', { ...base, orderNumber: nextOrderNumber(), userName: 'SENTINEL-USER-pg01', password: 'SENTINEL-PASS-pg01' });
+      check(`PG-01 [${label}]: фактические креды по-прежнему авторизуют (register.do → orderId)`,
+        Boolean((pgOk.json() || {}).orderId), String(pgOk.body).slice(0, 120));
+      check(`PG-01 [${label}]: успешный ответ тоже без кредов`, leaks(pgOk.body).length === 0);
+      const pgLog = childPg.output();
+      check(`PG-02 [${label}]: стартовый лог содержит строку creds и не содержит фактических кредов`,
+        /creds: userName=/.test(pgLog) && leaks(pgLog).length === 0, JSON.stringify(leaks(pgLog)));
+      check(`PG-02 [${label}]: лог отказов авторизации не содержит фактических кредов (userName замаскирован)`,
+        /отказ авторизации/.test(pgLog) && leaks(pgLog).length === 0);
+      await childPg.stop();
+    }
+    {
+      // Контроль: при дефолтах hint и лог показывают синтетические дефолты.
+      const childDef = startChild({});
+      children.push(childDef);
+      const portDef = await childDef.port;
+      const defBad = await rest(portDef, 'register.do', { orderNumber: nextOrderNumber(), amount: '10000', returnUrl: 'https://shop.test/ok', userName: 'ALFAMOCKTEST', password: 'wrong-pass' });
+      check('PG-02 (контроль): без env стартовый лог печатает синтетические дефолты',
+        childDef.output().includes('userName=ALFAMOCKTEST password=mockpass123 callback_secret=mocksecret123'));
+      check('PG-01 (контроль): без env hint по-прежнему называет синтетические дефолты',
+        String((defBad.json() || {}).hint || '').includes('ALFAMOCKTEST/mockpass123'));
+      await childDef.stop();
+    }
+
     /* --------------------------------------- owned-песочницы (дочерний процесс) */
     console.log('— песочницы (owned): свои userName/password/callbackSecret, ownerToken, изоляция');
     const childOwned = startChild({ MOCK_TENANCY: 'owned', MOCK_SANDBOX_TOKEN: 'root-owner-token' });
