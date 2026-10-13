@@ -1,7 +1,7 @@
 # © 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0
 # SPDX-License-Identifier: Apache-2.0
 #
-# Внешний compose-файл мок-контура (банк + касса + ЮKassa + АТОЛ Онлайн + Альфа-Банк + Сбер Ecom)
+# Внешний compose-файл мок-контура (банк + касса + ЮKassa + АТОЛ Онлайн + Альфа-Банк + Сбер Ecom + ВТБ SMB)
 # для подключения в приложение-потребитель
 # (например, lovii-core на dev-стенде и staging).
 #
@@ -10,10 +10,11 @@
 #      в production (без COMPOSE_PROFILES=mock или `--profile mock`) ни один мок-контейнер
 #      не создаётся и не запускается.
 #   2. Имена сервисов фиксированы (`tbank-mock`, `kassa-mock`, `yookassa-mock`, `atol-mock`,
-#      `alfa-mock`, `sber-mock`) — внутренние URL `http://tbank-mock:3100/v2`,
+#      `alfa-mock`, `sber-mock`, `vtb-mock`) — внутренние URL `http://tbank-mock:3100/v2`,
 #      `http://kassa-mock:3101`, `http://yookassa-mock:3102/v3`,
-#      `http://atol-mock:3103/possystem/v4`, `http://alfa-mock:3104/payment/rest` и
-#      `http://sber-mock:3105/ecomm/gw/partner/api/v1/` не меняются.
+#      `http://atol-mock:3103/possystem/v4`, `http://alfa-mock:3104/payment/rest`,
+#      `http://sber-mock:3105/ecomm/gw/partner/api/v1/` и
+#      `http://vtb-mock:3106/openapi/smb/efcp/e-commerce/v1/` не меняются.
 #   3. Никакие домены потребителя не зашиты: Caddy-лейблы и публичные URL задаются
 #      переменными окружения (по умолчанию пустые / localhost).
 #   4. Релиз закреплён дайджестом (F-37): `MOCK_IMAGE_DIGEST` по умолчанию —
@@ -327,6 +328,57 @@ services:
     mem_limit: "${MOCK_MEM_LIMIT:-128m}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3105,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    restart: unless-stopped
+
+  vtb-mock:
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.5.0}${MOCK_IMAGE_DIGEST-@sha256:403e1bd293c3ba18d345d22612b118b0fe788f83c51ae4b3ee79e70ba216b90d}
+    profiles: ["mock"]
+    working_dir: /app
+    command: ["node", "services/vtb-mock/server.js"]
+    ports:
+      - "${MOCK_VTB_BIND_IP:-127.0.0.1}:${MOCK_VTB_HOST_PORT:-3106}:3106"
+    environment:
+      MOCK_HOST: "0.0.0.0"
+      MOCK_PORT: "3106"
+      MOCK_HEALTH_PATH: "/health"
+      # Синтетические дефолты; реальные тестовые креды ВТБ выдаёт merchant отдельно.
+      MOCK_VTB_CLIENT_ID: "${MOCK_VTB_CLIENT_ID:-vtbmocktest}"
+      MOCK_VTB_CLIENT_SECRET: "${MOCK_VTB_CLIENT_SECRET:-mockpass123}"
+      MOCK_VTB_TOKEN_TTL_SECS: "${MOCK_VTB_TOKEN_TTL_SECS:-170}"
+      MOCK_VTB_PUBLIC_BASE_URL: "${MOCK_VTB_PUBLIC_BASE_URL:-http://localhost:3106}"
+      MOCK_VTB_CALLBACK_URL: "${MOCK_VTB_CALLBACK_URL:-}"
+      MOCK_VTB_CALLBACK_RETRY_MS: "${MOCK_VTB_CALLBACK_RETRY_MS:-60000}"
+      MOCK_VTB_CALLBACK_MAX_ATTEMPTS: "${MOCK_VTB_CALLBACK_MAX_ATTEMPTS:-3}"
+      MOCK_VTB_ORDER_TTL_SECS: "${MOCK_VTB_ORDER_TTL_SECS:-1200}"
+      MOCK_VTB_PREAUTH: "${MOCK_VTB_PREAUTH:-true}"
+      MOCK_SANDBOX_SWEEP_MS: "${MOCK_SANDBOX_SWEEP_MS:-60000}"
+      MOCK_BLOCK_PRIVATE_WEBHOOKS: "${MOCK_BLOCK_PRIVATE_WEBHOOKS:-}"
+      MOCK_VIRTUAL_CLOCK: "${MOCK_VIRTUAL_CLOCK:-}"
+      MOCK_ADMIN_TOKEN: "${MOCK_ADMIN_TOKEN:-}"
+      MOCK_OPERATOR_TOKEN: "${MOCK_OPERATOR_TOKEN:-}"
+      MOCK_HOSTED: "${MOCK_HOSTED:-false}"
+      MOCK_TENANCY: "${MOCK_TENANCY:-}"
+      MOCK_SANDBOX_TOKEN: "${MOCK_SANDBOX_TOKEN:-}"
+      MOCK_SANDBOX_TTL_MS: "${MOCK_SANDBOX_TTL_MS:-}"
+      MOCK_SANDBOX_MAX: "${MOCK_SANDBOX_MAX:-}"
+      MOCK_SANDBOX_MAX_DOCUMENTS: "${MOCK_SANDBOX_MAX_DOCUMENTS:-}"
+      MOCK_SANDBOX_RETENTION_MS: "${MOCK_SANDBOX_RETENTION_MS:-}"
+      MOCK_SANDBOX_HOST_SUFFIX: "${MOCK_SANDBOX_HOST_SUFFIX:-}"
+      MOCK_SANDBOX_CREATE_LIMIT: "${MOCK_SANDBOX_CREATE_LIMIT:-}"
+      MOCK_STATE_FILE: "/data/vtb-state.json"
+      MOCK_SANDBOX_FILE: "/data/vtb-sandboxes.json"
+    volumes:
+      - mock-services-data:/data
+    labels:
+      caddy: "${MOCK_VTB_CADDY_DOMAIN:-}"
+      caddy.reverse_proxy: "{{upstreams 3106}}"
+    mem_limit: "${MOCK_MEM_LIMIT:-128m}"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3106,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 10s
       timeout: 3s
       retries: 3

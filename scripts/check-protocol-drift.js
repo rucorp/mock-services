@@ -11,8 +11,8 @@
  * спецификации OpenAPI 3.1 (`docs/openapi/*.openapi.json`),
  * эталонные выжимки документации (`docs/reference/**`) и фактическую
  * реализацию в `services/tbank-mock/server.js`, `services/kassa-mock/server.js`,
- * `services/atol-mock/server.js`, `services/alfa-mock/server.js` и
- * `services/sber-mock/server.js`.
+ * `services/atol-mock/server.js`, `services/alfa-mock/server.js`,
+ * `services/sber-mock/server.js` и `services/vtb-mock/server.js`.
  *
  * Запуск:
  *   node scripts/check-protocol-drift.js [--json]
@@ -519,6 +519,179 @@ function main() {
     sberReadme.includes('application/json') && sberReadme.includes('без подписи') && sberReadme.includes('paymentOrder.do'),
     'README должен объяснять транспорт, отсутствие подписи и границы scope');
 
+  // 6. Проверка ВТБ SMB E-commerce (vtb-smb.json <-> server.js <-> OpenAPI <-> guide).
+  const vtbManifest = readJson('protocols/vtb-smb.json');
+  const vtbServerCode = readText('services/vtb-mock/server.js');
+  const vtbOpenApi = readJson('docs/openapi/vtb-mock.openapi.json');
+  const vtbGuide = readText(vtbManifest.guide || 'docs/integration/vtb.md');
+  const vtbReadme = readText(vtbManifest.readme || 'services/vtb-mock/README.md');
+
+  for (const docPath of vtbManifest.upstreamDocs || []) {
+    const exists = fs.existsSync(path.join(ROOT, docPath));
+    assertCheck('vtb:docs', docPath, exists, exists ? 'эталонный SMB reference найден' : 'эталонный reference отсутствует');
+  }
+
+  // Needle каждого маршрута — реальная строка server.js (не комментарий).
+  const vtbRouteNeedle = (route) => {
+    const map = {
+      '/openapi/smb/efcp/e-commerce/v1/orders': 're: /^orders$/',
+      '/openapi/smb/efcp/e-commerce/v1/orders/preauth': 'orders\\/preauth$',
+      '/openapi/smb/efcp/e-commerce/v1/orders/complete/{orderId}': 'orders\\/complete\\/([A-Za-z0-9_.-]+)$',
+      '/openapi/smb/efcp/e-commerce/v1/orders/{orderId}/cancel': '\\/cancel$/',
+      '/openapi/smb/efcp/e-commerce/v1/orders/{orderId}': 'orders\\/([A-Za-z0-9_.-]+)$',
+      '/openapi/smb/efcp/e-commerce/v1/refunds': 're: /^refunds$/',
+      '/openapi/smb/efcp/e-commerce/v1/refunds/{refundId}': 'refunds\\/([A-Za-z0-9_.-]+)$',
+      '/pay/{orderId}/pay': 'const paySubmitMatch',
+      '/pay/{orderId}': 'const payMatch',
+    };
+    return map[route] || route;
+  };
+  const vtbRouteDrift = (code, openApi, manifest) => [
+    ...(manifest.routes || []), ...(manifest.formRoutes || []), ...(manifest.mockRoutes || []),
+  ].map((route) => ({
+    route,
+    inServer: code.includes(vtbRouteNeedle(route)),
+    inOpenApi: Boolean(openApi.paths && openApi.paths[route]),
+  }));
+  const vtbControlRouteDrift = (code, openApi, manifest) => (manifest.mockControlRoutes || [])
+    .map((route) => ({
+      route,
+      inServer: code.includes(route),
+      inOpenApi: Boolean(openApi.paths && openApi.paths[route]),
+    }));
+
+  for (const { route, inServer, inOpenApi } of vtbRouteDrift(vtbServerCode, vtbOpenApi, vtbManifest)) {
+    assertCheck('vtb:route', route, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+  for (const { route, inServer, inOpenApi } of vtbControlRouteDrift(vtbServerCode, vtbOpenApi, vtbManifest)) {
+    assertCheck('vtb:control-route', route, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+  {
+    const tokenRoute = vtbManifest.tokenRoute || '/passport/oauth2/token';
+    assertCheck('vtb:token-route', tokenRoute,
+      vtbServerCode.includes(`TOKEN_PATH = '${tokenRoute}'`) && Boolean(vtbOpenApi.paths && vtbOpenApi.paths[tokenRoute]),
+      'token endpoint присутствует в server.js и OpenAPI');
+    assertCheck('vtb:token-route', `POST ${tokenRoute} — form-urlencoded client_credentials`,
+      vtbServerCode.includes('client_credentials') && vtbServerCode.includes('application/x-www-form-urlencoded'),
+      'token endpoint принимает grant_type=client_credentials form-urlencoded');
+  }
+
+  for (const status of Object.keys(vtbManifest.orderStatuses || {})) {
+    const inServer = vtbServerCode.includes(`${status}: '`);
+    const inOpenApi = JSON.stringify((vtbOpenApi.components || {}).schemas || {}).includes(`${status} — `);
+    assertCheck('vtb:order-status', status, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+  for (const status of Object.keys(vtbManifest.operationStatuses || {})) {
+    const inServer = vtbServerCode.includes(`${status}: '`);
+    const inOpenApi = JSON.stringify((vtbOpenApi.components || {}).schemas || {}).includes(`${status} — `);
+    assertCheck('vtb:operation-status', status, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+  for (const type of (vtbManifest.callback || {}).types || []) {
+    const inServer = vtbServerCode.includes(`'${type}'`);
+    const inOpenApi = JSON.stringify((vtbOpenApi.components || {}).schemas || {}).includes(type);
+    assertCheck('vtb:callback-type', type, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+  for (const pan of vtbManifest.testCards || []) {
+    const inServer = vtbServerCode.includes(pan);
+    assertCheck('vtb:test-card', pan, inServer, inServer ? 'синтетическая [FORK]-карта поддерживается' : 'карта не найдена в server.js');
+  }
+  for (const code of vtbManifest.errorCodes || []) {
+    const inServer = vtbServerCode.includes(`'${code}'`);
+    const inOpenApi = JSON.stringify((vtbOpenApi.components || {}).schemas || {}).includes(code);
+    assertCheck('vtb:error-code', code, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+
+  const vtbInvariants = [
+    ['vtb:invariant', 'SMB REST — JSON на versioned base /openapi/smb/efcp/e-commerce/v1/', vtbServerCode.includes("const REST_BASE = '/openapi/smb/efcp/e-commerce/v1/'") && vtbServerCode.includes('application/json')],
+    ['vtb:invariant', 'OAuth2 client_credentials на отдельном token endpoint, обновление по expires_in', vtbServerCode.includes("TOKEN_PATH = '/passport/oauth2/token'") && vtbServerCode.includes('expires_in') && vtbServerCode.includes('client_credentials')],
+    ['vtb:invariant', 'X-IBM-Client-Id — lowercase, без @ext.vtb.ru, только на API', vtbServerCode.includes('x-ibm-client-id') && vtbServerCode.includes('@ext.vtb.ru') && vtbServerCode.includes('toLowerCase')],
+    ['vtb:invariant', 'amount.value — десятичные рубли, не копейки', vtbServerCode.includes('parseAmountRubles') && vtbServerCode.includes('ДЕСЯТИЧНЫЕ')],
+    ['vtb:invariant', 'status.value ордера и операции разделены (не смешивать)', vtbServerCode.includes('ORDER_STATUSES') && vtbServerCode.includes('OPERATION_STATUSES') && vtbServerCode.includes('своём уровне')],
+    ['vtb:invariant', 'callback payload сохраняется как есть: Status/status не нормализуются', vtbServerCode.includes("[lower ? 'status' : 'Status']") && vtbServerCode.includes('регистр ключа')],
+    ['vtb:invariant', 'подпись/ACK не выдумываются: 2xx — локальный [FORK], signature none', vtbServerCode.includes("callbackSignature: 'none'") && vtbServerCode.includes('2xx') && vtbServerCode.includes('[FORK')],
+    ['vtb:invariant', 'SSRF_BLOCKED терминален и без retry', vtbServerCode.includes('ERR SSRF_BLOCKED') && vtbServerCode.includes('терминальный отказ, без повторов')],
+    ['vtb:invariant', 'token TTL живёт на виртуальных часах (expiresIn → expiresAtMs)', vtbServerCode.includes('TOKEN_TTL_DEFAULT_SECS = 170') && vtbServerCode.includes('expiresAtMs: now + TOKEN_TTL_SECS * 1000')],
+    ['vtb:invariant', 'ордер живёт 20 минут (expire с tz/мс)', vtbServerCode.includes('ORDER_TTL_DEFAULT_SECS = 1200') && vtbServerCode.includes('toISOString()')],
+    ['vtb:invariant', 'orderId идемпотентен (X-Mock-Replayed), дубль refundId — ошибка', vtbServerCode.includes('X-Mock-Replayed') && vtbServerCode.includes('duplicate_refund_id')],
+    ['vtb:invariant', 'complete ≤ авторизации; refund ≤ списания', vtbServerCode.includes('превышает авторизацию') && vtbServerCode.includes('превышает остаток списания')],
+    ['vtb:invariant', 'legacy RBS (payment/rest, *.do) не используется', !vtbServerCode.includes('/payment/rest/') && !vtbServerCode.includes('register.do')],
+    ['vtb:invariant', 'дефолтные client_id/clientSecret помечены synthetic', vtbServerCode.includes(vtbManifest.testCredentials.clientId) && vtbServerCode.includes(vtbManifest.testCredentials.clientSecret) && vtbServerCode.includes('СИНТЕТИЧЕСКИЕ')],
+    ['vtb:invariant', 'карточные данные остаются в masked форме', vtbServerCode.includes('function maskPan') && vtbServerCode.includes('cardMask')],
+  ];
+  for (const [category, item, ok] of vtbInvariants) {
+    assertCheck(category, item, Boolean(ok), ok ? 'инвариант соблюдён' : 'инвариант нарушен в server.js');
+  }
+
+  for (const [needle, label] of [
+    ['client_credentials', 'OAuth grant'],
+    ['X-IBM-Client-Id', 'заголовок клиента'],
+    ['@ext.vtb.ru', 'нормализация client_id'],
+    ['expires_in', 'обновление токена'],
+    ['10.56', 'десятичные рубли'],
+    ['payUrl', 'страница оплаты'],
+    ['twoStageParams', 'preauth'],
+    ['cancelReason', 'отмена ордера'],
+    ['duplicate_refund_id', 'дубль refundId'],
+    ['GET /orders/{orderId}', 'GET-сверка'],
+    ['4111', 'истёкшая официальная карта'],
+    ['vtb.rbsuat.com', 'исключение legacy RBS'],
+    ['qr-efcp.bankingapi.ru', 'СБП вне области'],
+    ['[FORK]', 'мок-карты/ошибки'],
+    ['[VERIFY]', 'неполные места среза'],
+    ['170', 'token TTL default'],
+    ['1200', 'order TTL default'],
+  ]) {
+    const inGuide = vtbGuide.includes(needle);
+    assertCheck('vtb:guide-point', `${label} (${needle})`, inGuide, inGuide ? 'есть в docs/integration/vtb.md' : 'гайд не содержит обязательную оговорку');
+  }
+
+  const vtbLimits = vtbManifest.limits || {};
+  assertCheck('vtb:limits', `tokenTtlSecsDefault=${vtbLimits.tokenTtlSecsDefault}`,
+    vtbServerCode.includes(`TOKEN_TTL_DEFAULT_SECS = ${vtbLimits.tokenTtlSecsDefault}`)
+      && vtbGuide.includes(String(vtbLimits.tokenTtlSecsDefault)),
+    'TTL токена совпадает в манифесте, адаптере и guide');
+  assertCheck('vtb:limits', `orderTtlSecsDefault=${vtbLimits.orderTtlSecsDefault}`,
+    vtbServerCode.includes(`ORDER_TTL_DEFAULT_SECS = ${vtbLimits.orderTtlSecsDefault}`)
+      && vtbGuide.includes(String(vtbLimits.orderTtlSecsDefault)),
+    'TTL ордера совпадает в манифесте, адаптере и guide');
+  assertCheck('vtb:limits', `callback retry=${vtbLimits.callbackAttemptsDefault}×${vtbLimits.callbackRetryMsDefault}ms`,
+    vtbServerCode.includes(`MOCK_VTB_CALLBACK_RETRY_MS = '${vtbLimits.callbackRetryMsDefault}'`)
+      && vtbServerCode.includes(`MOCK_VTB_CALLBACK_MAX_ATTEMPTS = '${vtbLimits.callbackAttemptsDefault}'`)
+      && vtbGuide.includes(`${vtbLimits.callbackAttemptsDefault} попытки`),
+    'callback schedule совпадает в manifest, server.js и guide');
+  assertCheck('vtb:limits', `currency=${vtbLimits.currency}`,
+    vtbServerCode.includes(`'${vtbLimits.currency}'`) && vtbGuide.includes('RUB'),
+    'только RUB проверяется в адаптере и guide');
+
+  const vtbIdempotency = vtbManifest.idempotency || {};
+  assertCheck('vtb:idempotency', 'orders: повтор orderId возвращает существующий ордер',
+    vtbServerCode.includes('X-Mock-Replayed') && vtbGuide.includes('идемпотентен'),
+    'идемпотентность orderId закреплена в коде и guide');
+  assertCheck('vtb:idempotency', 'refunds: повторный refundId — provider-shaped ошибка',
+    vtbServerCode.includes('duplicate_refund_id') && vtbGuide.includes('duplicate_refund_id'),
+    'контраст orderId/refundId закреплён в коде и guide');
+  assertCheck('vtb:callback-quirk', `statusKeyQuirk: Status у платежа, status у возврата`,
+    vtbServerCode.includes("[lower ? 'status' : 'Status']") && vtbGuide.includes('Status') && vtbGuide.includes('нормализ'),
+    'quirk ключей статуса зафиксирован в адаптере и guide');
+
+  const emptyVtbRoutes = vtbRouteDrift('', { paths: {} }, vtbManifest);
+  assertCheck('vtb:negative-control', 'пустой server/openapi красит все business/form/mock routes',
+    emptyVtbRoutes.length > 0 && emptyVtbRoutes.every((route) => !route.inServer && !route.inOpenApi),
+    `routes в негативном контроле: ${emptyVtbRoutes.length}`);
+  const emptyVtbControlRoutes = vtbControlRouteDrift('', { paths: {} }, vtbManifest);
+  assertCheck('vtb:negative-control', 'пустой server/openapi красит все control routes',
+    emptyVtbControlRoutes.length > 0 && emptyVtbControlRoutes.every((route) => !route.inServer && !route.inOpenApi),
+    `control routes в негативном контроле: ${emptyVtbControlRoutes.length}`);
+  const emptyVtbOpenApi = { components: {} };
+  const emptyVtbCallbackTypes = ((vtbManifest.callback || {}).types || [])
+    .map((type) => ({ type, inServer: vtbServerCode.includes(`'${type}'`), inOpenApi: JSON.stringify((emptyVtbOpenApi.components || {}).schemas || {}).includes(type) }));
+  assertCheck('vtb:negative-control', 'пустой OpenAPI красит callback types (server остаётся отдельно зелёным)',
+    emptyVtbCallbackTypes.length > 0 && emptyVtbCallbackTypes.every((entry) => entry.inServer && !entry.inOpenApi),
+    `callback types в негативном контроле: ${emptyVtbCallbackTypes.length}`);
+  assertCheck('vtb:readme', 'сервисный README фиксирует OAuth/JSON, Status-status quirk и границы legacy',
+    vtbReadme.includes('client_credentials') && vtbReadme.includes('Status') && vtbReadme.includes('legacy'),
+    'README должен объяснять авторизацию, quirk статусов и границы scope');
+
   const summary = {
     ok: driftIssues.length === 0,
     checkedAt: new Date().toISOString(),
@@ -531,7 +704,7 @@ function main() {
   if (jsonOutput) {
     console.log(JSON.stringify(summary, null, 2));
   } else {
-    console.log(`\n== Protocol Drift Check (tbank-eacq + ferma-ofd + atol-online + alfa-eacq + sber-ecom) ==`);
+    console.log(`\n== Protocol Drift Check (tbank-eacq + ferma-ofd + atol-online + alfa-eacq + sber-ecom + vtb-smb) ==`);
     console.log(`Проверено инвариантов контракта: ${summary.totalChecks}, пройдено: ${summary.passedChecks}, расхождений: ${summary.driftCount}`);
     if (driftIssues.length > 0) {
       console.error('\nОбнаружены расхождения (drift):');
