@@ -842,9 +842,9 @@ function handleRegister(body, spec, twoStage) {
   if (!quota.ok) {
     return {
       status: 200,
-      body: aerr(5, `Лимит документов песочницы исчерпан (${quota.used}/${quota.limit})`, {
+      body: aerr(5, `${quota.kind === 'bytes' ? 'Лимит объёма состояния песочницы исчерпан (байт: ' : 'Лимит документов песочницы исчерпан ('}${quota.used}/${quota.limit}${quota.kind === 'bytes' ? ')' : ''}`, {
         field: 'orderNumber',
-        hint: 'Песочница ограничена по объёму (MOCK_SANDBOX_MAX_DOCUMENTS): сбросьте её (POST /sandboxes/me/reset) или создайте новую (POST /sandboxes).',
+        hint: `${quota.kind === 'bytes' ? 'Песочница ограничена по объёму состояния (байтовая квота, PD-02): сбросьте её (POST /sandboxes/me/reset) или создайте новую (POST /sandboxes).' : 'Песочница ограничена по объёму (MOCK_SANDBOX_MAX_DOCUMENTS): сбросьте её (POST /sandboxes/me/reset) или создайте новую (POST /sandboxes).'}`,
       }),
     };
   }

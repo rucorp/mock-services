@@ -137,8 +137,9 @@ API (в `owned` — с owner-token; в `namespaces` те же маршруты �
 | `GET /sandboxes/me` | своя песочница: состояние, креды, TTL, расход квоты; `POST /sandboxes/me/reset`, `POST /sandboxes/me/reset-creds`, `DELETE /sandboxes/me` |
 
 Owner-token принимается в `Authorization: Bearer`, `X-Sandbox-Token` или
-`?sandbox_token=`. Персистентность: реестр песочниц пишется атомарно в
-`<MOCK_STATE_FILE>.sandboxes.json` (хэши owner-токенов + снимки состояния), а
+`?sandbox_token=`. Персистентность: реестр песочниц пишется атомарно и поштучно —
+по файлу `<MOCK_STATE_FILE>.sandboxes.records/<id>.json` на песочницу (хэши owner-токенов +
+снимки состояния; мутация переписывает только свою песочницу, PD-02), а
 `default` всегда восстанавливается только из `MOCK_STATE_FILE` — состояние
 именованной песочницы не может быть выдано за `default` (F-14). Просроченные
 песочницы удаляет sweep-воркер; квота документов (`MOCK_SANDBOX_MAX_DOCUMENTS`)
@@ -180,7 +181,7 @@ Owner-token принимается в `Authorization: Bearer`, `X-Sandbox-Token`
 | `MOCK_SANDBOX_MAX_DOCUMENTS` | `5000` в hosted, иначе `0` (без лимита) | квота документов песочницы (F-15) |
 | `MOCK_SANDBOX_HOST_SUFFIX` | — | суффикс поддоменов песочниц, напр. `mock-services.dev`: `<id>.mock-services.dev` |
 | `MOCK_SANDBOX_CREATE_LIMIT` | `20` в hosted, иначе `0` | лимит создания песочниц на IP в час |
-| `MOCK_SANDBOX_FILE` | `<MOCK_STATE_FILE>.sandboxes.json` | файл реестра песочниц (owner-токены — только хэши) |
+| `MOCK_SANDBOX_FILE` | `<MOCK_STATE_FILE>.sandboxes.json` | база реестра песочниц: поштучные файлы в каталоге `<база без .json>.records/` (owner-токены — только хэши); legacy-файл `<база>` переносится при старте и переименовывается в `.migrated` |
 | `MOCK_SANDBOX_SWEEP_MS` | `60000` | интервал воркера TTL/retention |
 | `MOCK_SANDBOX_RETENTION_MS` | `0` (выкл.) | retention диагностических записей (доставленные нотификации, завершённые верификации) |
 | `MOCK_AUTO_CONFIRM_MS` | `0` (выкл.) | авто-подтверждение холда через N мс (банк делает это через 4/7 дней) |

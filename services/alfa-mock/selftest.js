@@ -1037,6 +1037,26 @@ async function main() {
       goneA.statusCode === 404 && String((goneA.json() || {}).hint || '').includes('POST /sandboxes'));
     await childOwned.stop();
 
+    /* ------------------------- PD-02: квота состояния песочницы по байтам */
+    console.log('— квота состояния по байтам (PD-02, owned)');
+    const childQuota = startChild({ MOCK_TENANCY: 'owned', MOCK_SANDBOX_TOKEN: 'root-owner-token' });
+    children.push(childQuota);
+    const portQuota = await childQuota.port;
+    const sbxQ = JSON.parse((await request(portQuota, 'POST', '/sandboxes', {})).body);
+    const headersQ = { 'X-Mock-Sandbox': sbxQ.id, 'X-Sandbox-Token': sbxQ.ownerToken };
+    const quotaDescription = 'd'.repeat(2 * 1024 * 1024); // 2 МБ на заказ, тело запроса < 5 МБ
+    const quotaRegs = [];
+    for (let i = 1; i <= 5; i += 1) {
+      quotaRegs.push(await rest(portQuota, 'register.do', { ...sbxQ.creds, orderNumber: `quota-bytes-${i}`, amount: '1000', returnUrl: 'https://shop.test/ok', description: quotaDescription }, headersQ));
+    }
+    check('PD-02: 4 заказа по 2 МБ (≈8 МиБ состояния) проходят квоту документов и байтов',
+      quotaRegs.slice(0, 4).every((r) => (r.json() || {}).errorCode === 0), quotaRegs.slice(0, 4).map((r) => r.body.slice(0, 80)).join(' | '));
+    const overQuota = quotaRegs[4].json() || {};
+    check('PD-02: 5-й заказ отклонён квотой по байтам (errorCode=5, текст про объём состояния, не про документы)',
+      overQuota.errorCode === 5 && /объёма состояния/.test(String(overQuota.errorMessage || '')) && /байт/.test(String(overQuota.errorMessage || '')),
+      quotaRegs[4].body.slice(0, 160));
+    await childQuota.stop();
+
     /* ----------------------------------- control-plane (дочерний процесс) */
     console.log('— control-plane: MOCK_ADMIN_TOKEN / MOCK_OPERATOR_TOKEN, hosted fail-closed');
     const childControl = startChild({ MOCK_ADMIN_TOKEN: 'adm-t', MOCK_OPERATOR_TOKEN: 'op-t' });

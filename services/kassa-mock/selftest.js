@@ -970,8 +970,9 @@ async function main() {
       savedUuid = (await requestOn(child1.port, 'POST', `/possystem/v1/Main/sell?token=${tk}`, validBody('k-persist-1'), { 'X-Mock-Sandbox': 'k-persist' })).json().uuid;
       await waitForCondition(() => {
         try {
-          const registry = JSON.parse(fs.readFileSync(`${stateFile}.sandboxes.json`, 'utf8'));
-          return registry.sandboxes && registry.sandboxes.some((record) => record.id === 'k-persist' && record.state && record.state.receipts && record.state.receipts[savedUuid]);
+          // PD-02: реестр песочниц поштучно — один файл на песочницу
+          const record = JSON.parse(fs.readFileSync(`${stateFile}.sandboxes.records/k-persist.json`, 'utf8')).sandbox;
+          return Boolean(record && record.state && record.state.receipts && record.state.receipts[savedUuid]);
         } catch { return false; }
       }, { description: 'sandbox registry flush before restart' });
     } finally {
@@ -1255,6 +1256,7 @@ async function phaseRestart() {
     await stopChild(child);
     fs.rmSync(stateFile, { force: true });
     fs.rmSync(`${stateFile}.sandboxes.json`, { force: true });
+    fs.rmSync(`${stateFile}.sandboxes.records`, { recursive: true, force: true });
     await new Promise((resolve) => catcher.close(resolve));
   }
 }

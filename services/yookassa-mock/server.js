@@ -422,8 +422,8 @@ function ensureSandboxQuota() {
   const quota = sandboxRuntime.checkDocuments();
   if (quota.ok) return null;
   return yerr('invalid_request', {
-    description: `Sandbox document limit reached (${quota.used}/${quota.limit})`,
-    hint: 'Песочница ограничена по объёму (MOCK_SANDBOX_MAX_DOCUMENTS): сбросьте её (POST /sandboxes/me/reset) или создайте новую (POST /sandboxes).',
+    description: `${quota.kind === 'bytes' ? 'Sandbox state size limit reached (bytes: ' : 'Sandbox document limit reached ('}${quota.used}/${quota.limit}${quota.kind === 'bytes' ? ')' : ''}`,
+    hint: `${quota.kind === 'bytes' ? 'Песочница ограничена по объёму состояния (байтовая квота, PD-02): сбросьте её (POST /sandboxes/me/reset) или создайте новую (POST /sandboxes).' : 'Песочница ограничена по объёму (MOCK_SANDBOX_MAX_DOCUMENTS): сбросьте её (POST /sandboxes/me/reset) или создайте новую (POST /sandboxes).'}`,
     doc: '',
   });
 }
