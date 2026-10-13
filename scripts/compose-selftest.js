@@ -5,7 +5,8 @@
 /*
  * Black-box selftest против поднятого стенда (docker compose / внешние контейнеры).
  * Проверяет сервисы (tbank-mock на :3100, kassa-mock на :3101, yookassa-mock на :3102,
- * atol-mock на :3103, alfa-mock на :3104, sber-mock на :3105, vtb-mock на :3106) снаружи по HTTP:
+ * atol-mock на :3103, alfa-mock на :3104, sber-mock на :3105, vtb-mock на :3106,
+ * first-ofd-mock на :3107) снаружи по HTTP:
  *   1. Healthchecks (/health, /healthz, /health)
  *   2. Т-Банк: Init -> форма оплаты -> Confirm -> Chargeback (DISPUTED -> REPRESENTMENT -> ARBITRATION -> WON) -> виртуальные часы /mock/time -> /admin/journal
  *   3. Ferma (54-ФЗ): getToken -> sell (предоплата с расчётным НДС vat20_120) -> sell (зачёт предоплаты) -> buy (расход) -> маркировка -> очередь ОФД -> печать с ускорением через /mock/time -> /receipts/:uuid
@@ -20,6 +21,9 @@
  *   8. ВТБ SMB E-commerce: OAuth client_credentials -> Bearer + X-IBM-Client-Id -> POST /orders
  *      (десятичные рубли, идемпотентный orderId) -> payUrl -> PAID -> refunds; preauth -> complete;
  *      callback {type,object} без подписи (Status/status не нормализуются).
+ *   9. Первый ОФД (облачная касса OKassa): getToken -> Bearer -> очередь transaction/receipt
+ *      (IN_PROGRESS -> COMPLETED + payload), statuses/receipts, смены (StateCommandRequest)
+ *      и ERROR слоя ККТ; callback без подписи.
  *
  * F-33: прогон выполняется в одноразовой песочнице (X-Mock-Sandbox, в hosted —
  * через POST /sandboxes с owner-token) и убирает её в finally, чтобы повторные
@@ -40,6 +44,7 @@ const ATOL_BASE = (process.env.MOCK_ATOL_URL || 'http://127.0.0.1:3103').replace
 const ALFA_BASE = (process.env.MOCK_ALFA_URL || 'http://127.0.0.1:3104').replace(/\/$/, '');
 const SBER_BASE = (process.env.MOCK_SBER_URL || 'http://127.0.0.1:3105').replace(/\/$/, '');
 const VTB_BASE = (process.env.MOCK_VTB_URL || 'http://127.0.0.1:3106').replace(/\/$/, '');
+const FIRST_OFD_BASE = (process.env.MOCK_FIRST_OFD_URL || 'http://127.0.0.1:3107').replace(/\/$/, '');
 const TERMINAL_KEY = process.env.MOCK_TERMINAL_KEY || 'TBANKMOCKTEST';
 const TERMINAL_PASSWORD = process.env.MOCK_TERMINAL_PASSWORD || 'mockpass123';
 const FERMA_LOGIN = process.env.MOCK_FERMA_LOGIN || 'loviitest';
@@ -62,6 +67,10 @@ const SBER_PASSWORD = process.env.MOCK_SBER_PASSWORD || 'mockpass123';
 const VTB_CLIENT_ID = process.env.MOCK_VTB_CLIENT_ID || 'vtbmocktest';
 const VTB_CLIENT_SECRET = process.env.MOCK_VTB_CLIENT_SECRET || 'mockpass123';
 const VTB_REST_PATH = '/openapi/smb/efcp/e-commerce/v1';
+// Синтетические creds first-ofd-mock (getToken {login, pass}); hosted creds — при provision.
+const FIRST_OFD_LOGIN = process.env.MOCK_FIRST_OFD_LOGIN || 'firstofdmocktest';
+const FIRST_OFD_PASS = process.env.MOCK_FIRST_OFD_PASS || '11111111-2222-4333-8444-555555555555';
+const FIRST_OFD_QUEUE = '/api/external/queue/v1';
 
 /*
  * F-33 (RFC-001 §8): прогон идёт в одноразовой песочнице, чтобы не накапливать
@@ -81,8 +90,9 @@ const SANDBOX = {
   [ALFA_BASE]: { id: SANDBOX_ID, token: '', creds: null },
   [SBER_BASE]: { id: SANDBOX_ID, token: '', creds: null },
   [VTB_BASE]: { id: SANDBOX_ID, token: '', creds: null, accessToken: '' },
+  [FIRST_OFD_BASE]: { id: SANDBOX_ID, token: '', creds: null, accessToken: '' },
 };
-const ALL_BASES = [TBANK_BASE, KASSA_BASE, YOOKASSA_BASE, ATOL_BASE, ALFA_BASE, SBER_BASE, VTB_BASE];
+const ALL_BASES = [TBANK_BASE, KASSA_BASE, YOOKASSA_BASE, ATOL_BASE, ALFA_BASE, SBER_BASE, VTB_BASE, FIRST_OFD_BASE];
 
 /** Заголовки песочницы прогона; вызов может переопределить их (например, default). */
 function sandboxHeaders(baseUrl) {
@@ -212,6 +222,30 @@ async function vtbApi(method, relPath, fields = null, extraHeaders = {}) {
 
 async function vtbPay(orderId, card) {
   return httpReq(VTB_BASE, 'POST', `/pay/${encodeURIComponent(orderId)}/pay`, new URLSearchParams(card).toString());
+}
+
+/** Токен очереди Первого ОФД; кэшируется на прогон (креды песочницы — при provision). */
+async function firstOfdToken() {
+  const slot = SANDBOX[FIRST_OFD_BASE];
+  if (slot.accessToken) return slot.accessToken;
+  const sbxCreds = slot.creds || {};
+  const r = await httpReq(FIRST_OFD_BASE, 'POST', '/getToken', {
+    login: sbxCreds.login || FIRST_OFD_LOGIN,
+    pass: sbxCreds.pass || FIRST_OFD_PASS,
+  }, { 'Content-Type': 'application/json; charset=utf-8' });
+  const j = r.json() || {};
+  slot.accessToken = j.token || '';
+  return slot.accessToken;
+}
+
+/** Запрос к очереди OKassa с Bearer-токеном песочницы (Первый ОФД). */
+async function firstOfdApi(method, pathUrl, body = null, extraHeaders = {}) {
+  const token = await firstOfdToken();
+  return httpReq(FIRST_OFD_BASE, method, pathUrl, body, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Authorization': `Bearer ${token}`,
+    ...extraHeaders,
+  });
 }
 
 /** Выделение песочницы прогона: в owned — POST /sandboxes, в namespaces — селектор. */
@@ -717,10 +751,102 @@ async function scenario(runId) {
   const vtbCancel = (await vtbApi('POST', 'orders', { orderId: `${runId}-vtb-cancel`, orderName: 'x', amount: { value: 3, code: 'RUB' } }));
   const vtbCancelRes = (await vtbApi('POST', `orders/${runId}-vtb-cancel/cancel`, { cancelReason: 'compose' })).json() || {};
   check('vtb cancel CREATED -> CANCELED с cancelReason', vtbCancel.status === 200 && vtbCancelRes.status.value === 'CANCELED');
+
+  // 9. Первый ОФД (облачная касса OKassa): getToken -> Bearer -> асинхронная очередь.
+  const hFirstOfd = await httpReq(FIRST_OFD_BASE, 'GET', '/health');
+  const firstOfdHealth = hFirstOfd.json() || {};
+  check('first-ofd-mock /health === 200 ok (очередь OKassa, callback POST без подписи)',
+    hFirstOfd.status === 200 && firstOfdHealth.ok === true && firstOfdHealth.api === 'okassa-queue'
+    && firstOfdHealth.callbackSignature === 'none' && firstOfdHealth.base === `${FIRST_OFD_QUEUE}/`);
+  const oaFirstOfd = (await httpReq(FIRST_OFD_BASE, 'GET', '/openapi.json')).json() || {};
+  check('first-ofd-mock /openapi.json — OpenAPI 3.1 с transaction/{type} и /api/external/receipts',
+    oaFirstOfd.openapi === '3.1.0' && Boolean(oaFirstOfd.paths && oaFirstOfd.paths[`${FIRST_OFD_QUEUE}/transaction/{type}`] && oaFirstOfd.paths['/api/external/receipts']));
+
+  const foTokenRes = await httpReq(FIRST_OFD_BASE, 'POST', '/getToken', { login: FIRST_OFD_LOGIN, pass: FIRST_OFD_PASS }, { 'Content-Type': 'application/json; charset=utf-8' });
+  const foTok = foTokenRes.json() || {};
+  check('first-ofd getToken -> token (TTL 86400 на виртуальных часах)',
+    foTokenRes.status === 200 && Boolean(foTokenRes.headers['x-mock-token-ttl-secs']) && foTokenRes.headers['x-mock-token-ttl-secs'] === '86400');
+  const foBadToken = (await httpReq(FIRST_OFD_BASE, 'POST', '/getToken', { login: FIRST_OFD_LOGIN, pass: 'wrong' })).json() || {};
+  check('first-ofd getToken с неверным pass -> invalid_credentials', Boolean(foBadToken.error && foBadToken.error.code === 'invalid_credentials'));
+  const foBadBearer = (await httpReq(FIRST_OFD_BASE, 'POST', `${FIRST_OFD_QUEUE}/transaction/receipt`, {
+    cashboxParameters: { userInn: '7842223709' }, requestMetadata: { userGroup: 'MOCKGROUP' },
+    document: { operationType: 'INCOME', items: [{ label: 'Т', measurementUnit: 'шт', price: 1, quantity: 1, vatCode: 'VAT_22' }], totalSum: 1 },
+  }, { 'Authorization': 'Bearer deadbeef' })).json() || {};
+  check('first-ofd API-ключ UUID вместо Bearer -> invalid_token', Boolean(foBadBearer.error && foBadBearer.error.code === 'invalid_token'));
+
+  const foExternalId = `${runId}-fofd-1`;
+  const foCreate = await firstOfdApi('POST', `${FIRST_OFD_QUEUE}/transaction/receipt`, {
+    cashboxParameters: { userInn: '7842223709' },
+    requestMetadata: { userGroup: 'MOCKGROUP', externalId: foExternalId },
+    document: {
+      operationType: 'INCOME',
+      items: [{ label: 'Кофе', measurementUnit: 'шт', price: 150.0, quantity: 2, vatCode: 'VAT_22' }],
+      totalSum: 300.0,
+    },
+  });
+  const foRequestId = (foCreate.json() || {}).requestId;
+  check('first-ofd POST transaction/receipt -> requestId (не финальный результат)', foCreate.status === 200 && Boolean(foRequestId));
+  const foImmediate = (await firstOfdApi('GET', `${FIRST_OFD_QUEUE}/status/${foRequestId}`)).json() || {};
+  check('first-ofd сразу после подачи -> IN_PROGRESS', foImmediate.status === 'IN_PROGRESS' && foImmediate.payload === null);
+  await httpReq(FIRST_OFD_BASE, 'POST', '/mock/time', { advance: '+5s' });
+  const foDone = (await firstOfdApi('GET', `${FIRST_OFD_QUEUE}/status/${foRequestId}`)).json() || {};
+  check('first-ofd после сдвига часов -> COMPLETED + payload ФД (EXPENCE-стиль операций сохранён)',
+    foDone.status === 'COMPLETED' && foDone.payload && foDone.payload.operationType === 'INCOME'
+    && typeof foDone.payload.fiscalDocumentNumber === 'number' && foDone.payload.totalSum === 300);
+  const foTransaction = (await firstOfdApi('GET', `${FIRST_OFD_QUEUE}/transaction/${foRequestId}`)).json() || {};
+  check('first-ofd GET transaction/{requestId} -> заявка как принята + result',
+    foTransaction.status === 'COMPLETED' && foTransaction.request && foTransaction.request.requestMetadata.userGroup === 'MOCKGROUP'
+    && foTransaction.result && foTransaction.result.requestId === foRequestId);
+  const foStatuses = (await firstOfdApi('GET', `${FIRST_OFD_QUEUE}/statuses?externalId=${encodeURIComponent(foExternalId)}&groupId=MOCKGROUP`)).json();
+  check('first-ofd statuses по externalId+groupId -> список заявок', Array.isArray(foStatuses) && foStatuses.length === 1 && foStatuses[0].requestId === foRequestId);
+  const foReceipts = (await firstOfdApi('GET', `/api/external/receipts?from=2020-01-01T00:00:00.000Z&to=${encodeURIComponent(new Date().toISOString())}`)).json() || {};
+  check('first-ofd /receipts -> фискальные документы за период с пагинацией',
+    Array.isArray(foReceipts.items) && foReceipts.total >= 1 && foReceipts.items.some((item) => item.requestId === foRequestId));
+
+  const foWrongSchema = (await firstOfdApi('POST', `${FIRST_OFD_QUEUE}/transaction/openShift`, {
+    cashboxParameters: { userInn: '7842223709' }, requestMetadata: { userGroup: 'MOCKGROUP' },
+    document: { operationType: 'INCOME', items: [], totalSum: 1 },
+  })).json() || {};
+  check('first-ofd receipt-тело в openShift -> invalid_request (схемы не смешиваются)',
+    Boolean(foWrongSchema.error && foWrongSchema.error.code === 'invalid_request'));
+  const foExpence = (await firstOfdApi('POST', `${FIRST_OFD_QUEUE}/transaction/receipt`, {
+    cashboxParameters: { userInn: '7842223709' }, requestMetadata: { userGroup: 'MOCKGROUP' },
+    document: { operationType: 'EXPENSE', items: [{ label: 'Т', measurementUnit: 'шт', price: 1, quantity: 1, vatCode: 'VAT_20' }], totalSum: 1 },
+  })).json() || {};
+  check('first-ofd написание EXPENSE отклонено (схема требует EXPENCE)',
+    Boolean(foExpence.error && foExpence.error.code === 'invalid_operation_type'));
+  const foShift = (await firstOfdApi('POST', `${FIRST_OFD_QUEUE}/transaction/openShift`, {
+    cashboxParameters: { userInn: '7842223709' }, requestMetadata: { userGroup: 'MOCKGROUP' },
+  })).json() || {};
+  await httpReq(FIRST_OFD_BASE, 'POST', '/mock/time', { advance: '+5s' });
+  const foShiftStatus = (await firstOfdApi('GET', `${FIRST_OFD_QUEUE}/status/${foShift.requestId}`)).json() || {};
+  check('first-ofd openShift (StateCommandRequest) -> COMPLETED, shiftState=OPEN',
+    foShiftStatus.status === 'COMPLETED' && foShiftStatus.payload && foShiftStatus.payload.shiftState === 'OPEN');
+  const foShiftAgain = (await firstOfdApi('POST', `${FIRST_OFD_QUEUE}/transaction/openShift`, {
+    cashboxParameters: { userInn: '7842223709' }, requestMetadata: { userGroup: 'MOCKGROUP' },
+  })).json() || {};
+  await httpReq(FIRST_OFD_BASE, 'POST', '/mock/time', { advance: '+5s' });
+  const foShiftAgainStatus = (await firstOfdApi('GET', `${FIRST_OFD_QUEUE}/status/${foShiftAgain.requestId}`)).json() || {};
+  check('first-ofd повторный openShift -> ERROR слоя ККТ (errorType=KKT, errorCode/error details)',
+    foShiftAgainStatus.status === 'ERROR' && foShiftAgainStatus.errorType === 'KKT'
+    && foShiftAgainStatus.errorCode === 'SHIFT_ALREADY_OPEN' && typeof foShiftAgainStatus.details === 'string');
+  const foKktScenario = (await firstOfdApi('POST', `${FIRST_OFD_QUEUE}/transaction/receipt`, {
+    cashboxParameters: { userInn: '7842223709' }, requestMetadata: { userGroup: 'MOCKGROUP' },
+    document: { operationType: 'INCOME_RETURN', items: [{ label: 'Т', measurementUnit: 'шт', price: 1, quantity: 1, vatCode: 'VAT_22122' }], totalSum: 1 },
+  }, { 'X-Mock-Scenario': 'kkt-error' })).json() || {};
+  await httpReq(FIRST_OFD_BASE, 'POST', '/mock/time', { advance: '+5s' });
+  const foKktStatus = (await firstOfdApi('GET', `${FIRST_OFD_QUEUE}/status/${foKktScenario.requestId}`)).json() || {};
+  check('first-ofd сценарий kkt-error -> ERROR слоя ККТ с mock-local errorCode',
+    foKktStatus.status === 'ERROR' && foKktStatus.errorType === 'KKT' && foKktStatus.errorCode === 'KKT_UNAVAILABLE');
+  const foUnknownGroup = (await firstOfdApi('POST', `${FIRST_OFD_QUEUE}/transaction/receipt`, {
+    cashboxParameters: { userInn: '7842223709' }, requestMetadata: { userGroup: 'НЕТ-ГРУППЫ' },
+    document: { operationType: 'INCOME', items: [{ label: 'Т', measurementUnit: 'шт', price: 1, quantity: 1, vatCode: 'VAT_20' }], totalSum: 1 },
+  })).json() || {};
+  check('first-ofd неизвестный userGroup -> unknown_user_group', Boolean(foUnknownGroup.error && foUnknownGroup.error.code === 'unknown_user_group'));
 }
 
 async function main() {
-  console.log(`\n== compose black-box selftest (${TBANK_BASE} & ${KASSA_BASE} & ${YOOKASSA_BASE} & ${ATOL_BASE} & ${ALFA_BASE} & ${SBER_BASE} & ${VTB_BASE}) ==\n`);
+  console.log(`\n== compose black-box selftest (${TBANK_BASE} & ${KASSA_BASE} & ${YOOKASSA_BASE} & ${ATOL_BASE} & ${ALFA_BASE} & ${SBER_BASE} & ${VTB_BASE} & ${FIRST_OFD_BASE}) ==\n`);
   console.log(`  · одноразовая песочница прогона: ${SANDBOX_ID}`);
 
   // Базовая линия default-состояния: прогон не должен её изменить (два запуска
@@ -733,6 +859,7 @@ async function main() {
   const alfaCounts = (j) => `orders=${j.orders},awaiting=${j.awaiting},callbacks=${j.callbacks}`;
   const sberCounts = (j) => `orders=${j.orders},awaiting=${j.awaiting},callbacks=${j.callbacks}`;
   const vtbCounts = (j) => `orders=${j.orders},refunds=${j.refunds},awaiting=${j.awaiting},callbacks=${j.callbacks}`;
+  const firstOfdCounts = (j) => `requests=${j.requests},awaiting=${j.awaiting},documents=${j.documents},callbacks=${j.callbacks}`;
   const beforeBank = (await httpReq(TBANK_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const beforeKassa = (await httpReq(KASSA_BASE, 'GET', '/healthz?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const beforeYookassa = (await httpReq(YOOKASSA_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
@@ -740,6 +867,7 @@ async function main() {
   const beforeAlfa = (await httpReq(ALFA_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const beforeSber = (await httpReq(SBER_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const beforeVtb = (await httpReq(VTB_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
+  const beforeFirstOfd = (await httpReq(FIRST_OFD_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
 
   await provisionSandboxes();
   try {
@@ -755,6 +883,7 @@ async function main() {
   const afterAlfa = (await httpReq(ALFA_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const afterSber = (await httpReq(SBER_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const afterVtb = (await httpReq(VTB_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
+  const afterFirstOfd = (await httpReq(FIRST_OFD_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   if (beforeBank.tenancy && beforeBank.tenancy !== 'off') {
     check('tbank: прогон не изменил default-счётчики (F-33)', bankCounts(beforeBank) === bankCounts(afterBank),
       `${bankCounts(beforeBank)} -> ${bankCounts(afterBank)}`);
@@ -782,6 +911,11 @@ async function main() {
   if (beforeVtb.tenancy && beforeVtb.tenancy !== 'off') {
     check('vtb: прогон не изменил default-счётчики (F-33)', vtbCounts(beforeVtb) === vtbCounts(afterVtb),
       `${vtbCounts(beforeVtb)} -> ${vtbCounts(afterVtb)}`);
+  }
+
+  if (beforeFirstOfd.tenancy && beforeFirstOfd.tenancy !== 'off') {
+    check('first-ofd: прогон не изменил default-счётчики (F-33)', firstOfdCounts(beforeFirstOfd) === firstOfdCounts(afterFirstOfd),
+      `${firstOfdCounts(beforeFirstOfd)} -> ${firstOfdCounts(afterFirstOfd)}`);
   }
 
   console.log(`\nИТОГ compose-selftest: ${passed} passed, ${failed} failed\n`);

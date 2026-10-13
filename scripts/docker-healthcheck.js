@@ -4,7 +4,8 @@
 
 /*
  * HEALTHCHECK для docker-образа (F-35). Один образ несёт все сервисы, а их
- * health-пути различаются (tbank/yookassa/atol/alfa/sber/vtb — `/health`, kassa — `/healthz`),
+ * health-пути различаются (tbank/yookassa/atol/alfa/sber/vtb/first-ofd — `/health`,
+ * kassa — `/healthz`),
  * поэтому:
  *   • заданные MOCK_PORT / MOCK_HEALTH_PATH — авторитетная пара (как в
  *     рекомендованных командах Dockerfile и compose);
@@ -25,6 +26,7 @@ const KNOWN_SERVICES = [
   ['3104', '/health'],   // alfa-mock
   ['3105', '/health'],   // sber-mock
   ['3106', '/health'],   // vtb-mock
+  ['3107', '/health'],   // first-ofd-mock
 ];
 
 const PROBES = process.env.MOCK_PORT

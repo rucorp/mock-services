@@ -248,5 +248,57 @@ services:
       start_period: 3s
     restart: unless-stopped
 
+  first-ofd-mock:
+    build: .
+    image: mock-services:local
+    working_dir: /app
+    command: node services/first-ofd-mock/server.js
+    # Безопасный локальный default; сетевой bind включается явно.
+    ports: ["${MOCK_FIRST_OFD_BIND_IP:-127.0.0.1}:${MOCK_FIRST_OFD_HOST_PORT:-3107}:3107"]
+    environment:
+      MOCK_HOST: "0.0.0.0"
+      MOCK_PORT: "3107"
+      MOCK_HEALTH_PATH: "/health"
+      MOCK_STATE_FILE: "/data/first-ofd-state.json"
+      MOCK_SANDBOX_FILE: "/data/first-ofd-sandboxes.json"
+      # Дефолты синтетические: публичных тестовых кред Первого ОФД нет, они выдаются в тестовом ЛК.
+      MOCK_FIRST_OFD_LOGIN: "${MOCK_FIRST_OFD_LOGIN:-firstofdmocktest}"
+      MOCK_FIRST_OFD_PASS: "${MOCK_FIRST_OFD_PASS:-11111111-2222-4333-8444-555555555555}"
+      MOCK_FIRST_OFD_TOKEN_TTL_SECS: "${MOCK_FIRST_OFD_TOKEN_TTL_SECS:-86400}"
+      MOCK_FIRST_OFD_TOKEN_SINGLE: "${MOCK_FIRST_OFD_TOKEN_SINGLE:-false}"
+      MOCK_FIRST_OFD_PROCESS_MS: "${MOCK_FIRST_OFD_PROCESS_MS:-2000}"
+      MOCK_FIRST_OFD_PUBLIC_BASE_URL: "${MOCK_FIRST_OFD_PUBLIC_BASE_URL:-http://localhost:3107}"
+      MOCK_FIRST_OFD_CALLBACK_URL: "${MOCK_FIRST_OFD_CALLBACK_URL:-}"
+      MOCK_FIRST_OFD_CALLBACK_RETRY_MS: "${MOCK_FIRST_OFD_CALLBACK_RETRY_MS:-60000}"
+      MOCK_FIRST_OFD_CALLBACK_MAX_ATTEMPTS: "${MOCK_FIRST_OFD_CALLBACK_MAX_ATTEMPTS:-3}"
+      MOCK_FIRST_OFD_CALLBACK_HTTPS_ONLY: "${MOCK_FIRST_OFD_CALLBACK_HTTPS_ONLY:-false}"
+      MOCK_FIRST_OFD_USER_GROUPS: "${MOCK_FIRST_OFD_USER_GROUPS:-MOCKGROUP,firstofd-mock}"
+      MOCK_SANDBOX_SWEEP_MS: "${MOCK_SANDBOX_SWEEP_MS:-60000}"
+      MOCK_BLOCK_PRIVATE_WEBHOOKS: "${MOCK_BLOCK_PRIVATE_WEBHOOKS:-}"
+      MOCK_VIRTUAL_CLOCK: "${MOCK_VIRTUAL_CLOCK:-}"
+      MOCK_ADMIN_TOKEN: "${MOCK_ADMIN_TOKEN:-}"
+      MOCK_OPERATOR_TOKEN: "${MOCK_OPERATOR_TOKEN:-}"
+      MOCK_HOSTED: "${MOCK_HOSTED:-false}"
+      MOCK_TENANCY: "${MOCK_TENANCY:-}"
+      MOCK_SANDBOX_TOKEN: "${MOCK_SANDBOX_TOKEN:-}"
+      MOCK_SANDBOX_TTL_MS: "${MOCK_SANDBOX_TTL_MS:-}"
+      MOCK_SANDBOX_MAX: "${MOCK_SANDBOX_MAX:-}"
+      MOCK_SANDBOX_MAX_DOCUMENTS: "${MOCK_SANDBOX_MAX_DOCUMENTS:-}"
+      MOCK_SANDBOX_RETENTION_MS: "${MOCK_SANDBOX_RETENTION_MS:-}"
+      MOCK_SANDBOX_HOST_SUFFIX: "${MOCK_SANDBOX_HOST_SUFFIX:-}"
+      MOCK_SANDBOX_CREATE_LIMIT: "${MOCK_SANDBOX_CREATE_LIMIT:-}"
+    volumes: ["mock-data:/data"]
+    labels:
+      caddy: "${MOCK_FIRST_OFD_CADDY_DOMAIN:-}"
+      caddy.reverse_proxy: "{{upstreams 3107}}"
+    mem_limit: "${MOCK_MEM_LIMIT:-128m}"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3107,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    restart: unless-stopped
+
 volumes:
   mock-data:

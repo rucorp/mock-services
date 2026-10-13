@@ -12,7 +12,8 @@
  *   1. tbank-mock (CMD по умолчанию) и kassa-mock (команда из шапки Dockerfile,
  *      БЕЗ переменных healthcheck) становятся healthy со стандартным
  *      HEALTHCHECK образа — F-35 (kassa слушает /healthz, а не /health); sber-mock
- *      на :3105 и vtb-mock на :3106 также проверяются с явными портовыми парами;
+ *      на :3105, vtb-mock на :3106 и first-ofd-mock на :3107 также проверяются
+ *      с явными портовыми парами;
  *   2. процессы идут от непривилегированного UID 10001 — F-36;
  *   3. persist/restore переживает --read-only rootfs с volume /data: Init
  *      до рестарта виден после рестарта — F-36;
@@ -31,6 +32,7 @@ const NAME_TBANK = `${PREFIX}-tbank`;
 const NAME_KASSA = `${PREFIX}-kassa`;
 const NAME_SBER = `${PREFIX}-sber`;
 const NAME_VTB = `${PREFIX}-vtb`;
+const NAME_FIRST_OFD = `${PREFIX}-first-ofd`;
 const NAME_RO = `${PREFIX}-ro`;
 const VOLUME = `${PREFIX}-data`;
 
@@ -89,7 +91,7 @@ function assertEqual(actual, expected, message) {
 }
 
 function cleanup() {
-  for (const name of [NAME_TBANK, NAME_KASSA, NAME_SBER, NAME_VTB, NAME_RO]) {
+  for (const name of [NAME_TBANK, NAME_KASSA, NAME_SBER, NAME_VTB, NAME_FIRST_OFD, NAME_RO]) {
     try { docker(['rm', '-f', name]); } catch { /* не создан */ }
   }
   try { docker(['volume', 'rm', '-f', VOLUME]); } catch { /* не создан */ }
@@ -134,6 +136,16 @@ async function main() {
   if (JSON.parse(vtbOpenApi.body).openapi !== '3.1.0') throw new Error('vtb-mock /openapi.json недоступен в image');
   console.log('[smoke] vtb-mock: healthy + OpenAPI ✅');
 
+  // 2d. Первый ОФД (облачная касса OKassa) на выделенном порту :3107.
+  console.log('[smoke] first-ofd-mock: порт :3107 + /health');
+  docker(['run', '-d', '--name', NAME_FIRST_OFD, '-p', '127.0.0.1:3905:3107', '-e', 'MOCK_PORT=3107', '-e', 'MOCK_HEALTH_PATH=/health', IMAGE, 'node', 'services/first-ofd-mock/server.js']);
+  await waitForHealth(NAME_FIRST_OFD);
+  const firstOfdHealth = await request(3905, 'GET', '/health');
+  assertEqual(firstOfdHealth.statusCode, 200, 'first-ofd-mock /health');
+  const firstOfdOpenApi = await request(3905, 'GET', '/openapi.json');
+  if (JSON.parse(firstOfdOpenApi.body).openapi !== '3.1.0') throw new Error('first-ofd-mock /openapi.json недоступен в image');
+  console.log('[smoke] first-ofd-mock: healthy + OpenAPI ✅');
+
   // 3. Непривилегированный runtime-пользователь (F-36).
 
   const user = docker(['inspect', '--format', '{{.Config.User}}', NAME_TBANK]);
@@ -142,6 +154,7 @@ async function main() {
   assertEqual(docker(['exec', NAME_KASSA, 'id', '-u']), '10001', 'UID runtime-пользователя (kassa)');
   assertEqual(docker(['exec', NAME_SBER, 'id', '-u']), '10001', 'UID runtime-пользователя (sber)');
   assertEqual(docker(['exec', NAME_VTB, 'id', '-u']), '10001', 'UID runtime-пользователя (vtb)');
+  assertEqual(docker(['exec', NAME_FIRST_OFD, 'id', '-u']), '10001', 'UID runtime-пользователя (first-ofd)');
   console.log('[smoke] непривилегированный пользователь mock (10001) ✅');
 
   // 4. persist/restore при --read-only rootfs (F-36): Init до рестарта виден

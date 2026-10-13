@@ -8,7 +8,43 @@
 
 ## [Unreleased]
 
-_(заполняется следующей волной)_
+### Added
+- **Второй внешний касса-адаптер — Первый ОФД (облачная касса OKassa API), Stage 2, #92.**
+  Новый zero-dependency `services/first-ofd-mock` на :3107: `POST /getToken`
+  (`application/json; charset=utf-8`, `{login, pass}` → `{token}`, TTL **24 ч на
+  виртуальных часах**) и `Authorization: Bearer <token>` для бизнес-вызовов —
+  **API-ключ UUID сам по себе bearer-токеном не является**. Асинхронная очередь
+  `POST /api/external/queue/v1/transaction/{type}` (`receipt`, `receiptCorrection`,
+  `openShift`, `closeShift`, `currentStateReport`) отдаёт `requestId`, результат
+  читается `GET transaction/{requestId}` и `GET status/{requestId}`: статусы
+  `IN_PROGRESS → COMPLETED | ERROR` с **разделением слоёв ошибок** API и ККТ
+  (`errorCode`/`errorType`/`details`/`payload`). Схемы строго по типу заявки —
+  `ReceiptRequest`, `ReceiptCorrectionRequest` (+`correctionCause`) и
+  `StateCommandRequest` (receipt-тело в сменах отклоняется), без «универсального»
+  объекта из примеров других провайдеров. Операции `INCOME`, `INCOME_RETURN`,
+  `EXPENCE`, `EXPENCE_RETURN` — написание сохранено **как в схеме** и не
+  «исправляется»; НДС включает `VAT_22`/`VAT_22122`; суммы — десятичные рубли.
+  Сверка: `statuses?externalId=&groupId=` (оба обязательны, `[VERIFY]`
+  идемпотентности `externalId` — повтор даёт новую заявку и заголовок
+  `X-Mock-Duplicate-External-Id`), `/api/external/receipts?from=&to=` с фильтрами
+  и пагинацией (`pageSize` 20/100). Callback — unsigned POST на
+  `requestMetadata.callbackUrl`: envelope/подпись/ACK/расписание повторов публично
+  не зафиксированы, поэтому мок не выдумывает подпись, считает доставкой любой 2xx
+  [FORK], повторяет 3×60s и проходит SSRF-политику ядра (`ERR SSRF_BLOCKED`
+  терминален); сверка — через метод статуса. Расхождения среза
+  (`requestMetadata` required vs optional, `items` массив vs объект, `http://` vs
+  `https://` callback, квирк `getToken`, тег ATOL Online V5) помечены
+  `[VERIFY]`/`[FORK]`, production base не подтверждён и не выводится из тестового.
+  Синтетические дефолты `firstofdmocktest` + UUID-ключ; настройки — `MOCK_FIRST_OFD_*`
+  (TTL токена, задержка очереди, каталог `userGroup`, адрес и расписание callback,
+  `TOKEN_SINGLE`, `CALLBACK_HTTPS_ONLY`); per-sandbox
+  сценарии/часы/журнал, control-plane, хаос ядра.
+  Манифест `protocols/first-ofd-okassa.json` (5 расхождений среза), OpenAPI 3.1
+  `docs/openapi/first-ofd-mock.openapi.json` с mock-local каталогами ошибок,
+  секция `check:drift` (644 инварианта), `test:first-ofd` в `npm test` и CI,
+  compose/include + healthcheck :3107, Docker smoke, root/service README и гайд
+  `docs/integration/first-ofd.md` «за 10 минут». Регресс/selftest:
+  `services/first-ofd-mock/selftest.js` (94 проверки).
 
 ## [0.6.0] — 2026-10-13
 
