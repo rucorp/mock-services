@@ -1065,7 +1065,7 @@ async function main() {
       const admission = first.admit({ headers: { 'x-mock-sandbox': 'kept' }, url: '/' }, 'business');
       first.run(admission, () => { first.state.payments.kept = { id: 'kept' }; first.persist(); });
       first.flush();
-      assert.ok(fs.existsSync(`${stateFile}.sandboxes.json`), 'реестр песочниц должен быть записан');
+      assert.ok(fs.existsSync(`${stateFile}.sandboxes.records/kept.json`), 'реестр песочниц (поштучно, PD-02) должен быть записан');
 
       const second = core.createSandboxRuntime({
         state: { payments: {} },
@@ -1666,6 +1666,158 @@ async function main() {
       dns.promises.lookup = origPromisesLookup;
       dns.lookup = origDnsLookup;
       localSrv.close();
+    }
+  });
+
+  /* ------------------------------ PD-02: поштучный реестр и квота по байтам */
+  check('PD-02: мутация одной песочницы переписывает только её файл, а не весь реестр', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pd02-'));
+    const stateFile = path.join(dir, 'state.json');
+    const written = [];
+    const origWrite = fs.writeFileSync;
+    fs.writeFileSync = function (p, data, ...rest) {
+      if (String(p).startsWith(dir)) written.push({ file: path.basename(String(p)).replace(/\.tmp$/, ''), bytes: Buffer.byteLength(data) });
+      return origWrite.call(fs, p, data, ...rest);
+    };
+    try {
+      const rt = core.createSandboxRuntime({ state: {}, mode: 'namespaces', stateFile, log: () => {} });
+      const big = 'x'.repeat(50000);
+      for (let i = 0; i < 10; i += 1) {
+        assert.strictEqual(rt.importState({ state: { blob: big } }, `bulk-${i}`).ok, true);
+      }
+      written.length = 0;
+      for (let k = 0; k < 20; k += 1) {
+        assert.strictEqual(rt.importState({ state: { [`k${k}`]: { small: k } } }, 'hot').ok, true);
+      }
+      const files = new Set(written.map((w) => w.file));
+      assert.deepStrictEqual([...files], ['hot.json'], `писались чужие файлы: ${[...files].join(',')}`);
+      const total = written.reduce((sum, w) => sum + w.bytes, 0);
+      assert.ok(total < 20 * 10000, `запись 20 мелких мутаций ${total} байт — ожидалось O(песочница), а не O(реестр ~500 КБ)`);
+    } finally {
+      fs.writeFileSync = origWrite;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  check('PD-02: удалённая песочница не воскресает после рестарта (файл уходит вместе с записью)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pd02-rm-'));
+    const stateFile = path.join(dir, 'state.json');
+    try {
+      const rt = core.createSandboxRuntime({ state: {}, mode: 'namespaces', stateFile, log: () => {} });
+      rt.create({ id: 'gone' });
+      rt.create({ id: 'kept2' });
+      rt.flush();
+      const recDir = path.join(dir, 'state.json.sandboxes.records');
+      assert.ok(fs.existsSync(path.join(recDir, 'gone.json')), 'файл песочницы не записан');
+      assert.strictEqual(rt.remove('gone').ok, true);
+      rt.flush();
+      const restored = core.createSandboxRuntime({ state: {}, mode: 'namespaces', stateFile, log: () => {} });
+      assert.strictEqual(restored.find('gone'), null, 'удалённая песочница ожила после рестарта');
+      assert.ok(restored.find('kept2'), 'соседняя песочница потеряна');
+      assert.strictEqual(fs.existsSync(path.join(recDir, 'gone.json')), false, 'файл удалённой песочницы остался на диске');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  check('PD-02: legacy-реестр <stateFile>.sandboxes.json мигрирует в поштучные файлы, повторно не читается', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pd02-mig-'));
+    const stateFile = path.join(dir, 'state.json');
+    const legacy = `${stateFile}.sandboxes.json`;
+    try {
+      fs.writeFileSync(legacy, JSON.stringify({
+        version: 1,
+        activeId: 'default',
+        sandboxes: [
+          { id: 'old-a', createdAt: '2026-10-01T00:00:00.000Z', state: { payments: { p1: { id: 'p1' } } } },
+          { id: 'old-b', state: { payments: {} } },
+        ],
+      }));
+      const first = core.createSandboxRuntime({ state: {}, mode: 'namespaces', stateFile, log: () => {} });
+      assert.deepStrictEqual(Object.keys(first.find('old-a').state.payments), ['p1']);
+      assert.ok(fs.existsSync(path.join(dir, 'state.json.sandboxes.records', 'old-a.json')), 'запись не перенесена в поштучный файл');
+      assert.strictEqual(fs.existsSync(legacy), false, 'legacy-файл должен быть переименован');
+      assert.ok(fs.existsSync(`${legacy}.migrated`), 'legacy-файл должен сохраниться как .migrated');
+
+      first.remove('old-b');
+      const second = core.createSandboxRuntime({ state: {}, mode: 'namespaces', stateFile, log: () => {} });
+      assert.ok(second.find('old-a'), 'после миграции запись не восстановлена из каталога');
+      assert.strictEqual(second.find('old-b'), null, 'удалённая legacy-песочница воскресла');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  check('PD-02: байтовая квота состояния — импорт сверх лимита отклоняется и откатывается; соседи не меняются', () => {
+    const rt = core.createSandboxRuntime({
+      state: {}, mode: 'namespaces', maxDocuments: 0, maxStateBytes: 4000, log: () => {},
+    });
+    rt.create({ id: 'quota' });
+    rt.create({ id: 'neighbor' });
+    assert.strictEqual(rt.importState({ state: { a: 'small' } }, 'quota').ok, true);
+    const before = JSON.stringify(rt.find('quota').state);
+    assert.throws(() => rt.importState({ state: { blob: 'y'.repeat(10000) } }, 'quota'), (e) => e.code === 'SANDBOX_QUOTA_BYTES');
+    assert.strictEqual(JSON.stringify(rt.find('quota').state), before, 'отклонённый импорт не откатился');
+    assert.strictEqual(rt.importState({ state: { b: 'ok' } }, 'neighbor').ok, true, 'соседняя песочница не должна страдать');
+    const q = rt.run(rt.admit({ headers: { 'x-mock-sandbox': 'quota' }, url: '/' }, 'business'), () => rt.checkDocuments());
+    assert.strictEqual(q.ok, true, 'небольшое состояние проходит квоту');
+    rt.run(rt.admit({ headers: { 'x-mock-sandbox': 'quota' }, url: '/' }, 'business'), () => {
+      rt.state.bulk = 'z'.repeat(4000);
+      rt.persist();
+    });
+    const over = rt.run(rt.admit({ headers: { 'x-mock-sandbox': 'quota' }, url: '/' }, 'business'), () => rt.checkDocuments());
+    assert.strictEqual(over.ok, false);
+    assert.strictEqual(over.kind, 'bytes');
+  });
+
+  /* ------------------------------------- PA-52: очередь per-sandbox в tickAll */
+  await acheck('PA-52: tickAll за один проход доставляет КАЖДУЮ готовую песочницу (3 песочницы, одинаковый id записи)', async () => {
+    const reached = new Set();
+    const held = [];
+    let releaseAll = null;
+    const allReached = new Promise((r) => { releaseAll = r; });
+    const receiver = http.createServer((req, res) => {
+      reached.add(req.url);
+      held.push(res);
+      // Ответы держим, пока не дошли все три: при общем флаге дошла бы одна
+      // песочница, и проверка упала бы по таймауту (голодание, PA-52).
+      if (reached.size === 3) {
+        releaseAll();
+        for (const r of held.splice(0)) { r.writeHead(200); r.end('OK'); }
+      }
+    });
+    const port = await listen(receiver);
+    const ids = ['sbx-1', 'sbx-2', 'sbx-3'];
+    try {
+      const rt = core.createSandboxRuntime({ state: {}, mode: 'namespaces', log: () => {} });
+      for (const id of ids) {
+        rt.create({ id });
+        rt.find(id).state.notifications = {
+          'same-id': { url: `http://127.0.0.1:${port}/${id}`, attempts: 0, nextAttemptAt: 0 },
+        };
+      }
+      const queue = core.createDeliveryQueue({
+        entries: () => rt.state.notifications,
+        retryMs: 60000,
+        maxAttempts: 5,
+        awaitSequential: true,
+        log: () => {},
+        request: (e) => ({ url: e.url, data: { ping: true } }),
+      });
+      rt.tickAll(() => { queue.tick().catch(() => {}); });
+      await withTimeout(allReached, 3000, 'PA-52: за один проход дошли не все песочницы (голодание очереди)');
+      assert.deepStrictEqual([...reached].sort(), ids.map((id) => `/${id}`).sort());
+
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline && !ids.every((id) => rt.find(id).state.notifications['same-id'].done)) {
+        await sleep(10);
+      }
+      for (const id of ids) {
+        assert.strictEqual(rt.find(id).state.notifications['same-id'].done, true, `${id}: запись не доставлена`);
+      }
+    } finally {
+      if (typeof receiver.closeAllConnections === 'function') receiver.closeAllConnections();
+      receiver.close();
     }
   });
 

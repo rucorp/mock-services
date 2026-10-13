@@ -625,9 +625,9 @@ const derr = core.createErrorCatalog({
 function ensureSandboxQuota() {
   const quota = sandboxRuntime.checkDocuments();
   if (quota.ok) return null;
-  return err(7, `Лимит документов песочницы исчерпан (${quota.used}/${quota.limit})`, null, {
+  return err(7, `${quota.kind === 'bytes' ? 'Лимит объёма состояния песочницы исчерпан (байт: ' : 'Лимит документов песочницы исчерпан ('}${quota.used}/${quota.limit}${quota.kind === 'bytes' ? ')' : ''}`, null, {
     field: 'OrderId',
-    hint: 'Песочница ограничена по объёму (MOCK_SANDBOX_MAX_DOCUMENTS): сбросьте её (POST /sandboxes/me/reset) или создайте новую (POST /sandboxes).',
+    hint: `${quota.kind === 'bytes' ? 'Песочница ограничена по объёму состояния (байтовая квота, PD-02): сбросьте её (POST /sandboxes/me/reset) или создайте новую (POST /sandboxes).' : 'Песочница ограничена по объёму (MOCK_SANDBOX_MAX_DOCUMENTS): сбросьте её (POST /sandboxes/me/reset) или создайте новую (POST /sandboxes).'}`,
   });
 }
 

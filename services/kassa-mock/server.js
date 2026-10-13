@@ -1853,9 +1853,9 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
       // F-15: квота песочницы — документы не растут без границ (hosted).
       const quota = sandboxRuntime.checkDocuments();
       if (!quota.ok) {
-        return jsonRaw(res, 200, errBody(4, `Лимит документов песочницы исчерпан (${quota.used}/${quota.limit})`, {
+        return jsonRaw(res, 200, errBody(4, `${quota.kind === 'bytes' ? 'Лимит объёма состояния песочницы исчерпан (байт: ' : 'Лимит документов песочницы исчерпан ('}${quota.used}/${quota.limit}${quota.kind === 'bytes' ? ')' : ''}`, {
           field: 'external_id',
-          hint: 'Песочница ограничена по объёму (MOCK_SANDBOX_MAX_DOCUMENTS): сбросьте её (POST /sandboxes/me/reset) или создайте новую (POST /sandboxes).',
+          hint: `${quota.kind === 'bytes' ? 'Песочница ограничена по объёму состояния (байтовая квота, PD-02): сбросьте её (POST /sandboxes/me/reset) или создайте новую (POST /sandboxes).' : 'Песочница ограничена по объёму (MOCK_SANDBOX_MAX_DOCUMENTS): сбросьте её (POST /sandboxes/me/reset) или создайте новую (POST /sandboxes).'}`,
         }));
       }
 

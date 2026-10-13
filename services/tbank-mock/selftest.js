@@ -1823,8 +1823,9 @@ process.env.MOCK_RETRY_MS = '1000';
       savedPaymentId = JSON.parse((await request(port1, 'POST', '/v2/Init', { ...payload, Token: tokenOf(payload) }, { 'X-Mock-Sandbox': 'persist-a' })).body).PaymentId;
       await waitForCondition(() => {
         try {
-          const registry = JSON.parse(fs.readFileSync(`${stateFile}.sandboxes.json`, 'utf8'));
-          return registry.sandboxes && registry.sandboxes.some((record) => record.id === 'persist-a' && record.state && record.state.payments && record.state.payments[savedPaymentId]);
+          // PD-02: реестр песочниц поштучно — один файл на песочницу
+          const record = JSON.parse(fs.readFileSync(`${stateFile}.sandboxes.records/persist-a.json`, 'utf8')).sandbox;
+          return Boolean(record && record.state && record.state.payments && record.state.payments[savedPaymentId]);
         } catch { return false; }
       }, { description: 'atomic sandbox registry flush before restart' });
     } finally {

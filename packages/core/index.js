@@ -1313,17 +1313,22 @@ function createDeliveryQueue({
   });
   // «В полёте» — рантайм-состояние, намеренно НЕ в state: после рестарта
   // процесса ничего не должно считаться отправленным «прямо сейчас».
-  const inFlight = new Set();
+  // Ключ — объект записи, а не её id: id уникален лишь внутри одной песочницы,
+  // а одна очередь обслуживает все песочницы (PA-52).
+  const inFlight = new WeakSet();
   // F-29: защита от перекрывающихся тиков. setInterval не ждёт async tick(), и
   // пока медленный вебхук держит «последовательный» тик, следующий тик мог бы
   // отправить следующую запись параллельно — порядок доставки ломался бы даже
   // при awaitSequential. Пока тик идёт, новый просто пропускается (записи
   // доберутся следующим тиком).
-  let ticking = false;
+  // PA-52: флаг держится per-песочница (ключ — объект очереди этой песочницы,
+  // `entries()` резолвится в её state). Общий флаг на очередь давал голодание:
+  // первый async-тик блокировал тики всех остальных песочниц в том же tickAll.
+  const ticking = new WeakSet();
 
   async function deliverOne(id, entry) {
-    if (inFlight.has(id)) return;
-    inFlight.add(id);
+    if (!entry || typeof entry !== 'object' || inFlight.has(entry)) return;
+    inFlight.add(entry);
     try {
       // `request(entry)` может вернуть {url, data, method}: method='GET' — для
       // callback, которые доставляются GET-ом с query-параметрами (Альфа-Банк);
@@ -1355,27 +1360,29 @@ function createDeliveryQueue({
       onFail(entry, status, diagnostic, id);
       log(`webhook ${id} error: ${e.message}, retry in ${retryMs}ms`);
     } finally {
-      inFlight.delete(id);
+      inFlight.delete(entry);
       persist();
     }
   }
 
   async function tick() {
-    if (ticking) return;
-    ticking = true;
+    const currentEntries = entriesOf() || {};
+    if (typeof currentEntries !== 'object') return;
+    // Флаг — по песочнице (объект её очереди): чужой медленный тик не блокирует.
+    if (ticking.has(currentEntries)) return;
+    ticking.add(currentEntries);
     try {
-      const currentEntries = entriesOf() || {};
       const ids = Object.keys(currentEntries);
       for (const id of ids) {
         const entry = currentEntries[id];
-        if (!entry || inFlight.has(id)) continue;
+        if (!entry || inFlight.has(entry)) continue;
         if (!isDue(entry)) continue;
         prepare(entry);
         if (awaitSequential) await deliverOne(id, entry);
         else deliverOne(id, entry); // пачкой, без ожидания — как у Ferma-мока
       }
     } finally {
-      ticking = false;
+      ticking.delete(currentEntries);
     }
   }
 
@@ -2191,6 +2198,8 @@ function createSandboxManager({ state, persist = () => {}, initialStateFactory }
 /* ------------------------------------- request-local песочницы (RFC-001, A-21) */
 
 const SANDBOX_ID_UNSAFE = /[^a-zA-Z0-9_.-]/g;
+/** PD-02: лимит байт состояния одной песочницы по умолчанию (квота включена вместе с maxDocuments). */
+const DEFAULT_MAX_STATE_BYTES = 8 * 1024 * 1024;
 const SANDBOX_ID_MAX = 64;
 const SANDBOX_WORDS_ADJ = [
   'swift', 'calm', 'brave', 'lucky', 'quiet', 'bright', 'kind', 'bold',
@@ -2290,6 +2299,7 @@ function createSandboxRuntime({
   ttlMs = 0,
   maxSandboxes = 0,
   maxDocuments = 0,
+  maxStateBytes = null,
   documentCounter = null,
   retention = null,
   defaultOwnerToken = '',
@@ -2305,6 +2315,11 @@ function createSandboxRuntime({
   const tenancy = ['off', 'namespaces', 'owned'].includes(mode) ? mode : 'namespaces';
   const defaultPersist = typeof persist === 'function' ? persist : () => {};
   const registryFile = String(sandboxFile || (stateFile ? `${stateFile}.sandboxes.json` : ''));
+  // PD-02: квота по байтам состояния песочницы. По умолчанию включена вместе с
+  // квотой документов (hosted/owned): количество документов не ограничивает их размер.
+  const byteLimit = maxStateBytes === null || maxStateBytes === undefined
+    ? (Number(maxDocuments) > 0 ? DEFAULT_MAX_STATE_BYTES : 0)
+    : Math.max(0, Math.floor(Number(maxStateBytes) || 0));
   const suffix = String(hostSuffix || '').trim().toLowerCase().replace(/^\./, '');
   const operators = (Array.isArray(operatorTokens) ? operatorTokens : [operatorTokens])
     .map((t) => String(t || '').trim())
@@ -2386,6 +2401,8 @@ function createSandboxRuntime({
     if (!rec || rec.isDefault) return { ok: false, error: rec && rec.isDefault ? 'default-sandbox' : 'not-found', removed: null };
     sandboxes.delete(rec.id);
     if (activeId === rec.id) activeId = 'default';
+    dirtyIds.delete(rec.id);
+    removedIds.add(rec.id);
     flushRegistry();
     notifySandboxRemoved(rec);
     return { ok: true, removed: rec.id };
@@ -2414,26 +2431,59 @@ function createSandboxRuntime({
   };
   sandboxes.set('default', defaultRecord);
 
-  /* --------------------------------------------------- персистентность (F-14) */
+  /* ------------------------------------- персистентность (F-14, PD-02) */
 
-  function registryPayload() {
+  // PD-02: реестр песочниц хранится поштучно — каталог `<registry без .json>.records/`
+  // (по умолчанию `<MOCK_STATE_FILE>.sandboxes.records/`), по файлу `<id>.json` на
+  // песочницу. Мутация песочницы переписывает только её файл (стоимость O(её
+  // состояние)), а не весь реестр всех песочниц. Единый старый файл `<registryFile>`
+  // (формат до PD-02) читается один раз при старте, переписывается в поштучные
+  // файлы и переименовывается в `<registryFile>.migrated`.
+  const recordsDir = registryFile ? `${registryFile.replace(/\.json$/i, '')}.records` : '';
+  const dirtyIds = new Set(); // песочницы, чей файл нужно переписать на следующем сбросе
+  const removedIds = new Set(); // песочницы, чей файл нужно удалить на следующем сбросе
+
+  /** Отметка мутации записи: инвалидирует кэш размера состояния (квота по байтам). */
+  function touch(rec) {
+    rec.version = (rec.version || 0) + 1;
+  }
+
+  function recordPath(id) {
+    return path.join(recordsDir, `${id}.json`);
+  }
+
+  function recordPayload(rec) {
     return {
-      version: 1,
-      activeId,
-      savedAt: isoNow(),
-      sandboxes: Array.from(sandboxes.values())
-        .filter((rec) => !rec.isDefault)
-        .map((rec) => ({
-          id: rec.id,
-          createdAt: rec.createdAt,
-          updatedAt: rec.updatedAt,
-          expiresAt: rec.expiresAt || 0,
-          ownerTokenHash: rec.ownerTokenHash || null,
-          creds: rec.creds || null,
-          profile: rec.profile || null,
-          state: rec.state,
-        })),
+      id: rec.id,
+      createdAt: rec.createdAt,
+      updatedAt: rec.updatedAt,
+      expiresAt: rec.expiresAt || 0,
+      ownerTokenHash: rec.ownerTokenHash || null,
+      creds: rec.creds || null,
+      profile: rec.profile || null,
+      state: rec.state,
     };
+  }
+
+  function writeRecordFile(rec) {
+    const file = recordPath(rec.id);
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ version: 1, savedAt: isoNow(), sandbox: recordPayload(rec) }));
+    fs.renameSync(tmp, file); // атомарная замена: файл не бывает полузаписан
+  }
+
+  /**
+   * Размер состояния песочницы в байтах (JSON). Кэшируется по версии записи:
+   * пересчёт только после мутации, поэтому проверка квоты не сериализует
+   * состояние на каждом запросе.
+   */
+  function stateBytesOf(rec) {
+    const version = rec.version || 0;
+    if (rec.stateBytes === undefined || rec.bytesVersion !== version) {
+      rec.stateBytes = Buffer.byteLength(JSON.stringify(rec.state));
+      rec.bytesVersion = version;
+    }
+    return rec.stateBytes;
   }
 
   function flushRegistry() {
@@ -2441,19 +2491,45 @@ function createSandboxRuntime({
       clearTimeout(saveTimer);
       saveTimer = null;
     }
-    if (!registryFile) return;
+    if (!recordsDir) {
+      dirtyIds.clear();
+      removedIds.clear();
+      return;
+    }
+    if (!dirtyIds.size && !removedIds.size) return;
+    const toRemove = Array.from(removedIds);
+    const toWrite = Array.from(dirtyIds);
+    removedIds.clear();
+    dirtyIds.clear();
+    for (const id of toRemove) {
+      try {
+        fs.rmSync(recordPath(id), { force: true });
+      } catch (e) {
+        log(`sandbox ${id} registry file removal failed: ${e.message}`);
+      }
+    }
+    if (!toWrite.length) return;
     try {
-      fs.mkdirSync(path.dirname(registryFile), { recursive: true });
-      const tmp = `${registryFile}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(registryPayload()));
-      fs.renameSync(tmp, registryFile); // атомарная замена: файл не бывает полузаписан
+      fs.mkdirSync(recordsDir, { recursive: true });
     } catch (e) {
       log(`sandbox registry persist failed: ${e.message}`);
+      for (const id of toWrite) dirtyIds.add(id);
+      return;
+    }
+    for (const id of toWrite) {
+      const rec = sandboxes.get(id);
+      if (!rec || rec.isDefault) continue; // удалённая запись уже снята через removedIds
+      try {
+        writeRecordFile(rec);
+      } catch (e) {
+        dirtyIds.add(id); // повторим на следующем сбросе
+        log(`sandbox ${id} registry persist failed: ${e.message}`);
+      }
     }
   }
 
   function scheduleRegistrySave() {
-    if (!registryFile || saveTimer) return;
+    if (!recordsDir || saveTimer) return;
     saveTimer = setTimeout(() => {
       saveTimer = null;
       flushRegistry();
@@ -2463,55 +2539,93 @@ function createSandboxRuntime({
 
   function persistRecord(rec, immediate = false) {
     if (!rec || rec.isDefault) {
+      if (rec) touch(rec);
       defaultPersist();
       return;
     }
+    touch(rec);
+    if (!recordsDir) return;
+    dirtyIds.add(rec.id);
     if (immediate) flushRegistry();
     else scheduleRegistrySave();
+  }
+
+  /**
+   * Принимает одну запись реестра (из поштучного файла или legacy-снимка).
+   * Возвращает true, если песочница добавлена в рантайм.
+   */
+  function adoptRecord(item) {
+    const id = sanitizeSandboxId(item && item.id);
+    if (!id || id === 'default' || sandboxes.has(id)) return false;
+    let stored;
+    try {
+      stored = safeStateSnapshot(item.state || {}, `sandbox ${id}`, false);
+    } catch (e) {
+      log(`sandbox ${id} restore skipped: ${e.message}`);
+      return false;
+    }
+    const restored = freshState(id);
+    mergeValidatedInto(restored, stored);
+    sandboxes.set(id, {
+      id,
+      isDefault: false,
+      createdAt: item.createdAt || isoNow(),
+      updatedAt: item.updatedAt || isoNow(),
+      expiresAt: Number(item.expiresAt) || 0,
+      ownerTokenHash: item.ownerTokenHash || null,
+      creds: item.creds || null,
+      profile: item.profile || null,
+      state: restored,
+    });
+    return true;
   }
 
   /**
    * Восстановление реестра песочниц. Запись с id `default` из файла намеренно
    * игнорируется: состояние именованной песочницы нельзя выдать за default
    * (F-14), default всегда восстанавливается только из MOCK_STATE_FILE.
+   * Единый legacy-файл (до PD-02) переносится в поштучные файлы: если песочница
+   * уже есть в каталоге, более новая копия из каталога побеждает.
    */
   function restoreRegistry() {
-    if (!registryFile || !fs.existsSync(registryFile)) return;
+    if (!recordsDir) return;
     try {
-      const raw = JSON.parse(fs.readFileSync(registryFile, 'utf8'));
-      const items = raw && Array.isArray(raw.sandboxes) ? raw.sandboxes : [];
-      for (const item of items) {
-        const id = sanitizeSandboxId(item && item.id);
-        if (!id || id === 'default' || sandboxes.has(id)) continue;
-        let stored;
+      const names = fs.existsSync(recordsDir) ? fs.readdirSync(recordsDir) : [];
+      for (const name of names) {
+        if (!name.endsWith('.json')) continue;
         try {
-          stored = safeStateSnapshot(item.state || {}, `sandbox ${id}`, false);
+          const raw = JSON.parse(fs.readFileSync(path.join(recordsDir, name), 'utf8'));
+          adoptRecord(raw && raw.sandbox);
         } catch (e) {
-          log(`sandbox ${id} restore skipped: ${e.message}`);
-          continue;
+          log(`sandbox file ${name} restore failed: ${e.message}`);
         }
-        const restored = freshState(id);
-        mergeValidatedInto(restored, stored);
-        sandboxes.set(id, {
-          id,
-          isDefault: false,
-          createdAt: item.createdAt || isoNow(),
-          updatedAt: item.updatedAt || isoNow(),
-          expiresAt: Number(item.expiresAt) || 0,
-          ownerTokenHash: item.ownerTokenHash || null,
-          creds: item.creds || null,
-          profile: item.profile || null,
-          state: restored,
-        });
       }
-      // PA-55 / PA-50: request-local runtime всегда имеет дефолтную точку входа
-      // 'default' для безселекторных вызовов; чужая песочница из файла не становится
-      // глобальным fallback.
-      activeId = 'default';
-      log(`sandboxes restored from ${registryFile}: ${sandboxes.size - 1}`);
     } catch (e) {
       log(`sandbox registry restore failed: ${e.message}`);
     }
+
+    if (registryFile && fs.existsSync(registryFile)) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(registryFile, 'utf8'));
+        const items = raw && Array.isArray(raw.sandboxes) ? raw.sandboxes : [];
+        for (const item of items) {
+          if (adoptRecord(item)) dirtyIds.add(sanitizeSandboxId(item.id));
+        }
+        flushRegistry();
+        // Переименовываем legacy-файл только если все записи легли в каталог:
+        // иначе он остаётся и миграция повторится на следующем старте.
+        if (!dirtyIds.size) fs.renameSync(registryFile, `${registryFile}.migrated`);
+        log(`sandbox registry migrated from ${registryFile}: ${items.length}`);
+      } catch (e) {
+        log(`legacy sandbox registry migration failed: ${e.message}`);
+      }
+    }
+
+    // PA-55 / PA-50: request-local runtime всегда имеет дефолтную точку входа
+    // 'default' для безселекторных вызовов; чужая песочница из файла не становится
+    // глобальным fallback.
+    activeId = 'default';
+    log(`sandboxes restored from ${recordsDir}: ${sandboxes.size - 1}`);
   }
 
   /* ------------------------------------------------------- разбор селектора */
@@ -2681,9 +2795,14 @@ function createSandboxRuntime({
   }
 
   function checkDocuments() {
-    const used = documents();
+    const rec = currentRecord();
+    const used = documents(rec);
     if (maxDocuments > 0 && used !== null && used >= maxDocuments) {
       return { ok: false, used, limit: maxDocuments };
+    }
+    if (byteLimit > 0) {
+      const bytes = stateBytesOf(rec);
+      if (bytes >= byteLimit) return { ok: false, kind: 'bytes', used: bytes, limit: byteLimit };
     }
     return { ok: true, used, limit: maxDocuments };
   }
@@ -3012,7 +3131,22 @@ function createSandboxRuntime({
     const authRes = authorizeTarget(rec, auth);
     if (!authRes.ok) return { ok: false, sandbox: rec.id, error: authRes.error };
 
+    // PD-02: импорт — слияние; при превышении байтовой квоты откатываем состояние
+    // к снимку до слияния (JSON-состояние round-trip-безопасно).
+    const before = byteLimit > 0 ? JSON.stringify(rec.state) : null;
     mergeValidatedInto(rec.state, safe);
+    if (byteLimit > 0) {
+      touch(rec);
+      const bytes = stateBytesOf(rec);
+      if (bytes > byteLimit) {
+        mergeValidatedInto(rec.state, JSON.parse(before));
+        touch(rec);
+        const e = new Error(`Снимок превышает байтовую квоту песочницы (${bytes} > ${byteLimit} байт)`);
+        e.code = 'SANDBOX_QUOTA_BYTES';
+        e.sandbox = rec.id;
+        throw e;
+      }
+    }
     rec.updatedAt = isoNow();
     persistRecord(rec, true);
     return { ok: true, sandbox: rec.id };
@@ -3027,6 +3161,8 @@ function createSandboxRuntime({
       if (rec.isDefault) continue;
       if (rec.expiresAt && rec.expiresAt <= ts) {
         sandboxes.delete(rec.id);
+        dirtyIds.delete(rec.id);
+        removedIds.add(rec.id);
         if (activeId === rec.id) activeId = 'default';
         notifySandboxRemoved(rec);
         log(`sandbox ${rec.id} expired (TTL) and removed`);
@@ -3035,7 +3171,12 @@ function createSandboxRuntime({
       }
       if (typeof retention === 'function') {
         try {
-          pruned += retention(rec.state, ts) || 0;
+          const n = retention(rec.state, ts) || 0;
+          pruned += n;
+          if (n > 0) {
+            touch(rec);
+            dirtyIds.add(rec.id);
+          }
         } catch (e) {
           log(`sandbox ${rec.id} retention failed: ${e.message}`);
         }
@@ -3131,7 +3272,7 @@ function createSandboxRuntime({
     documents,
     checkDocuments,
     activeId: () => activeId,
-    stats: () => ({ mode: tenancy, activeId, count: sandboxes.size - 1, file: registryFile || null }),
+    stats: () => ({ mode: tenancy, activeId, count: sandboxes.size - 1, file: recordsDir || null }),
     flush: flushRegistry,
     restore: restoreRegistry,
   };
