@@ -30,9 +30,6 @@ const {
   verifyMerchantWebhook,
 } = core;
 const log = core.createLog('tbank-mock');
-// Журнал входящих запросов: интегратору видно в /admin/journal, как мок понял
-// запрос и что ответил (спека §2 — «журнал запросов»).
-const journal = core.createJournal({ size: 200 });
 
 const {
   MOCK_HOST = '0.0.0.0',
@@ -193,6 +190,9 @@ function tbankRetention(snapshot, ts) {
  * Рантайм песочниц (RFC-001, F-11—F-15): request-local контекст, per-sandbox
  * state/creds/persist, owner-token в hosted, TTL/лимиты и квоты.
  */
+// Дочернее состояние записи песочницы (#52): сценарии и журнал создаются
+// ниже; runtime зовёт этот hook при удалении/TTL записи, когда они уже готовы.
+let dropSandboxChildState = () => {};
 const sandboxRuntime = createSandboxRuntime({
   state: defaultState,
   persist: store.persist,
@@ -209,12 +209,16 @@ const sandboxRuntime = createSandboxRuntime({
   hostSuffix: SANDBOX_HOST_SUFFIX,
   operatorTokens: [MOCK_ADMIN_TOKEN, OPERATOR_TOKEN],
   createLimit: SANDBOX_CREATE_LIMIT,
+  onSandboxRemoved: (record) => dropSandboxChildState(record),
   log: (msg) => console.error(`[mock] ${msg}`),
 });
 
 // Фасад состояния/персистентности: внутри запроса резолвится в его песочницу.
 const state = sandboxRuntime.state;
 const persist = sandboxRuntime.persist;
+
+// Журнал — per-sandbox раздел записи текущей песочницы (PB-13, #52).
+const journal = core.createJournal({ size: 200, sandboxScope: () => sandboxRuntime.current() });
 
 /* --------------------------------------------------- креды песочницы (F-12) */
 
@@ -238,7 +242,14 @@ const clock = core.createVirtualClock({
   setStateOffset: (v) => { state.clockOffsetMs = v; persist(); },
 });
 
-const scenarios = core.createScenarioRegistry({ clock });
+const scenarios = core.createScenarioRegistry({ clock, sandboxScope: () => sandboxRuntime.current() });
+dropSandboxChildState = (record) => { scenarios.dropScope(record); journal.dropScope(record); };
+const clearSandboxChildState = (record) => {
+  if (!record) return;
+  scenarios.clearRulesFor(record);
+  scenarios.clearHistoryFor(record);
+  journal.clearFor(record);
+};
 
 /* --------------------------------------------------------------- signature */
 
@@ -2639,9 +2650,7 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
     if (!resetName.ok) {
       return sendSandboxError(res, { ok: false, kind: resetName.error || 'unauthorized', sandbox: resetName.sandbox || target });
     }
-    scenarios.clearRules();
-    scenarios.clearHistory();
-    journal.clear();
+    clearSandboxChildState(sandboxRuntime.find(target));
     return sendJson(res, { ok: true, sandbox: resetName.sandbox || target });
   }
 
@@ -2747,7 +2756,9 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
         const rule = scenarios.addRule(body || {});
         return sendJson(res, { ok: true, rule });
       } catch (e) {
-        return sendJson(res, err(7, e.message, null, { field: 'scenario' }), 400);
+        const bodyErr = err(7, e.message, null, { field: 'scenario' });
+        if (e && e.code) bodyErr.code = e.code;
+        return sendJson(res, bodyErr, 400);
       }
     }
     if (req.method === 'DELETE') {

@@ -462,6 +462,101 @@ async function main() {
     assert.strictEqual(reg.listHistory().length, 1, 'срабатывание должно попасть в журнал');
   });
 
+  check('createScenarioRegistry/createJournal: разделы по записи песочницы не пересекаются (PA-51/PG-04/PB-13, #52)', () => {
+    const recA = { id: 'tenant-a' };
+    const recB = { id: 'tenant-b' };
+    let current = recA;
+    const reg = core.createScenarioRegistry({ sandboxScope: () => current });
+    const journal = core.createJournal({ sandboxScope: () => current });
+
+    reg.addRule({ target: 'init', scenario: 'fail', persistent: true });
+    reg.resolve({ header: 'webhook-drop', target: 'init', context: { orderId: 'ord-a' } });
+    journal.record({ method: 'POST', path: '/v2/Init', status: 200, ms: 1, body: { OrderId: 'ord-a' } });
+
+    current = recB;
+    assert.deepStrictEqual(reg.listRules(), [], 'правила A не видны B');
+    assert.deepStrictEqual(reg.listHistory(), [], 'история A не видна B');
+    assert.deepStrictEqual(journal.list(), [], 'журнал A не виден B');
+    assert.strictEqual(reg.resolve({ target: 'init', context: { orderId: 'ord-b' } }).has('fail'), false, 'правило A не срабатывает на трафике B');
+    reg.addRule({ target: 'init', scenario: 'latency:5', persistent: true });
+    journal.record({ method: 'POST', path: '/v2/Init', status: 200, ms: 2, body: { OrderId: 'ord-b' } });
+
+    current = recA;
+    assert.strictEqual(reg.listRules().length, 1);
+    assert.strictEqual(reg.listHistory()[0].orderId, 'ord-a', 'в истории A только свой orderId');
+    assert.strictEqual(journal.list()[0].body.OrderId, 'ord-a');
+    reg.clearRules();
+    reg.clearHistory();
+    journal.clear();
+
+    current = recB;
+    assert.strictEqual(reg.listRules().length, 1, 'очистка A не стирает правила B');
+    assert.strictEqual(journal.list().length, 1, 'очистка A не стирает журнал B');
+
+    // Удаление раздела записи: пересоздание с тем же id, но новой записью — пусто.
+    reg.dropScope(recB);
+    journal.dropScope(recB);
+    assert.deepStrictEqual(reg.listRules(), []);
+    assert.deepStrictEqual(journal.list(), []);
+
+    // PG-10: песочница истекла во время await — запись в её журнал пропускается,
+    // а не роняет ответ и не уходит в fallback/default раздел.
+    let expired = true;
+    const deadJournal = core.createJournal({
+      sandboxScope: () => {
+        if (expired) {
+          const e = new Error('Песочница истекла');
+          e.code = 'SANDBOX_EXPIRED';
+          throw e;
+        }
+        return recA;
+      },
+    });
+    deadJournal.record({ method: 'GET', path: '/possystem/v4/report/x', status: 410 });
+    expired = false;
+    assert.deepStrictEqual(deadJournal.list(), [], 'запись истёкшей песочницы не попала в чужой раздел');
+  });
+
+  check('createScenarioRegistry: cap 200 и лимит правила 8 KiB per-sandbox, отказ по code без мутации (PA-51, #52)', () => {
+    const reg = core.createScenarioRegistry();
+    assert.deepStrictEqual(reg.limits, { maxRules: 200, maxRuleBytes: 8192, historySize: 200 });
+    for (let i = 0; i < 200; i += 1) reg.addRule({ id: `cap-${i}`, scenario: 'fail', persistent: true });
+    assert.strictEqual(reg.listRules().length, 200, 'ровно 200 правил проходят');
+
+    assert.throws(
+      () => reg.addRule({ id: 'cap-200', scenario: 'fail' }),
+      (e) => e.code === 'rule_cap_exceeded' && e.limit === 200 && e.actual === 200 && e.message.includes('лимит 200'),
+    );
+    assert.strictEqual(reg.listRules().length, 200, 'после отказа по cap состояние не изменилось');
+
+    // Update существующего id при полном cap — не 201-е правило.
+    reg.addRule({ id: 'cap-0', scenario: 'webhook-drop', persistent: true });
+    assert.strictEqual(reg.listRules().length, 200);
+    assert.strictEqual(reg.listRules()[0].scenario, 'webhook-drop');
+
+    const exactRule = { scenario: 'fail', match: { pad: '' } };
+    exactRule.match.pad = 'x'.repeat(8192 - Buffer.byteLength(JSON.stringify(exactRule), 'utf8'));
+    assert.strictEqual(Buffer.byteLength(JSON.stringify(exactRule), 'utf8'), 8192);
+    const sized = core.createScenarioRegistry();
+    sized.addRule(exactRule);
+    assert.strictEqual(sized.listRules().length, 1, 'правило ровно 8 KiB проходит');
+
+    const bigRule = { scenario: 'fail', match: { pad: 'x'.repeat(9000) } };
+    const bigBytes = Buffer.byteLength(JSON.stringify(bigRule), 'utf8');
+    assert.ok(bigBytes > 8192);
+    assert.throws(
+      () => sized.addRule(bigRule),
+      (e) => e.code === 'rule_too_large' && e.limit === 8192 && e.actual === bigBytes,
+    );
+    assert.strictEqual(sized.listRules().length, 1, 'после отказа по размеру состояние не изменилось');
+    // И на update: oversized-замена не затирает действующее правило.
+    assert.throws(
+      () => sized.addRule({ id: sized.listRules()[0].id, scenario: 'fail', match: { pad: 'я'.repeat(5000) } }),
+      (e) => e.code === 'rule_too_large',
+    );
+    assert.strictEqual(sized.listRules()[0].match.pad.length, exactRule.match.pad.length, 'старое правило цело после oversized update');
+  });
+
   check('checkAdminAuth пропускает по умолчанию и проверяет токен при MOCK_ADMIN_TOKEN (A-20)', () => {
     assert.strictEqual(core.checkAdminAuth({ headers: {}, url: '/admin' }, ''), true);
     assert.strictEqual(core.checkAdminAuth({ headers: {}, url: '/admin' }, 'sec-1'), false);
@@ -1189,6 +1284,58 @@ async function main() {
     }, (err) => err && err.code === 'SANDBOX_ADMISSION_FAILED');
     assert.strictEqual(executed, false);
     assert.throws(() => rt.run(null, () => {}), (err) => err && err.code === 'SANDBOX_ADMISSION_FAILED');
+  });
+
+  check('createSandboxRuntime + сценарии/журнал: жизненный цикл раздела = запись песочницы (удаление/TTL/пересоздание, #52)', () => {
+    let now = 1000;
+    let rt;
+    const reg = core.createScenarioRegistry({ sandboxScope: () => rt.current() });
+    const journal = core.createJournal({ sandboxScope: () => rt.current() });
+    rt = core.createSandboxRuntime({
+      state: {},
+      initialStateFactory: () => ({}),
+      mode: 'namespaces',
+      ttlMs: 50,
+      now: () => now,
+      onSandboxRemoved: (record) => { reg.dropScope(record); journal.dropScope(record); },
+      log: () => {},
+    });
+    const inSandbox = (id, fn) => {
+      const admission = rt.admit({ headers: { 'x-mock-sandbox': id }, url: '/v2/Init' }, 'business');
+      assert.strictEqual(admission.ok, true);
+      return rt.run(admission, fn);
+    };
+    const fill = () => {
+      reg.addRule({ scenario: 'fail', persistent: true });
+      reg.resolve({ header: 'webhook-drop', context: { orderId: 'ord-ttl' } });
+      journal.record({ method: 'POST', path: '/v2/Init', status: 200, body: { OrderId: 'ord-ttl' } });
+    };
+
+    inSandbox('tenant-life', fill);
+    inSandbox('tenant-life', () => {
+      assert.strictEqual(reg.listRules().length, 1);
+      assert.strictEqual(journal.list().length, 1);
+    });
+    assert.strictEqual(rt.remove('tenant-life').ok, true);
+    inSandbox('tenant-life', () => {
+      assert.deepStrictEqual(reg.listRules(), [], 'пересоздание после удаления не наследует правила');
+      assert.deepStrictEqual(reg.listHistory(), [], 'пересоздание после удаления не наследует историю');
+      assert.deepStrictEqual(journal.list(), [], 'пересоздание после удаления не наследует журнал');
+    });
+
+    assert.strictEqual(rt.remove('tenant-life').ok, true);
+    inSandbox('tenant-ttl', fill);
+    now = 2000;
+    assert.strictEqual(rt.sweep().expired, 1, 'TTL-запись удалена sweep-ом вместе с дочерним состоянием');
+    inSandbox('tenant-ttl', () => {
+      assert.deepStrictEqual(reg.listRules(), [], 'пересоздание после TTL не наследует правила');
+      assert.deepStrictEqual(journal.list(), [], 'пересоздание после TTL не наследует журнал');
+    });
+
+    // Lone-sandbox: вне контекста запроса — default-раздел, как раньше.
+    reg.addRule({ id: 'lone', scenario: 'fail', persistent: true });
+    assert.strictEqual(reg.listRules().some((r) => r.id === 'lone'), true);
+    reg.clearRules();
   });
 
   await acheck('createDeliveryQueue: entries-функция отправляет записи каждой песочницы', async () => {

@@ -158,6 +158,8 @@ HTTP-коды), `X-Mock-Latency: 500ms`. Цели правил: `register`,
 `registerpreauth`, `deposit`, `reverse`, `refund`, `getorderstatus`,
 `getorderstatusextended`, `pay`, `3ds`, `*`.
 
+Правила, история срабатываний и журнал `/admin/journal` принадлежат текущей песочнице (#52): другие песочницы их не видят и не очищают, `POST /mock/reset` действует только на целевую песочницу. Лимиты: до 200 правил на песочницу и до 8 KiB на правило (превышение — HTTP 400 с `code` `rule_cap_exceeded`/`rule_too_large`).
+
 ## Виртуальные часы
 
 `GET/POST /mock/time` (`{"advance":"+25m"}`, `{"offset":60000}`, `{"reset":true}`)

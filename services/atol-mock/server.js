@@ -52,9 +52,6 @@ const {
 } = core;
 
 const log = core.createLog('atol-mock');
-// Журнал /possystem/v4-запросов: интегратор видит в /admin/journal, как мок
-// понял запрос и что ответил (curl-сниппеты; секреты и PII редактирует ядро).
-const journal = core.createJournal({ size: 200 });
 
 const {
   MOCK_HOST = '0.0.0.0',
@@ -217,6 +214,9 @@ function atolRetention(snapshot, ts) {
   return pruned;
 }
 
+// Дочернее состояние записи песочницы (#52): сценарии и журнал создаются
+// ниже; runtime зовёт этот hook при удалении/TTL записи, когда они уже готовы.
+let dropSandboxChildState = () => {};
 const sandboxRuntime = createSandboxRuntime({
   state: defaultState,
   persist: store.persist,
@@ -233,11 +233,15 @@ const sandboxRuntime = createSandboxRuntime({
   hostSuffix: SANDBOX_HOST_SUFFIX,
   operatorTokens: [MOCK_ADMIN_TOKEN, OPERATOR_TOKEN],
   createLimit: SANDBOX_CREATE_LIMIT,
+  onSandboxRemoved: (record) => dropSandboxChildState(record),
   log: (msg) => console.error(`[atol-mock] ${msg}`),
 });
 
 const state = sandboxRuntime.state;
 const persist = sandboxRuntime.persist;
+
+// Журнал — per-sandbox раздел записи текущей песочницы (PB-13, #52).
+const journal = core.createJournal({ size: 200, sandboxScope: () => sandboxRuntime.current() });
 
 /* --------------------------------------------------- креды песочницы (F-12) */
 
@@ -256,7 +260,14 @@ const clock = core.createVirtualClock({
   setStateOffset: (v) => { state.clockOffsetMs = v; persist(); },
 });
 
-const scenarios = core.createScenarioRegistry({ clock });
+const scenarios = core.createScenarioRegistry({ clock, sandboxScope: () => sandboxRuntime.current() });
+dropSandboxChildState = (record) => { scenarios.dropScope(record); journal.dropScope(record); };
+const clearSandboxChildState = (record) => {
+  if (!record) return;
+  scenarios.clearRulesFor(record);
+  scenarios.clearHistoryFor(record);
+  journal.clearFor(record);
+};
 
 /* ------------------------------------------------- реквизиты ФФД 1.05 (v4) */
 
@@ -1394,9 +1405,7 @@ const server = http.createServer((req, res) => {
         if (!result.ok) {
           return sendSandboxError(res, { ok: false, kind: result.error || 'unauthorized', sandbox: result.sandbox || target });
         }
-        scenarios.clearRules();
-        scenarios.clearHistory();
-        journal.clear();
+        clearSandboxChildState(sandboxRuntime.find(target));
         return sendJson(res, { ...result, current: sandboxRuntime.currentId() });
       }
 
@@ -1464,7 +1473,9 @@ const server = http.createServer((req, res) => {
           try {
             return sendJson(res, { ok: true, rule: scenarios.addRule(body) });
           } catch (e) {
-            return jsonRaw(res, 400, aerrBody(4, e.message, { field: 'scenario' }));
+            const bodyErr = aerr(4, e.message, { field: 'scenario' });
+            if (e && e.code) bodyErr.code = e.code;
+            return jsonRaw(res, 400, JSON.stringify(bodyErr));
           }
         }
         if (req.method === 'DELETE') {

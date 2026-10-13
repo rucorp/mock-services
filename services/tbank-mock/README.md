@@ -72,6 +72,8 @@ TBANK_NOTIFICATION_URL=https://<домен ядра>/api/v1/payments/tbank/webho
 | `GET /admin` | консоль платежей, споров, сделок, уведомлений, поступлений и верификаций; действия форм защищены подписанным CSRF-токеном и same-origin проверкой |
 | `GET /admin/journal`, `GET /openapi.json`, `GET /health` | журнал API с редактированием секретов/PII, OpenAPI 3.1 и health-check |
 
+Правила, история срабатываний и журнал `/admin/journal` принадлежат текущей песочнице (#52): другие песочницы их не видят и не очищают, `POST /mock/reset` действует только на целевую песочницу. Лимиты: до 200 правил на песочницу и до 8 KiB на правило (превышение — HTTP 400 с `code` `rule_cap_exceeded`/`rule_too_large`).
+
 ### acqapi: OAuth и регистрация точки
 
 `POST /oauth/token` принимает только фактический Basic-клиент: по умолчанию
