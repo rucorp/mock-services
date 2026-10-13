@@ -168,34 +168,37 @@ async function registerPartner(port, descriptor, inn = '7701234567') {
  */
 function startChild(env = {}) {
   const { spawn } = require('child_process');
+  const childEnv = {
+    ...process.env,
+    MOCK_HOST: '127.0.0.1',
+    MOCK_PORT: '0',
+    MOCK_STATE_FILE: '',
+    MOCK_RETRY_MS: '1000',
+    MOCK_PROFILE: 'plain',
+    MOCK_ADMIN_TOKEN: '',
+    MOCK_OPERATOR_TOKEN: '',
+    MOCK_HOSTED: '',
+    MOCK_TENANCY: '',
+    MOCK_SANDBOX_FILE: '',
+    MOCK_SANDBOX_TOKEN: '',
+    MOCK_SANDBOX_TTL_MS: '',
+    MOCK_SANDBOX_SWEEP_MS: '',
+    MOCK_SANDBOX_MAX: '',
+    MOCK_SANDBOX_MAX_DOCUMENTS: '',
+    MOCK_SANDBOX_RETENTION_MS: '',
+    MOCK_SANDBOX_HOST_SUFFIX: '',
+    MOCK_SANDBOX_CREATE_LIMIT: '',
+    ...env,
+  };
+  if (!Object.prototype.hasOwnProperty.call(env, 'MOCK_BLOCK_PRIVATE_WEBHOOKS')) {
+    delete childEnv.MOCK_BLOCK_PRIVATE_WEBHOOKS;
+  }
   const proc = spawn('node', ['--max-old-space-size=48', path.join(__dirname, 'server.js')], {
-    env: {
-      ...process.env,
-      MOCK_HOST: '127.0.0.1',
-      MOCK_PORT: '0',
-      MOCK_STATE_FILE: '',
-      MOCK_RETRY_MS: '1000',
-      MOCK_PROFILE: 'plain',
-      MOCK_ADMIN_TOKEN: '',
-      MOCK_OPERATOR_TOKEN: '',
-      MOCK_HOSTED: '',
-      MOCK_BLOCK_PRIVATE_WEBHOOKS: '',
-      MOCK_TENANCY: '',
-      MOCK_SANDBOX_FILE: '',
-      MOCK_SANDBOX_TOKEN: '',
-      MOCK_SANDBOX_TTL_MS: '',
-      MOCK_SANDBOX_SWEEP_MS: '',
-      MOCK_SANDBOX_MAX: '',
-      MOCK_SANDBOX_MAX_DOCUMENTS: '',
-      MOCK_SANDBOX_RETENTION_MS: '',
-      MOCK_SANDBOX_HOST_SUFFIX: '',
-      MOCK_SANDBOX_CREATE_LIMIT: '',
-      ...env,
-    },
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  let buf = '';
   const port = new Promise((resolve, reject) => {
-    let buf = '';
     const timer = setTimeout(() => reject(new Error(`дочерний стенд не сообщил порт: ${buf.slice(0, 300)}`)), 5000);
     proc.stdout.on('data', (d) => {
       buf += String(d);
@@ -205,7 +208,7 @@ function startChild(env = {}) {
     proc.stderr.on('data', (d) => { buf += String(d); });
     proc.on('exit', (code) => { clearTimeout(timer); reject(new Error(`дочерний стенд завершился с кодом ${code}: ${buf.slice(0, 300)}`)); });
   });
-  return { proc, port, stop: () => stopChild(proc) };
+  return { proc, port, output: () => buf, stop: () => stopChild(proc) };
 }
 
 async function stopChild(child) {
@@ -1216,6 +1219,7 @@ process.env.MOCK_RETRY_MS = '1000';
       assert.strictEqual(healthHosted.statusCode, 200, 'health в hosted-режиме остаётся публичным');
       const initHosted = await request(childPort, 'POST', '/v2/Init', { ...(() => { const p = { TerminalKey: TERMINAL, Amount: '1500', OrderId: 'hosted-1' }; return { ...p, Token: tokenOf(p) }; })() });
       assert.strictEqual(JSON.parse(initHosted.body).Success, true, 'платёжный API работает и в hosted-режиме');
+      assert.ok(child.output().includes('hosted=true block_private_webhooks=true'), '#51 PF-01: MOCK_HOSTED=1 включает block_private_webhooks=true по умолчанию');
     } finally {
       await stopChild(child);
     }

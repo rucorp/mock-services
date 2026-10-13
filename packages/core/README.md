@@ -38,15 +38,20 @@ Zero dependencies, Node >= 18. Self-test: `npm run test:core`.
   через allowlist (`Content-Type`, `Content-Length`, `User-Agent`, `X-Mock-*`),
   тело и сырой payload — через `redactSecrets`/`redactRawBody`, длина полей и всей
   записи ограничена.
-- `postJson(url, payload, timeoutMs)` — исходящий POST (http/https по схеме;
-  другие схемы отклоняются, редиректы не отслеживаются).
+- `postJson(url, payload, timeoutMs, options)` — исходящий POST/GET (http/https по схеме;
+  другие схемы отклоняются, редиректы не отслеживаются; для IPv6-литералов скобки
+  `[...]` нормализуются перед подключением и сохраняются в заголовке `Host` — PA-25).
 - `flagEnabled(value, fallback)` — разбор boolean-настроек из env: `1`/`true`/`yes`/`on`
   против `0`/`false`/`no`/`off`, пустое значение — `fallback` (F-08: `=1` больше не «молчит»).
+- `defaultBlockPrivateHosts(env)` — дефолт SSRF-политики ядра, согласованный с адаптерами (PA-58):
+  `flagEnabled(MOCK_BLOCK_PRIVATE_WEBHOOKS, flagEnabled(MOCK_HOSTED, false))`.
 - `isPrivateAddress(ip)` / `isPrivateHost(url)` — классификация IP-литералов и
-  URL («приватный/служебный адрес») для opt-in защиты вебхуков от SSRF.
-- `assertPublicHost(url, {lookup})` — async-проверка перед исходящим запросом:
-  схема http/https, публичный IP, имя резолвится только в публичные адреса;
-  бросает `Error` с `code === 'SSRF_BLOCKED'`.
+  URL («приватный/служебный адрес», включая `ff00::/8`, TEST-NET-1/2/3,
+  `2001:db8::/32` и `64:ff9b:1::/48` — PA-26) для защиты вебхуков от SSRF.
+- `resolvePublicHost(url, {lookup})` / `assertPublicHost(url, {lookup})` — async-проверка
+  перед исходящим запросом: схема http/https, публичный IP, имя резолвится один
+  раз только в публичные адреса и пиннится к сокету (защита от DNS TOCTOU / rebinding —
+  §7.3, PG-11); бросает `Error` с `code === 'SSRF_BLOCKED'`.
 - `checkControlAccess(req, {adminToken, operatorToken, surface, hosted})` —
   единый access-control управляющей поверхности (F-07): роли `admin`/`operator`,
   constant-time сравнение токена, fail-closed при `hosted` без секрета.
@@ -54,7 +59,9 @@ Zero dependencies, Node >= 18. Self-test: `npm run test:core`.
   запись живёт в состоянии сервиса (переживает рестарт), `retryMs`/`maxAttempts`
   настраиваются, критерий доставки — хук (`isOk`: у Т-Банка это 200 + тело «OK»,
   у Ferma — любой 2xx). Тик — раз в секунду; `awaitSequential` — доставлять
-  по одной (Т-Банк) или пачкой (Ferma).
+  по одной (Т-Банк) или пачкой (Ferma). Дефолт `blockPrivateHosts` —
+  `defaultBlockPrivateHosts()` (локально `false`, при `MOCK_HOSTED=1` — `true`, PA-58);
+  то же правило действует в `verifyMerchantWebhook({...})`.
 
   Гарантии очереди (закреплены тестами):
 
@@ -66,9 +73,10 @@ Zero dependencies, Node >= 18. Self-test: `npm run test:core`.
      дефект A-4);
   3. `request(entry)`, бросивший исключение, не роняет тик — запись уходит в
      `onFailure` с текстом ошибки;
-  4. при `blockPrivateHosts: true` отправка на приватные адреса и имена,
-     которые в них резолвятся, блокируется (best-effort SSRF-guard для
-     публичного стенда, дефекты A-18/F-08);
+  4. при `blockPrivateHosts: true` (или по умолчанию в `MOCK_HOSTED=1`) отправка
+     на приватные/служебные адреса и имена, которые в них резолвятся, блокируется
+     с привязкой проверенного IP к соединению против DNS TOCTOU (дефекты A-18/F-08,
+     #51 PF-01/PA-25/PA-26/PA-58/PG-11);
   5. `awaitSequential: true` — записи уходят строго по одной и в порядке
      очереди: следующая запись не стартует, пока предыдущая не завершилась,
      и новый тик не начинается поверх идущего (F-29: даже медленный приёмник
