@@ -225,37 +225,40 @@ async function fullFlow(port, {
 }
 
 function startChild(env = {}) {
+  const childEnv = {
+    ...process.env,
+    MOCK_HOST: '127.0.0.1',
+    MOCK_PORT: '0',
+    MOCK_STATE_FILE: '',
+    MOCK_PUBLIC_BASE_URL: '',
+    MOCK_DEFAULT_CALLBACK_URL: '',
+    MOCK_CALLBACK_RETRY_MS: '1000',
+    MOCK_CALLBACK_MAX_ATTEMPTS: '4',
+    MOCK_ADMIN_TOKEN: '',
+    MOCK_OPERATOR_TOKEN: '',
+    MOCK_HOSTED: '',
+    MOCK_TENANCY: '',
+    MOCK_SANDBOX_FILE: '',
+    MOCK_SANDBOX_TOKEN: '',
+    MOCK_SANDBOX_TTL_MS: '',
+    MOCK_SANDBOX_SWEEP_MS: '',
+    MOCK_SANDBOX_MAX: '',
+    MOCK_SANDBOX_MAX_DOCUMENTS: '',
+    MOCK_SANDBOX_RETENTION_MS: '',
+    MOCK_SANDBOX_HOST_SUFFIX: '',
+    MOCK_SANDBOX_CREATE_LIMIT: '',
+    MOCK_TWO_STAGE: '',
+    MOCK_PARTIAL_REFUND: '',
+    MOCK_SSL_PERMITTED: '',
+    MOCK_CALLBACK_CHECKSUM: '',
+    MOCK_SESSION_TIMEOUT_SECS: '',
+    ...env,
+  };
+  if (!Object.prototype.hasOwnProperty.call(env, 'MOCK_BLOCK_PRIVATE_WEBHOOKS')) {
+    delete childEnv.MOCK_BLOCK_PRIVATE_WEBHOOKS;
+  }
   const proc = spawn('node', ['--max-old-space-size=48', path.join(__dirname, 'server.js')], {
-    env: {
-      ...process.env,
-      MOCK_HOST: '127.0.0.1',
-      MOCK_PORT: '0',
-      MOCK_STATE_FILE: '',
-      MOCK_PUBLIC_BASE_URL: '',
-      MOCK_DEFAULT_CALLBACK_URL: '',
-      MOCK_CALLBACK_RETRY_MS: '1000',
-      MOCK_CALLBACK_MAX_ATTEMPTS: '4',
-      MOCK_ADMIN_TOKEN: '',
-      MOCK_OPERATOR_TOKEN: '',
-      MOCK_HOSTED: '',
-      MOCK_BLOCK_PRIVATE_WEBHOOKS: '',
-      MOCK_TENANCY: '',
-      MOCK_SANDBOX_FILE: '',
-      MOCK_SANDBOX_TOKEN: '',
-      MOCK_SANDBOX_TTL_MS: '',
-      MOCK_SANDBOX_SWEEP_MS: '',
-      MOCK_SANDBOX_MAX: '',
-      MOCK_SANDBOX_MAX_DOCUMENTS: '',
-      MOCK_SANDBOX_RETENTION_MS: '',
-      MOCK_SANDBOX_HOST_SUFFIX: '',
-      MOCK_SANDBOX_CREATE_LIMIT: '',
-      MOCK_TWO_STAGE: '',
-      MOCK_PARTIAL_REFUND: '',
-      MOCK_SSL_PERMITTED: '',
-      MOCK_CALLBACK_CHECKSUM: '',
-      MOCK_SESSION_TIMEOUT_SECS: '',
-      ...env,
-    },
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let fullLog = '';
@@ -1121,6 +1124,83 @@ async function main() {
     } finally {
       await childPa.stop();
       fs.rmSync(tmpPa, { recursive: true, force: true });
+    }
+
+    /* ---------- #51 PF-01 / PG-11 / PA-25 / PA-26: SSRF-контур и DNS TOCTOU ---------- */
+    console.log('— #51 PF-01 / PG-11: SSRF по умолчанию в MOCK_HOSTED=1 и защита от DNS TOCTOU');
+    {
+      const preloadFile = path.join(os.tmpdir(), `alfa-rebind-preload-${process.pid}-${Date.now()}.js`);
+      tmpFiles.push(preloadFile);
+      fs.writeFileSync(preloadFile, `
+        'use strict';
+        const dns = require('dns');
+        const origPromisesLookup = dns.promises.lookup;
+        const origDnsLookup = dns.lookup;
+        dns.promises.lookup = async (host, opts) => {
+          if (host === 'rebind.audit.test') return [{ address: '93.184.216.34', family: 4 }];
+          return origPromisesLookup(host, opts);
+        };
+        dns.lookup = (host, opts, cb) => {
+          const callback = typeof opts === 'function' ? opts : cb;
+          const options = typeof opts === 'function' ? {} : (opts || {});
+          if (host === 'rebind.audit.test') {
+            if (options.all) return process.nextTick(() => callback(null, [{ address: '127.0.0.1', family: 4 }]));
+            return process.nextTick(() => callback(null, '127.0.0.1', 4));
+          }
+          return origDnsLookup(host, opts, cb);
+        };
+      `);
+      const rebindEnv = {
+        ...process.env,
+        MOCK_HOST: '127.0.0.1',
+        MOCK_PORT: '0',
+        MOCK_STATE_FILE: '',
+        MOCK_SANDBOX_FILE: '',
+        MOCK_HOSTED: '1',
+        MOCK_OPERATOR_TOKEN: 'op-ssrf',
+        MOCK_CALLBACK_RETRY_MS: '1000',
+      };
+      delete rebindEnv.MOCK_BLOCK_PRIVATE_WEBHOOKS;
+      const rebindProc = spawn('node', ['--max-old-space-size=48', '-r', preloadFile, path.join(__dirname, 'server.js')], {
+        env: rebindEnv,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let rebindLog = '';
+      rebindProc.stdout.on('data', (d) => { rebindLog += String(d); });
+      rebindProc.stderr.on('data', (d) => { rebindLog += String(d); });
+      try {
+        const rebindPort = await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error(`rebind-child timeout: ${rebindLog}`)), 6000);
+          const poll = setInterval(() => {
+            const m = /on http:\/\/[^:]+:(\d+)/.exec(rebindLog);
+            if (m) { clearInterval(poll); clearTimeout(timer); resolve(Number(m[1])); }
+          }, 25);
+        });
+        const hitsBefore = HITS.filter((h) => h.path === '/rebind-pg11').length;
+        await fullFlow(rebindPort, {
+          pan: CARD_3DS2_FRICTIONLESS,
+          callbackUrl: `http://rebind.audit.test:${receiverPort}/rebind-pg11`,
+          amount: 2000,
+        });
+        check('#51 PF-01: MOCK_HOSTED=1 в alfa-mock включает block_private_webhooks=true по умолчанию',
+          rebindLog.includes('hosted=true block_private_webhooks=true'));
+        const blockedCb = await waitForCondition(async () => {
+          const st = (await request(rebindPort, 'GET', '/mock/state', undefined, { 'X-Operator-Token': 'op-ssrf' })).json();
+          const stateSlice = (st && st.state) || st || {};
+          const entry = Object.values(stateSlice.callbacks || {})[0];
+          return entry && String(entry.lastStatus).includes('SSRF_BLOCKED') ? entry : null;
+        }, { timeoutMs: 5000, description: 'PG-11 SSRF_BLOCKED recorded in /mock/state' });
+        const hitsAfter = HITS.filter((h) => h.path === '/rebind-pg11').length;
+        check('#51 PG-11 / §7.3: DNS TOCTOU rebinding блокируется с SSRF_BLOCKED и 0 соединений к loopback',
+          Boolean(blockedCb) && hitsAfter === hitsBefore, `hits=${hitsAfter - hitsBefore}`);
+      } finally {
+        await new Promise((resolve) => {
+          if (rebindProc.exitCode !== null) { resolve(); return; }
+          rebindProc.once('exit', () => resolve());
+          rebindProc.kill('SIGTERM');
+          setTimeout(() => { if (rebindProc.exitCode === null) rebindProc.kill('SIGKILL'); }, 1500).unref();
+        });
+      }
     }
   } finally {
     for (const child of children) await child.stop();

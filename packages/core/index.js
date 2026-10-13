@@ -725,20 +725,77 @@ function createJournal({ size = 200, baseUrl = '', maxEntryChars = JOURNAL_LIMIT
 const DEFAULT_WEBHOOK_RESPONSE_MAX_BYTES = 64 * 1024;
 const DEFAULT_WEBHOOK_DEADLINE_MS = 10000;
 const WEBHOOK_LAST_BODY_MAX_CHARS = 1024;
+const INITIAL_DNS_LOOKUP = dns.lookup;
+const isDefaultDnsLookup = (fn) => fn === INITIAL_DNS_LOOKUP && Object.getOwnPropertySymbols(fn).length > 0;
 
-function postJson(url, payload, timeoutMs = DEFAULT_WEBHOOK_DEADLINE_MS, options = {}) {
+async function postJson(url, payload, timeoutMs = DEFAULT_WEBHOOK_DEADLINE_MS, options = {}) {
+  const target = new URL(url);
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+    throw new Error(`Исходящий запрос на «${url}» отклонён: схема ${target.protocol} не поддерживается (разрешены http/https)`);
+  }
+  const settings = options && typeof options === 'object' ? options : {};
+  const method = String(settings.method || 'POST').toUpperCase();
+  if (method !== 'POST' && method !== 'GET') {
+    throw new Error(`Исходящий запрос на «${url}» отклонён: метод ${method} не поддерживается очередью доставки (разрешены POST/GET)`);
+  }
+  // PA-25: WHATWG `new URL()` сохраняет скобки вокруг IPv6-литерала в `target.hostname`
+  // (`[::1]`, `[2606:4700::1111]`), из-за чего options-форма `http.request` вызывала
+  // `getaddrinfo("[::1]")` и падала с ENOTFOUND. Для сокета и DNS скобки снимаются,
+  // а исходный `target.host` со скобками сохраняется для заголовка Host.
+  const bareHostname = target.hostname.replace(/^\[|\]$/g, '');
+  const customLookup = typeof settings.lookup === 'function' ? settings.lookup : null;
+  let resolvedTarget = settings._resolvedTarget || null;
+  if (settings.blockPrivateHosts && !resolvedTarget) {
+    resolvedTarget = await resolvePublicHost(url, customLookup ? { lookup: customLookup } : {});
+  }
+
+  let connectHostname = bareHostname;
+  let pinnedRecords = null;
+  if (resolvedTarget && !resolvedTarget.isLiteral) {
+    // §7.3 / PG-11: единственное DNS-разрешение с привязкой проверенного адреса
+    // к соединению; если connect-резолвер (`dns.lookup`) подменён и возвращает
+    // приватный или отличный от проверенного адрес — fail-closed (SSRF_BLOCKED).
+    if (!customLookup && !isDefaultDnsLookup(dns.lookup)) {
+      let connectRecords;
+      try {
+        connectRecords = await invokeLookup(dns.lookup, bareHostname, { all: true });
+      } catch (e) {
+        throw createSsrfBlockedError(url, `имя хоста не разрешается при подключении (${e && e.code ? e.code : 'DNS error'})`);
+      }
+      if (!connectRecords.length) {
+        throw createSsrfBlockedError(url, 'имя хоста не разрешается при подключении');
+      }
+      const allowedKeys = new Set(resolvedTarget.records.map((r) => canonicalIpKey(r.address)));
+      for (const rec of connectRecords) {
+        if (isPrivateAddress(rec.address) !== false) {
+          throw createSsrfBlockedError(url, `имя ${bareHostname} при подключении разрешается в приватный адрес ${rec.address}`);
+        }
+        if (!allowedKeys.has(canonicalIpKey(rec.address))) {
+          throw createSsrfBlockedError(url, `адрес подключения ${rec.address} для ${bareHostname} не совпадает с проверенным`);
+        }
+      }
+    }
+    pinnedRecords = resolvedTarget.records;
+  } else if (customLookup) {
+    const lookedUp = await invokeLookup(customLookup, bareHostname, { all: true });
+    if (!lookedUp.length) {
+      const err = new Error(`getaddrinfo ENOTFOUND ${bareHostname}`);
+      err.code = 'ENOTFOUND';
+      throw err;
+    }
+    if (isPrivateAddress(bareHostname) !== null) {
+      connectHostname = lookedUp[0].address;
+    } else {
+      pinnedRecords = lookedUp;
+    }
+  } else if (isPrivateAddress(bareHostname) === false && !isDefaultDnsLookup(dns.lookup)) {
+    const lookedUp = await invokeLookup(dns.lookup, bareHostname, { all: true });
+    if (lookedUp.length) {
+      connectHostname = lookedUp[0].address;
+    }
+  }
+
   return new Promise((resolve, reject) => {
-    const target = new URL(url);
-    if (target.protocol !== 'http:' && target.protocol !== 'https:') {
-      reject(new Error(`Исходящий запрос на «${url}» отклонён: схема ${target.protocol} не поддерживается (разрешены http/https)`));
-      return;
-    }
-    const settings = options && typeof options === 'object' ? options : {};
-    const method = String(settings.method || 'POST').toUpperCase();
-    if (method !== 'POST' && method !== 'GET') {
-      reject(new Error(`Исходящий запрос на «${url}» отклонён: метод ${method} не поддерживается очередью доставки (разрешены POST/GET)`));
-      return;
-    }
     const maxResponseBytes = Number.isFinite(Number(settings.maxResponseBytes))
       ? Math.max(0, Math.floor(Number(settings.maxResponseBytes)))
       : DEFAULT_WEBHOOK_RESPONSE_MAX_BYTES;
@@ -777,17 +834,35 @@ function postJson(url, payload, timeoutMs = DEFAULT_WEBHOOK_DEADLINE_MS, options
       reject(error);
     };
 
-    let req;
-    req = transport.request({
-      hostname: target.hostname,
+    const headers = method === 'GET'
+      ? {}
+      : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) };
+    if (connectHostname !== bareHostname) {
+      headers.Host = target.host;
+    }
+    const reqOptions = {
+      hostname: connectHostname,
       port: target.port || (target.protocol === 'https:' ? 443 : 80),
       path: target.pathname + target.search,
       method,
-      headers: method === 'GET'
-        ? {}
-        : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+      headers,
       timeout: inactivityTimeoutMs,
-    }, (res) => {
+    };
+    if (pinnedRecords && pinnedRecords.length) {
+      reqOptions.lookup = (_host, lookupOpts, cb) => {
+        const opts = typeof lookupOpts === 'function' ? {} : (lookupOpts || {});
+        const callback = typeof lookupOpts === 'function' ? lookupOpts : cb;
+        if (opts && opts.all) {
+          process.nextTick(() => callback(null, pinnedRecords));
+          return;
+        }
+        const first = pinnedRecords[0];
+        process.nextTick(() => callback(null, first.address, first.family));
+      };
+    }
+
+    let req;
+    req = transport.request(reqOptions, (res) => {
       response = res;
       res.on('data', (chunk) => {
         if (settled) return;
@@ -925,7 +1000,10 @@ function isPrivateIPv4([a, b, c, d]) {
   if (a === 172 && b >= 16 && b <= 31) return true;                        // private 172.16/12
   if (a === 192 && b === 168) return true;                                 // private
   if (a === 192 && b === 0 && c === 0) return true;                        // IETF protocol assignments
+  if (a === 192 && b === 0 && c === 2) return true;                        // TEST-NET-1 192.0.2.0/24 (RFC 5737, PA-26)
   if (a === 198 && (b === 18 || b === 19)) return true;                    // benchmarking 198.18/15
+  if (a === 198 && b === 51 && c === 100) return true;                     // TEST-NET-2 198.51.100.0/24 (RFC 5737, PA-26)
+  if (a === 203 && b === 0 && c === 113) return true;                      // TEST-NET-3 203.0.113.0/24 (RFC 5737, PA-26)
   if (a >= 224) return true;                                               // multicast, reserved, broadcast
   return false;
 }
@@ -944,9 +1022,91 @@ function isPrivateIPv6(g) {
   // NAT64 well-known 64:ff9b::/96 (RFC 6052): решает встроенный IPv4. Весь диапазон не блокируем:
   // DNS64 отдаёт так IPv4-only хосты публичных сетей, и вебхуки к ним перестали бы работать
   if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) return isPrivateIPv4(embedded);
+  // Local-Use NAT64 64:ff9b:1::/48 (включая 64:ff9b:1::/96, RFC 8215, PA-26) — не маршрутизируется в интернете
+  if (g0 === 0x64 && g1 === 0xff9b && g2 === 1) return true;
+  if (g0 === 0x2001 && g1 === 0x0db8) return true;                         // documentation 2001:db8::/32 (RFC 3849, PA-26)
   if ((g0 & 0xfe00) === 0xfc00) return true;                               // unique local fc00::/7
   if ((g0 & 0xffc0) === 0xfe80) return true;                               // link-local fe80::/10
+  if ((g0 & 0xff00) === 0xff00) return true;                               // multicast ff00::/8 (RFC 4291, PA-26)
   return false;
+}
+
+function canonicalIpKey(ip) {
+  let addr = String(ip === undefined || ip === null ? '' : ip).trim().toLowerCase();
+  if (addr.startsWith('[') && addr.endsWith(']')) addr = addr.slice(1, -1);
+  if (addr.includes('%')) addr = addr.split('%')[0];
+  const v4 = parseDottedQuad(addr);
+  if (v4 && v4.every((n) => n <= 255)) return `v4:${v4.join('.')}`;
+  const v6 = parseIPv6Groups(addr);
+  if (v6) return `v6:${v6.map((n) => n.toString(16)).join(':')}`;
+  return `raw:${addr}`;
+}
+
+function createSsrfBlockedError(url, reason) {
+  const e = new Error(`Исходящий запрос на «${url}» заблокирован политикой SSRF: ${reason}. Приватные адреса запрещены (MOCK_BLOCK_PRIVATE_WEBHOOKS).`);
+  e.code = 'SSRF_BLOCKED';
+  return e;
+}
+
+function invokeLookup(lookupFn, host, opts = { all: true }) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const done = (err, address, family) => {
+      if (settled) return;
+      settled = true;
+      if (err) {
+        reject(err);
+        return;
+      }
+      if (Array.isArray(address)) {
+        const list = address
+          .map((item) => {
+            if (typeof item === 'string') {
+              const clean = item.replace(/^\[|\]$/g, '');
+              return clean ? { address: clean, family: clean.includes(':') ? 6 : 4 } : null;
+            }
+            if (item && typeof item.address === 'string') {
+              const clean = item.address.replace(/^\[|\]$/g, '');
+              return clean ? { address: clean, family: item.family || (clean.includes(':') ? 6 : 4) } : null;
+            }
+            return null;
+          })
+          .filter(Boolean);
+        resolve(list);
+        return;
+      }
+      if (address && typeof address === 'object' && typeof address.address === 'string') {
+        const clean = address.address.replace(/^\[|\]$/g, '');
+        resolve(clean ? [{ address: clean, family: address.family || (clean.includes(':') ? 6 : 4) }] : []);
+        return;
+      }
+      if (typeof address === 'string') {
+        const clean = address.replace(/^\[|\]$/g, '');
+        resolve(clean ? [{ address: clean, family: family || (clean.includes(':') ? 6 : 4) }] : []);
+        return;
+      }
+      resolve([]);
+    };
+    try {
+      const maybePromise = lookupFn(host, opts, done);
+      if (maybePromise && typeof maybePromise.then === 'function') {
+        maybePromise.then((res) => done(null, res), (err) => done(err));
+      }
+    } catch (err) {
+      done(err);
+    }
+  });
+}
+
+/**
+ * Дефолт SSRF-политики ядра (PA-58): выровнен с адаптерами —
+ * `flagEnabled(MOCK_BLOCK_PRIVATE_WEBHOOKS, flagEnabled(MOCK_HOSTED, false))`.
+ * В локальном self-hosted режиме (без MOCK_HOSTED и MOCK_BLOCK_PRIVATE_WEBHOOKS)
+ * возвращает `false` (обратная совместимость), в `MOCK_HOSTED=1` — `true` (fail-closed).
+ */
+function defaultBlockPrivateHosts(env = process.env) {
+  const src = env && typeof env === 'object' ? env : {};
+  return flagEnabled(src.MOCK_BLOCK_PRIVATE_WEBHOOKS, flagEnabled(src.MOCK_HOSTED, false));
 }
 
 /**
@@ -973,6 +1133,54 @@ function isPrivateHost(url) {
 }
 
 /**
+ * Разрешение и проверка публичного адреса перед исходящим запросом (F-08, PA-25,
+ * PA-26, §7.3/PG-11):
+ *   1) схема — только http/https;
+ *   2) литеральный приватный/служебный адрес запрещён;
+ *   3) имя хоста резолвится ровно один раз, все записи проверяются и возвращаются
+ *      для привязки к сокету (защита от DNS TOCTOU / rebinding).
+ *
+ * Бросает Error с `code = 'SSRF_BLOCKED'`.
+ */
+async function resolvePublicHost(url, { lookup = dns.promises.lookup } = {}) {
+  let target;
+  try {
+    target = new URL(String(url));
+  } catch {
+    throw createSsrfBlockedError(url, 'некорректный URL');
+  }
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+    throw createSsrfBlockedError(url, `схема ${target.protocol} не поддерживается`);
+  }
+  if (isPrivateHost(url)) throw createSsrfBlockedError(url, 'приватный или локальный адрес');
+
+  const host = target.hostname.replace(/^\[|\]$/g, '');
+  if (isPrivateAddress(host) === false) {
+    // Публичный IP-литерал — резолвить через DNS нечего
+    return {
+      host,
+      isLiteral: true,
+      records: [{ address: host, family: host.includes(':') ? 6 : 4 }],
+    };
+  }
+
+  let records;
+  try {
+    records = await invokeLookup(lookup, host, { all: true });
+  } catch (e) {
+    throw createSsrfBlockedError(url, `имя хоста не разрешается (${e && e.code ? e.code : 'DNS error'})`);
+  }
+  if (!records.length) throw createSsrfBlockedError(url, 'имя хоста не разрешается');
+  for (const item of records) {
+    const address = item && item.address;
+    if (isPrivateAddress(address) !== false) {
+      throw createSsrfBlockedError(url, `имя ${host} разрешается в приватный адрес ${address}`);
+    }
+  }
+  return { host, isLiteral: false, records };
+}
+
+/**
  * Усиленная проверка адреса перед исходящим запросом (F-08):
  *   1) схема — только http/https;
  *   2) литеральный приватный/служебный адрес запрещён;
@@ -982,37 +1190,7 @@ function isPrivateHost(url) {
  * `lookup` инжектируется для тестов.
  */
 async function assertPublicHost(url, { lookup = dns.promises.lookup } = {}) {
-  const blocked = (reason) => {
-    const e = new Error(`Исходящий запрос на «${url}» заблокирован политикой SSRF: ${reason}. Приватные адреса запрещены (MOCK_BLOCK_PRIVATE_WEBHOOKS).`);
-    e.code = 'SSRF_BLOCKED';
-    return e;
-  };
-  let target;
-  try {
-    target = new URL(String(url));
-  } catch {
-    throw blocked('некорректный URL');
-  }
-  if (target.protocol !== 'http:' && target.protocol !== 'https:') {
-    throw blocked(`схема ${target.protocol} не поддерживается`);
-  }
-  if (isPrivateHost(url)) throw blocked('приватный или локальный адрес');
-
-  const host = target.hostname.replace(/^\[|\]$/g, '');
-  if (isPrivateAddress(host) === false) return true; // публичный IP-литерал — резолвить нечего
-
-  let resolved;
-  try {
-    resolved = await lookup(host, { all: true });
-  } catch (e) {
-    throw blocked(`имя хоста не разрешается (${e && e.code ? e.code : 'DNS error'})`);
-  }
-  const list = Array.isArray(resolved) ? resolved : [resolved];
-  if (!list.length) throw blocked('имя хоста не разрешается');
-  for (const item of list) {
-    const address = item && item.address;
-    if (isPrivateAddress(address) === true) throw blocked(`имя ${host} разрешается в приватный адрес ${address}`);
-  }
+  await resolvePublicHost(url, { lookup });
   return true;
 }
 
@@ -1036,7 +1214,9 @@ async function assertPublicHost(url, { lookup = dns.promises.lookup } = {}) {
  *   awaitSequential — отправлять по одной и ждать (tbank) или пачкой (kassa)
  *   unref           — не держать процесс из-за таймера
  *   blockPrivateHosts — не отправлять на приватные адреса и хосты, которые в
- *                       них резолвятся (SSRF-guard, assertPublicHost)
+ *                       них резолвятся (SSRF-guard, assertPublicHost; дефолт
+ *                       PA-58: `flagEnabled(MOCK_BLOCK_PRIVATE_WEBHOOKS, flagEnabled(MOCK_HOSTED, false))` —
+ *                       выключен локально, включён по умолчанию в `MOCK_HOSTED=1`)
  *
  * Гарантии (дефекты A-3/A-4 аудита):
  *   1. Запись, находящаяся «в полёте», не отправляется повторно: тик не ждёт
@@ -1068,7 +1248,8 @@ function createDeliveryQueue({
   due,
   awaitSequential = false,
   unref = false,
-  blockPrivateHosts = false,
+  blockPrivateHosts = defaultBlockPrivateHosts(),
+  lookup,
   now = () => Date.now(),
 }) {
   // `entries` может быть объектом (как раньше) или функцией: в этом случае она
@@ -1100,8 +1281,16 @@ function createDeliveryQueue({
       // callback, которые доставляются GET-ом с query-параметрами (Альфа-Банк);
       // без method остаётся POST (поведение существующих адаптеров не меняется).
       const { url, data, method } = request(entry);
-      if (blockPrivateHosts) await assertPublicHost(url);
-      const res = await postJson(url, data, DEFAULT_WEBHOOK_DEADLINE_MS, method ? { method } : {});
+      let resolvedTarget = null;
+      if (blockPrivateHosts) {
+        resolvedTarget = await resolvePublicHost(url, lookup ? { lookup } : {});
+      }
+      const reqOpts = {};
+      if (method) reqOpts.method = method;
+      if (blockPrivateHosts) reqOpts.blockPrivateHosts = true;
+      if (resolvedTarget) reqOpts._resolvedTarget = resolvedTarget;
+      if (lookup) reqOpts.lookup = lookup;
+      const res = await postJson(url, data, DEFAULT_WEBHOOK_DEADLINE_MS, reqOpts);
       const diagnosticBody = webhookDiagnosticBody(res.body);
       entry.lastStatus = res.statusCode;
       entry.lastBody = diagnosticBody;
@@ -2832,12 +3021,20 @@ async function verifyMerchantWebhook({
   provider = 'tbank-eacq',
   terminalKey = 'TBANKMOCKTEST',
   signPayload = null,
-  blockPrivateHosts = false,
+  blockPrivateHosts = defaultBlockPrivateHosts(),
+  lookup,
 } = {}) {
   if (!url || typeof url !== 'string') {
     throw new Error('Передайте url вебхука мерчанта для проверки (например, {"url":"http://localhost:8000/webhook"})');
   }
-  if (blockPrivateHosts) await assertPublicHost(url);
+  let resolvedTarget = null;
+  if (blockPrivateHosts) {
+    resolvedTarget = await resolvePublicHost(url, lookup ? { lookup } : {});
+  }
+  const reqOpts = {};
+  if (blockPrivateHosts) reqOpts.blockPrivateHosts = true;
+  if (resolvedTarget) reqOpts._resolvedTarget = resolvedTarget;
+  if (lookup) reqOpts.lookup = lookup;
 
   const checks = [];
   const probeOrderId = `mock-verify-${Date.now()}`;
@@ -2860,7 +3057,7 @@ async function verifyMerchantWebhook({
 
     // 1. Валидная подписанная нотификация -> ожидаем 200 и тело "OK"
     try {
-      const r1 = await postJson(url, validEvent, 5000);
+      const r1 = await postJson(url, validEvent, 5000, reqOpts);
       const isOk = r1.statusCode === 200 && String(r1.body || '').trim() === 'OK';
       checks.push({
         id: 'valid_signed_webhook',
@@ -2871,6 +3068,7 @@ async function verifyMerchantWebhook({
         hint: isOk ? null : 'Обработчик нотификаций Т-Банка обязан вернуть HTTP 200 с телом ровно "OK" (без JSON-обёрток), иначе банк уйдёт в 24-часовые ретраи.',
       });
     } catch (e) {
+      if (e && e.code === 'SSRF_BLOCKED') throw e;
       checks.push({
         id: 'valid_signed_webhook',
         title: 'Приём валидной подписанной нотификации и ответ ровно "OK"',
@@ -2882,7 +3080,7 @@ async function verifyMerchantWebhook({
 
     // 2. Дубль той же самой нотификации (проверка идемпотентности) -> ожидаем 200 "OK" без 500
     try {
-      const r2 = await postJson(url, validEvent, 5000);
+      const r2 = await postJson(url, validEvent, 5000, reqOpts);
       const isOk = r2.statusCode === 200 && String(r2.body || '').trim() === 'OK';
       checks.push({
         id: 'duplicate_idempotency',
@@ -2893,6 +3091,7 @@ async function verifyMerchantWebhook({
         hint: isOk ? null : 'Повторная доставка уже обработанного события должна идемпотентно возвращать 200 "OK", не вызывая 500 и не дублируя проводку.',
       });
     } catch (e) {
+      if (e && e.code === 'SSRF_BLOCKED') throw e;
       checks.push({
         id: 'duplicate_idempotency',
         title: 'Идемпотентная обработка повторной нотификации (дубль вебхука)',
@@ -2904,7 +3103,7 @@ async function verifyMerchantWebhook({
     // 3. Поддельная подпись Token -> мерчант ОБЯЗАН отклонить (не 200 "OK")
     try {
       const badEvent = { ...basePayload, Amount: 99999900, Token: 'f'.repeat(64) };
-      const r3 = await postJson(url, badEvent, 5000);
+      const r3 = await postJson(url, badEvent, 5000, reqOpts);
       const rejected = r3.statusCode >= 400 || String(r3.body || '').trim() !== 'OK';
       checks.push({
         id: 'invalid_signature_rejected',
@@ -2915,6 +3114,7 @@ async function verifyMerchantWebhook({
         hint: rejected ? null : 'КРИТИЧНО: ваш обработчик ответил 200 "OK" на вебхук с неверным Token! Проверяйте sha256-подпись до изменения статуса заказа.',
       });
     } catch (e) {
+      if (e && e.code === 'SSRF_BLOCKED') throw e;
       checks.push({
         id: 'invalid_signature_rejected',
         title: 'Отклонение вебхука с поддельным Token',
@@ -2943,8 +3143,8 @@ async function verifyMerchantWebhook({
       },
     };
     try {
-      const r1 = await postJson(url, callbackPayload, 5000);
-      const r2 = await postJson(url, callbackPayload, 5000);
+      const r1 = await postJson(url, callbackPayload, 5000, reqOpts);
+      const r2 = await postJson(url, callbackPayload, 5000, reqOpts);
       const ok1 = r1.statusCode >= 200 && r1.statusCode < 300;
       const ok2 = r2.statusCode >= 200 && r2.statusCode < 300;
       checks.push({
@@ -2964,6 +3164,7 @@ async function verifyMerchantWebhook({
         hint: ok2 ? null : 'Повторная доставка callback того же uuid/external_id не должна приводить к ошибке 500.',
       });
     } catch (e) {
+      if (e && e.code === 'SSRF_BLOCKED') throw e;
       checks.push({
         id: 'valid_fiscal_callback',
         title: 'Приём callback фискализации Ferma',
@@ -3010,6 +3211,8 @@ module.exports = {
   isPrivateHost,
   isPrivateAddress,
   assertPublicHost,
+  resolvePublicHost,
+  defaultBlockPrivateHosts,
   buildCurlCommand,
   createJournal,
   postJson,

@@ -20,6 +20,7 @@
  */
 
 const assert = require('assert');
+const dns = require('dns');
 const fs = require('fs');
 const http = require('http');
 const os = require('os');
@@ -1292,6 +1293,234 @@ async function main() {
     assert.strictEqual(examReport.total, 3);
   });
   merchSrv.close();
+
+  // #51 PA-26: спецдиапазоны IPv4/IPv6 (ff00::/8 multicast, TEST-NET-1/2/3,
+  // 2001:db8::/32 documentation, 64:ff9b:1::/48 local-use NAT64) блокируются fail-closed
+  await acheck('#51 PA-26: isPrivateAddress / isPrivateHost / assertPublicHost блокируют ff00::/8, TEST-NET×3, 2001:db8::/32 и 64:ff9b:1::/96', async () => {
+    const blockedLiterals = [
+      'ff00::1',
+      'ff02::1',
+      'ff0e::1',
+      'ffff::1',
+      '192.0.2.1',
+      '192.0.2.254',
+      '198.51.100.2',
+      '203.0.113.3',
+      '::ffff:192.0.2.1',
+      '::ffff:198.51.100.2',
+      '::ffff:203.0.113.3',
+      '64:ff9b::c000:201',
+      '2001:db8::1',
+      '2001:db8:abcd::1',
+      '64:ff9b:1::7f00:1',
+      '64:ff9b:1::1',
+      '64:ff9b:1::808:808',
+    ];
+    for (const ip of blockedLiterals) {
+      assert.strictEqual(core.isPrivateAddress(ip), true, `ожидался true для ${ip}`);
+      const url = ip.includes(':') ? `http://[${ip}]:8080/hook` : `http://${ip}:8080/hook`;
+      assert.strictEqual(core.isPrivateHost(url), true, `isPrivateHost должен блокировать ${url}`);
+      await assert.rejects(
+        () => core.assertPublicHost(url),
+        (err) => err && err.code === 'SSRF_BLOCKED',
+        `assertPublicHost должен отклонять ${url} с SSRF_BLOCKED`,
+      );
+    }
+    // Соседние публичные адреса не должны ложноположительно блокироваться
+    for (const pub of ['192.0.1.1', '192.0.3.1', '198.51.99.1', '203.0.112.1', '2001:4860:4860::8888', '2606:4700::1111', '64:ff9b::808:808']) {
+      assert.strictEqual(core.isPrivateAddress(pub), false, `публичный адрес ${pub} не должен блокироваться`);
+    }
+  });
+
+  // #51 PA-25: доставка вебхуков на IPv6-литералы в квадратных скобках (`[::1]`,
+  // `[2606:4700::1111]`) без ложного `getaddrinfo ENOTFOUND [...]`
+  await acheck('#51 PA-25: IPv6-литералы в URL доставляются при разрешённом режиме и блокируются SSRF_BLOCKED без ENOTFOUND', async () => {
+    let v6Hits = 0;
+    let lastHostHeader = '';
+    const v6Srv = http.createServer((req, res) => {
+      v6Hits += 1;
+      lastHostHeader = req.headers.host || '';
+      res.writeHead(200);
+      res.end('OK');
+    });
+    const v6Port = await new Promise((resolve, reject) => {
+      v6Srv.once('error', reject);
+      v6Srv.listen(0, '::1', () => resolve(v6Srv.address().port));
+    });
+    try {
+      // 1) При выключенном SSRF-гарде `[::1]` доставляется без ENOTFOUND
+      const directRes = await core.postJson(`http://[::1]:${v6Port}/hook`, { ping: 1 }, 2000);
+      assert.strictEqual(directRes.statusCode, 200);
+      assert.strictEqual(v6Hits, 1);
+      assert.strictEqual(lastHostHeader, `[::1]:${v6Port}`);
+
+      // 2) При включённом SSRF-гарде `[::1]` отклоняется SSRF_BLOCKED (а не ENOTFOUND)
+      const qEntries = {
+        v6priv: { id: 'v6priv', url: `http://[::1]:${v6Port}/hook`, payload: { x: 1 }, attempts: 0, done: false, nextAttemptAt: 0 },
+      };
+      const qPriv = core.createDeliveryQueue({
+        entries: qEntries,
+        retryMs: 60000,
+        maxAttempts: 3,
+        awaitSequential: true,
+        blockPrivateHosts: true,
+        log: () => {},
+        request: (e) => ({ url: e.url, data: e.payload }),
+      });
+      await qPriv.tick();
+      assert.strictEqual(qEntries.v6priv.done, false);
+      assert.strictEqual(v6Hits, 1, 'блокированный [::1] не должен доходить до сокета');
+      assert.ok(String(qEntries.v6priv.lastStatus).includes('SSRF_BLOCKED'), `ожидался SSRF_BLOCKED, получено: ${qEntries.v6priv.lastStatus}`);
+      assert.ok(!String(qEntries.v6priv.lastStatus).includes('ENOTFOUND'), 'не должно быть ENOTFOUND [::1]');
+
+      await assert.rejects(
+        () => core.verifyMerchantWebhook({ url: `http://[::1]:${v6Port}/hook`, blockPrivateHosts: true }),
+        (err) => err && err.code === 'SSRF_BLOCKED',
+      );
+
+      // 3) Публичный IPv6-литерал `[2606:4700::1111]` проходит SSRF-гард и доставляется
+      //    без скобок в hostname сокета (с эмуляцией lookup на локальный IPv6-слушатель)
+      const qPubEntries = {
+        v6pub: { id: 'v6pub', url: `http://[2606:4700::1111]:${v6Port}/hook`, payload: { pub: true }, attempts: 0, done: false, nextAttemptAt: 0 },
+      };
+      const qPub = core.createDeliveryQueue({
+        entries: qPubEntries,
+        retryMs: 60000,
+        maxAttempts: 3,
+        awaitSequential: true,
+        blockPrivateHosts: true,
+        lookup: async () => [{ address: '::1', family: 6 }],
+        log: () => {},
+        request: (e) => ({ url: e.url, data: e.payload }),
+        isOk: (res) => res.statusCode === 200,
+      });
+      await qPub.tick();
+      assert.strictEqual(qPubEntries.v6pub.done, true, 'публичный IPv6-литерал должен доставляться');
+      assert.strictEqual(v6Hits, 2);
+      assert.strictEqual(lastHostHeader, `[2606:4700::1111]:${v6Port}`, 'заголовок Host должен сохранять скобки вокруг IPv6-литерала');
+    } finally {
+      await new Promise((resolve) => v6Srv.close(resolve));
+    }
+  });
+
+  // #51 PA-58: согласование дефолта blockPrivateHosts в createDeliveryQueue и verifyMerchantWebhook с адаптерами
+  await acheck('#51 PA-58: createDeliveryQueue и verifyMerchantWebhook включают blockPrivateHosts по умолчанию при MOCK_HOSTED=1', async () => {
+    assert.strictEqual(core.defaultBlockPrivateHosts({}), false);
+    assert.strictEqual(core.defaultBlockPrivateHosts({ MOCK_HOSTED: '1' }), true);
+    assert.strictEqual(core.defaultBlockPrivateHosts({ MOCK_HOSTED: '1', MOCK_BLOCK_PRIVATE_WEBHOOKS: '0' }), false);
+    assert.strictEqual(core.defaultBlockPrivateHosts({ MOCK_BLOCK_PRIVATE_WEBHOOKS: '1' }), true);
+
+    const prevHosted = process.env.MOCK_HOSTED;
+    const prevBlock = process.env.MOCK_BLOCK_PRIVATE_WEBHOOKS;
+    process.env.MOCK_HOSTED = '1';
+    delete process.env.MOCK_BLOCK_PRIVATE_WEBHOOKS;
+    try {
+      const entries = {
+        h1: { id: 'h1', url: `http://127.0.0.1:${hookPort}/hook`, payload: { a: 1 }, attempts: 0, done: false, nextAttemptAt: 0 },
+      };
+      // blockPrivateHosts не передан явно -> в MOCK_HOSTED=1 должен быть true по умолчанию
+      const qHosted = core.createDeliveryQueue({
+        entries,
+        retryMs: 60000,
+        maxAttempts: 3,
+        awaitSequential: true,
+        log: () => {},
+        request: (e) => ({ url: e.url, data: e.payload }),
+      });
+      await qHosted.tick();
+      assert.strictEqual(entries.h1.done, false);
+      assert.ok(String(entries.h1.lastStatus).includes('SSRF_BLOCKED'), 'в MOCK_HOSTED=1 очередь по умолчанию должна блокировать loopback');
+
+      await assert.rejects(
+        () => core.verifyMerchantWebhook({ url: `http://127.0.0.1:${hookPort}/hook` }),
+        (err) => err && err.code === 'SSRF_BLOCKED',
+        'в MOCK_HOSTED=1 verifyMerchantWebhook по умолчанию должен блокировать loopback',
+      );
+    } finally {
+      if (prevHosted === undefined) delete process.env.MOCK_HOSTED;
+      else process.env.MOCK_HOSTED = prevHosted;
+      if (prevBlock === undefined) delete process.env.MOCK_BLOCK_PRIVATE_WEBHOOKS;
+      else process.env.MOCK_BLOCK_PRIVATE_WEBHOOKS = prevBlock;
+    }
+  });
+
+  // #51 §7.3 / PG-11: защита от DNS TOCTOU (rebinding между проверкой и соединением)
+  await acheck('#51 §7.3 / PG-11: DNS TOCTOU rebinding блокируется в createDeliveryQueue и verifyMerchantWebhook, а публичный адрес пиннится с одним lookup', async () => {
+    let localHits = 0;
+    const localSrv = http.createServer((_req, res) => {
+      localHits += 1;
+      res.writeHead(200);
+      res.end('OK');
+    });
+    const localPort = await listen(localSrv);
+    const origPromisesLookup = dns.promises.lookup;
+    const origDnsLookup = dns.lookup;
+    try {
+      let guardLookups = 0;
+      let connectLookups = 0;
+      dns.promises.lookup = async (host, opts) => {
+        if (host === 'rebind.example') {
+          guardLookups += 1;
+          return [{ address: '93.184.216.34', family: 4 }];
+        }
+        return origPromisesLookup(host, opts);
+      };
+      dns.lookup = (host, opts, cb) => {
+        const callback = typeof opts === 'function' ? opts : cb;
+        const options = typeof opts === 'function' ? {} : (opts || {});
+        if (host === 'rebind.example') {
+          connectLookups += 1;
+          if (options.all) return process.nextTick(() => callback(null, [{ address: '127.0.0.1', family: 4 }]));
+          return process.nextTick(() => callback(null, '127.0.0.1', 4));
+        }
+        return origDnsLookup(host, opts, cb);
+      };
+
+      const entries = {
+        r1: { id: 'r1', url: `http://rebind.example:${localPort}/hook`, payload: { secret: 'internal' }, attempts: 0, done: false, nextAttemptAt: 0 },
+      };
+      const q = core.createDeliveryQueue({
+        entries,
+        retryMs: 60000,
+        maxAttempts: 3,
+        awaitSequential: true,
+        blockPrivateHosts: true,
+        log: () => {},
+        request: (e) => ({ url: e.url, data: e.payload }),
+      });
+      await q.tick();
+      assert.strictEqual(guardLookups, 1);
+      assert.strictEqual(connectLookups, 1);
+      assert.strictEqual(localHits, 0, 'при DNS rebinding соединение на 127.0.0.1 не должно устанавливаться');
+      assert.strictEqual(entries.r1.done, false);
+      assert.ok(String(entries.r1.lastStatus).includes('SSRF_BLOCKED'), `ожидался SSRF_BLOCKED, получено: ${entries.r1.lastStatus}`);
+
+      await assert.rejects(
+        () => core.verifyMerchantWebhook({ url: `http://rebind.example:${localPort}/hook`, blockPrivateHosts: true }),
+        (err) => err && err.code === 'SSRF_BLOCKED',
+      );
+      assert.strictEqual(localHits, 0, 'verifyMerchantWebhook не должен пробивать локальный сокет при rebinding');
+
+      // Проверка единственного разрешения (pinning): инжектированный lookup вызывается
+      // ровно 1 раз на доставку (второй вызов вернул бы приватный 127.0.0.1).
+      dns.promises.lookup = origPromisesLookup;
+      dns.lookup = origDnsLookup;
+      let statefulCalls = 0;
+      const statefulLookup = async () => {
+        statefulCalls += 1;
+        return statefulCalls === 1
+          ? [{ address: '93.184.216.34', family: 4 }]
+          : [{ address: '127.0.0.1', family: 4 }];
+      };
+      const resolved = await core.resolvePublicHost(`http://pinned.example:${localPort}/hook`, { lookup: statefulLookup });
+      assert.strictEqual(statefulCalls, 1);
+      assert.deepStrictEqual(resolved.records, [{ address: '93.184.216.34', family: 4 }]);
+    } finally {
+      dns.promises.lookup = origPromisesLookup;
+      dns.lookup = origDnsLookup;
+      localSrv.close();
+    }
+  });
 
   hook.close();
   fs.rmSync(dir, { recursive: true, force: true });

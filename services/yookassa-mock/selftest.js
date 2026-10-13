@@ -159,29 +159,32 @@ function checkProviderError(name, r, { status, code = 'invalid_request', paramet
 const hitsFor = (id, event) => RECEIVER_HITS.filter((h) => h.id === id && (!event || h.event === event));
 
 function startChild(env = {}) {
+  const childEnv = {
+    ...process.env,
+    MOCK_HOST: '127.0.0.1',
+    MOCK_PORT: '0',
+    MOCK_STATE_FILE: '',
+    MOCK_RETRY_MS: '1000',
+    MOCK_ADMIN_TOKEN: '',
+    MOCK_OPERATOR_TOKEN: '',
+    MOCK_HOSTED: '',
+    MOCK_TENANCY: '',
+    MOCK_SANDBOX_FILE: '',
+    MOCK_SANDBOX_TOKEN: '',
+    MOCK_SANDBOX_TTL_MS: '',
+    MOCK_SANDBOX_SWEEP_MS: '',
+    MOCK_SANDBOX_MAX: '',
+    MOCK_SANDBOX_MAX_DOCUMENTS: '',
+    MOCK_SANDBOX_RETENTION_MS: '',
+    MOCK_SANDBOX_HOST_SUFFIX: '',
+    MOCK_SANDBOX_CREATE_LIMIT: '',
+    ...env,
+  };
+  if (!Object.prototype.hasOwnProperty.call(env, 'MOCK_BLOCK_PRIVATE_WEBHOOKS')) {
+    delete childEnv.MOCK_BLOCK_PRIVATE_WEBHOOKS;
+  }
   const proc = spawn('node', ['--max-old-space-size=48', path.join(__dirname, 'server.js')], {
-    env: {
-      ...process.env,
-      MOCK_HOST: '127.0.0.1',
-      MOCK_PORT: '0',
-      MOCK_STATE_FILE: '',
-      MOCK_RETRY_MS: '1000',
-      MOCK_ADMIN_TOKEN: '',
-      MOCK_OPERATOR_TOKEN: '',
-      MOCK_HOSTED: '',
-      MOCK_BLOCK_PRIVATE_WEBHOOKS: '',
-      MOCK_TENANCY: '',
-      MOCK_SANDBOX_FILE: '',
-      MOCK_SANDBOX_TOKEN: '',
-      MOCK_SANDBOX_TTL_MS: '',
-      MOCK_SANDBOX_SWEEP_MS: '',
-      MOCK_SANDBOX_MAX: '',
-      MOCK_SANDBOX_MAX_DOCUMENTS: '',
-      MOCK_SANDBOX_RETENTION_MS: '',
-      MOCK_SANDBOX_HOST_SUFFIX: '',
-      MOCK_SANDBOX_CREATE_LIMIT: '',
-      ...env,
-    },
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let fullLog = '';
@@ -790,6 +793,16 @@ async function main() {
       check('стартовый лог печатает креды', okLog, logText.slice(0, 300));
     } finally {
       await logChild.stop();
+    }
+
+    const hostedFlagChild = startChild({ MOCK_HOSTED: '1' });
+    try {
+      const hPort = await hostedFlagChild.port;
+      await request(hPort, 'GET', '/health');
+      check('#51 PF-01: MOCK_HOSTED=1 в yookassa-mock включает block_private_webhooks=true по умолчанию',
+        hostedFlagChild.output().includes('hosted=true block_private_webhooks=true'), hostedFlagChild.output().slice(0, 300));
+    } finally {
+      await hostedFlagChild.stop();
     }
 
     // Отложенный возврат (MOCK_REFUND_DELAY_MS>0): pending -> succeeded по тику.

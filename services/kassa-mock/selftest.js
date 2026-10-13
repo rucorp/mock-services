@@ -764,6 +764,42 @@ async function main() {
     }
   }
 
+  // #51 PF-01: при MOCK_HOSTED=1 (без явного MOCK_BLOCK_PRIVATE_WEBHOOKS в окружении)
+  // SSRF-guard в kassa-mock включается по умолчанию, как и в остальных 4 сервисах
+  {
+    let hostedHits = 0;
+    const catcher = http.createServer((req, res) => { hostedHits += 1; res.writeHead(200); res.end('{"data":{"status":"confirmed"}}'); });
+    const catchPort = await new Promise((resolve, reject) => {
+      catcher.once('error', reject);
+      catcher.listen(0, '127.0.0.1', () => resolve(catcher.address().port));
+    });
+    const child = await startKassaChild({ MOCK_HOSTED: '1', MOCK_OPERATOR_TOKEN: 'op-secret' });
+    const auth = { Authorization: 'Bearer op-secret' };
+    try {
+      const v4 = await requestOn(child.port, 'POST', '/mock/verify-merchant', { url: `http://127.0.0.1:${catchPort}/callback` }, auth);
+      check('#51 PF-01: MOCK_HOSTED=1 без MOCK_BLOCK_PRIVATE_WEBHOOKS включает block_private_webhooks=true по умолчанию',
+        child.getOutput().includes('hosted=true block_private_webhooks=true'), child.getOutput());
+      check('#51 PF-01: MOCK_HOSTED=1 по умолчанию блокирует private IPv4 в /mock/verify-merchant (403 + SSRF)',
+        v4.status === 403 && v4.text.includes('SSRF') && hostedHits === 0, `status=${v4.status}, hits=${hostedHits}`);
+
+      const tk = (await requestOn(child.port, 'POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' })).json().token;
+      const body = validBody('pf01-hosted-ssrf-1');
+      body.receipt.receipts = { service: { callback_url: `http://127.0.0.1:${catchPort}/callback` } };
+      await requestOn(child.port, 'POST', `/possystem/v1/Main/sell?token=${tk}`, body);
+      const cb = await waitForCondition(async () => {
+        const exported = (await requestOn(child.port, 'GET', '/mock/state', null, auth)).json();
+        const stateSlice = (exported && exported.state) || exported || {};
+        const callback = Object.values(stateSlice.callbacks || {})[0];
+        return callback && String(callback.lastStatus).includes('SSRF_BLOCKED') ? callback : null;
+      }, { timeoutMs: 5000, description: 'PF-01 hosted SSRF callback rejection recorded in state' });
+      check('#51 PF-01: MOCK_HOSTED=1 по умолчанию блокирует приватный callback очереди (SSRF_BLOCKED, 0 соединений)',
+        hostedHits === 0 && String(cb.lastStatus).includes('SSRF_BLOCKED'), `hits=${hostedHits}, lastStatus=${cb.lastStatus}`);
+    } finally {
+      await stopChild(child);
+      catcher.close();
+    }
+  }
+
   /* --- #8 (RFC-001, F-11—F-15): изоляция песочниц ------------------------- */
 
   // 27. F-11/F-13: request-local контекст (гонка activeId), target в export/import
@@ -1024,31 +1060,34 @@ async function main() {
 
 /** Дочерний стенд кассы на свободном порту с ожиданием healthz. */
 async function startKassaChild(env = {}) {
+  const childEnv = {
+    ...process.env,
+    MOCK_HOST: '127.0.0.1',
+    MOCK_PORT: '0',
+    MOCK_STATE_FILE: '',
+    MOCK_SANDBOX_FILE: '',
+    MOCK_PROCESS_MS: '0',
+    MOCK_CALLBACK_RETRY_MS: '1000',
+    MOCK_ADMIN_TOKEN: '',
+    MOCK_OPERATOR_TOKEN: '',
+    MOCK_HOSTED: '',
+    MOCK_TENANCY: '',
+    MOCK_SANDBOX_TOKEN: '',
+    MOCK_SANDBOX_TTL_MS: '',
+    MOCK_SANDBOX_SWEEP_MS: '',
+    MOCK_SANDBOX_MAX: '',
+    MOCK_SANDBOX_MAX_DOCUMENTS: '',
+    MOCK_SANDBOX_RETENTION_MS: '',
+    MOCK_SANDBOX_HOST_SUFFIX: '',
+    MOCK_SANDBOX_CREATE_LIMIT: '',
+    ...env,
+    MOCK_PORT: '0',
+  };
+  if (!Object.prototype.hasOwnProperty.call(env, 'MOCK_BLOCK_PRIVATE_WEBHOOKS')) {
+    delete childEnv.MOCK_BLOCK_PRIVATE_WEBHOOKS;
+  }
   const proc = spawn('node', ['--max-old-space-size=48', path.join(__dirname, 'server.js')], {
-    env: {
-      ...process.env,
-      MOCK_HOST: '127.0.0.1',
-      MOCK_PORT: '0',
-      MOCK_STATE_FILE: '',
-      MOCK_SANDBOX_FILE: '',
-      MOCK_PROCESS_MS: '0',
-      MOCK_CALLBACK_RETRY_MS: '1000',
-      MOCK_ADMIN_TOKEN: '',
-      MOCK_OPERATOR_TOKEN: '',
-      MOCK_HOSTED: '',
-      MOCK_BLOCK_PRIVATE_WEBHOOKS: '',
-      MOCK_TENANCY: '',
-      MOCK_SANDBOX_TOKEN: '',
-      MOCK_SANDBOX_TTL_MS: '',
-      MOCK_SANDBOX_SWEEP_MS: '',
-      MOCK_SANDBOX_MAX: '',
-      MOCK_SANDBOX_MAX_DOCUMENTS: '',
-      MOCK_SANDBOX_RETENTION_MS: '',
-      MOCK_SANDBOX_HOST_SUFFIX: '',
-      MOCK_SANDBOX_CREATE_LIMIT: '',
-      ...env,
-      MOCK_PORT: '0',
-    },
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
@@ -1074,7 +1113,7 @@ async function startKassaChild(env = {}) {
     proc.stderr.on('data', (data) => process.stderr.write(String(data)));
     proc.once('exit', (code, signal) => finish(new Error(`kassa-mock exited before listen (${code ?? signal}): ${output.slice(-500)}`)));
   });
-  return { proc, port, stop: () => stopChild(proc) };
+  return { proc, port, getOutput: () => output, stop: () => stopChild(proc) };
 }
 
 async function stopChild(child) {

@@ -189,7 +189,7 @@ ACK, подписи и расписания повторов (`docs/reference/at
 | `MOCK_FN_NUMBER` / `MOCK_ECR_RN` / `MOCK_OFD_INN` / `MOCK_FNS_SITE` | тестовые | реквизиты ФН/ККТ/ОФД в `payload` |
 | `MOCK_AGENT_LINE` / `MOCK_AGENT_INN` | «ТЕСТОВАЯ КАССА АТОЛ (МОК)» / `5544332219` | шапка ленты чека |
 | `MOCK_STATE_FILE` | — | файл состояния (compose: `/data/atol-state.json`) |
-| `MOCK_BLOCK_PRIVATE_WEBHOOKS` | с `MOCK_HOSTED` | SSRF-guard исходящих callback |
+| `MOCK_BLOCK_PRIVATE_WEBHOOKS` | `false` (`true` при `MOCK_HOSTED=1`) | SSRF-guard исходящих callback |
 | `MOCK_ADMIN_TOKEN`, `MOCK_OPERATOR_TOKEN`, `MOCK_HOSTED`, `MOCK_TENANCY`, `MOCK_SANDBOX_*` | — | общий control-plane и песочницы RFC-001 |
 
 ## Отличия от Ferma (`kassa-mock`) — не drop-in

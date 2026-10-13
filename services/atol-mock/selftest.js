@@ -178,31 +178,34 @@ function checkError(name, r, { code, field, status = 200 } = {}) {
 }
 
 function startChild(env = {}) {
+  const childEnv = {
+    ...process.env,
+    MOCK_HOST: '127.0.0.1',
+    MOCK_PORT: '0',
+    MOCK_STATE_FILE: '',
+    MOCK_DEFAULT_CALLBACK_URL: '',
+    MOCK_CALLBACK_RETRY_MS: '1000',
+    MOCK_CALLBACK_MAX_ATTEMPTS: '5',
+    MOCK_ADMIN_TOKEN: '',
+    MOCK_OPERATOR_TOKEN: '',
+    MOCK_HOSTED: '',
+    MOCK_TENANCY: '',
+    MOCK_SANDBOX_FILE: '',
+    MOCK_SANDBOX_TOKEN: '',
+    MOCK_SANDBOX_TTL_MS: '',
+    MOCK_SANDBOX_SWEEP_MS: '',
+    MOCK_SANDBOX_MAX: '',
+    MOCK_SANDBOX_MAX_DOCUMENTS: '',
+    MOCK_SANDBOX_RETENTION_MS: '',
+    MOCK_SANDBOX_HOST_SUFFIX: '',
+    MOCK_SANDBOX_CREATE_LIMIT: '',
+    ...env,
+  };
+  if (!Object.prototype.hasOwnProperty.call(env, 'MOCK_BLOCK_PRIVATE_WEBHOOKS')) {
+    delete childEnv.MOCK_BLOCK_PRIVATE_WEBHOOKS;
+  }
   const proc = spawn('node', ['--max-old-space-size=48', path.join(__dirname, 'server.js')], {
-    env: {
-      ...process.env,
-      MOCK_HOST: '127.0.0.1',
-      MOCK_PORT: '0',
-      MOCK_STATE_FILE: '',
-      MOCK_DEFAULT_CALLBACK_URL: '',
-      MOCK_CALLBACK_RETRY_MS: '1000',
-      MOCK_CALLBACK_MAX_ATTEMPTS: '5',
-      MOCK_ADMIN_TOKEN: '',
-      MOCK_OPERATOR_TOKEN: '',
-      MOCK_HOSTED: '',
-      MOCK_BLOCK_PRIVATE_WEBHOOKS: '',
-      MOCK_TENANCY: '',
-      MOCK_SANDBOX_FILE: '',
-      MOCK_SANDBOX_TOKEN: '',
-      MOCK_SANDBOX_TTL_MS: '',
-      MOCK_SANDBOX_SWEEP_MS: '',
-      MOCK_SANDBOX_MAX: '',
-      MOCK_SANDBOX_MAX_DOCUMENTS: '',
-      MOCK_SANDBOX_RETENTION_MS: '',
-      MOCK_SANDBOX_HOST_SUFFIX: '',
-      MOCK_SANDBOX_CREATE_LIMIT: '',
-      ...env,
-    },
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let fullLog = '';
@@ -786,6 +789,8 @@ async function main() {
       const removed = await request(hPort, 'DELETE', '/sandboxes/me', undefined, { 'X-Sandbox-Token': ownerToken });
       check('hosted: владелец удаляет свою песочницу', removed.statusCode === 200 && removed.json().removed === 't1',
         removed.body.slice(0, 120));
+      check('#51 PF-01: MOCK_HOSTED=1 в atol-mock включает block_private_webhooks=true по умолчанию',
+        hostedChild.output().includes('hosted=true block_private_webhooks=true'), hostedChild.output().slice(0, 300));
     } finally {
       await hostedChild.stop();
     }

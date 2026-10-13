@@ -47,7 +47,7 @@ const {
   MOCK_TOKEN_TTL_MS = String(12 * 60 * 60 * 1000),
   MOCK_VALIDATE_RECEIPTS = 'true',
   MOCK_GROUPS = '',
-  MOCK_BLOCK_PRIVATE_WEBHOOKS = 'false',
+  MOCK_BLOCK_PRIVATE_WEBHOOKS = '',
   MOCK_FERMA_DOWN = 'false',
   MOCK_FERMA_DOWN_MS = '0',
   MOCK_PUBLIC_BASE_URL = `http://localhost:${MOCK_PORT}`,
