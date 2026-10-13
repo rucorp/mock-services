@@ -66,10 +66,14 @@ owner-token; `off` — одна общая песочница. В `owned`:
 `MOCK_ALFA_USERNAME`, `MOCK_ALFA_PASSWORD`, `MOCK_ALFA_CALLBACK_SECRET`,
 `MOCK_ALFA_TERMINAL_ID`; для Сбера — `MOCK_SBER_USERNAME` и
 `MOCK_SBER_PASSWORD`; для ВТБ — `MOCK_VTB_CLIENT_ID` и
-`MOCK_VTB_CLIENT_SECRET`). Дефолты в образе — **синтетические**; реальные
+`MOCK_VTB_CLIENT_SECRET`; для Первого ОФД — `MOCK_FIRST_OFD_LOGIN` и
+`MOCK_FIRST_OFD_PASS`). Дефолты в образе — **синтетические**; реальные
 тестовые креды банка зашивать в конфиг стенда нельзя. В частности, `SBERMOCKTEST` /
-`mockpass123` — локальные синтетические креды, не доступ к Ecom, а `vtbmocktest` /
-`mockpass123` — синтетические креды ВТБ-мока, не реквизиты банка. Наружу
+`mockpass123` — локальные синтетические креды, не доступ к Ecom, `vtbmocktest` /
+`mockpass123` — синтетические креды ВТБ-мока, не реквизиты банка, а
+`firstofdmocktest` + синтетический UUID-ключ — креды first-ofd-mock, не доступ к
+тестовому контуру OKassa (реальные login/API-ключ Первого ОФД выдаются в тестовом
+ЛК и в конфиг стенда не попадают). Наружу
 (HTTP-ответы, hint, stdout, `/admin/journal`) фактические env-креды не печатаются:
 при заданной переменной вместо секрета выводится пометка «задан через env, скрыт».
 
@@ -78,11 +82,17 @@ JSON `POST` без checksum (target из `dynamicCallbackUrl` или
 `MOCK_SBER_CALLBACK_URL`), ВТБ — unsigned JSON `POST` `{"type":"PAYMENT|REFUND","object":{…}}`
 без подписи (ACK-код и расписание ретраев в публичных срезах не зафиксированы [VERIFY];
 расхождение `Status`/`status` сохраняется как есть; target из `MOCK_VTB_CALLBACK_URL`
-или `callbackUrl` запроса). Все используют `MOCK_BLOCK_PRIVATE_WEBHOOKS` (при
+или `callbackUrl` запроса), Первый ОФД — unsigned JSON `POST` результата заявки
+без подписи: публичный срез не закрепляет ни envelope, ни подпись, ни ACK, ни
+расписание повторов [VERIFY], поэтому мок не выдумывает HMAC/RSA, считает
+доставкой любой 2xx [FORK] и берёт target из `requestMetadata.callbackUrl` или
+`MOCK_FIRST_OFD_CALLBACK_URL`. Все используют `MOCK_BLOCK_PRIVATE_WEBHOOKS` (при
 `MOCK_HOSTED=1` включена по умолчанию); SSRF-отказ терминален — запись
 помечается `dumped` и не крутит retry-цикл. Callback нельзя считать
-доказательством оплаты: merchant должен сверить статус через
-`getOrderStatusExtended.do` (Сбер) / `GET /orders/{orderId}` (ВТБ).
+доказательством оплаты (соответственно — фискализации): merchant должен сверить
+статус через `getOrderStatusExtended.do` (Сбер) / `GET /orders/{orderId}` (ВТБ) /
+`GET /api/external/queue/v1/status/{requestId}` (Первый ОФД, приёмник callback
+обязан быть идемпотентным).
 
 ## Что стенд хранит и показывает (F-09, F-10)
 

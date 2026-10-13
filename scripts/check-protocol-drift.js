@@ -12,7 +12,8 @@
  * эталонные выжимки документации (`docs/reference/**`) и фактическую
  * реализацию в `services/tbank-mock/server.js`, `services/kassa-mock/server.js`,
  * `services/atol-mock/server.js`, `services/alfa-mock/server.js`,
- * `services/sber-mock/server.js` и `services/vtb-mock/server.js`.
+ * `services/sber-mock/server.js`, `services/vtb-mock/server.js` и
+ * `services/first-ofd-mock/server.js`.
  *
  * Запуск:
  *   node scripts/check-protocol-drift.js [--json]
@@ -692,6 +693,271 @@ function main() {
     vtbReadme.includes('client_credentials') && vtbReadme.includes('Status') && vtbReadme.includes('legacy'),
     'README должен объяснять авторизацию, quirk статусов и границы scope');
 
+  // 7. Проверка Первого ОФД — облачная касса OKassa (first-ofd-okassa.json <-> server.js <-> OpenAPI <-> guide).
+  const firstOfdManifest = readJson('protocols/first-ofd-okassa.json');
+  const firstOfdServerCode = readText('services/first-ofd-mock/server.js');
+  const firstOfdOpenApi = readJson('docs/openapi/first-ofd-mock.openapi.json');
+  const firstOfdGuide = readText(firstOfdManifest.guide || 'docs/integration/first-ofd.md');
+  const firstOfdReadme = readText(firstOfdManifest.readme || 'services/first-ofd-mock/README.md');
+  const firstOfdSchemas = JSON.stringify((firstOfdOpenApi.components || {}).schemas || {});
+  const firstOfdPaths = JSON.stringify(firstOfdOpenApi.paths || {});
+
+  for (const docPath of firstOfdManifest.upstreamDocs || []) {
+    const exists = fs.existsSync(path.join(ROOT, docPath));
+    assertCheck('first-ofd:docs', docPath, exists, exists ? 'эталонный срез OKassa найден' : 'эталонный срез отсутствует');
+  }
+
+  // Needle каждого маршрута — реальная строка server.js (не комментарий и не ссылка на docs).
+  const firstOfdRouteNeedle = (route) => {
+    const map = {
+      '/api/external/queue/v1/transaction/{type}': 'rel.match(/^transaction\\/([^/]+)$/)',
+      '/api/external/queue/v1/transaction/{requestId}': "matched.name === 'transaction-read'",
+      '/api/external/queue/v1/status/{requestId}': "matched.name === 'status-read'",
+      '/api/external/queue/v1/statuses': "rel === 'statuses'",
+      '/api/external/receipts': 'p === RECEIPTS_PATH',
+    };
+    return map[route] || route;
+  };
+  const firstOfdRouteDrift = (code, openApi, manifest) => [
+    ...(manifest.routes || []), ...(manifest.mockRoutes || []),
+  ].map((route) => ({
+    route,
+    inServer: code.includes(firstOfdRouteNeedle(route)),
+    inOpenApi: Boolean(openApi.paths && openApi.paths[route]),
+  }));
+  const firstOfdControlRouteDrift = (code, openApi, manifest) => (manifest.mockControlRoutes || [])
+    .map((route) => ({
+      route,
+      inServer: code.includes(route),
+      inOpenApi: Boolean(openApi.paths && openApi.paths[route]),
+    }));
+
+  for (const { route, inServer, inOpenApi } of firstOfdRouteDrift(firstOfdServerCode, firstOfdOpenApi, firstOfdManifest)) {
+    assertCheck('first-ofd:route', route, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+  for (const { route, inServer, inOpenApi } of firstOfdControlRouteDrift(firstOfdServerCode, firstOfdOpenApi, firstOfdManifest)) {
+    assertCheck('first-ofd:control-route', route, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+  {
+    const tokenRoute = firstOfdManifest.tokenRoute || '/getToken';
+    assertCheck('first-ofd:token-route', tokenRoute,
+      firstOfdServerCode.includes(`TOKEN_PATH = '${tokenRoute}'`) && Boolean(firstOfdOpenApi.paths && firstOfdOpenApi.paths[tokenRoute]),
+      'token endpoint присутствует в server.js и OpenAPI');
+    assertCheck('first-ofd:token-route', 'POST /getToken — JSON charset=utf-8, {login,pass} → {token}',
+      firstOfdServerCode.includes('application/json; charset=utf-8') && firstOfdServerCode.includes("  login:")
+        && firstOfdServerCode.includes("pass") && firstOfdServerCode.includes('token'),
+      'getToken принимает JSON-тело login+pass и отдаёт token');
+    assertCheck('first-ofd:token-route', 'бизнес-вызовы — Authorization: Bearer, API-ключ UUID не bearer',
+      firstOfdServerCode.includes('Authorization') && firstOfdServerCode.includes('API-ключ')
+        && firstOfdGuide.includes('Bearer') && firstOfdGuide.includes('API-ключ'),
+      'Bearer выдаёт getToken; ключ UUID сам по себе не токен');
+  }
+
+  for (const type of Object.keys(firstOfdManifest.transactionTypes || {})) {
+    const inServer = firstOfdServerCode.includes('TRANSACTION_TYPES') && firstOfdServerCode.includes(`  ${type}: '`);
+    const inOpenApi = firstOfdSchemas.includes(`"${type}"`) || firstOfdPaths.includes(`"${type}"`);
+    assertCheck('first-ofd:transaction-type', type, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+  for (const operation of Object.keys(firstOfdManifest.operations || {})) {
+    const inServer = firstOfdServerCode.includes(`  ${operation}: '`);
+    const inOpenApi = firstOfdSchemas.includes(`"${operation}"`);
+    assertCheck('first-ofd:operation', operation, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+  assertCheck('first-ofd:operation-spelling', 'EXPENCE/EXPENCE_RETURN — как в схеме, EXPENSE отклоняется',
+    firstOfdServerCode.includes("EXPENCE: '") && firstOfdServerCode.includes("EXPENCE_RETURN: '")
+      && !firstOfdServerCode.includes("EXPENSE: '") && firstOfdServerCode.includes('invalid_operation_type')
+      && firstOfdGuide.includes('invalid_operation_type'),
+    'написание операций не нормализуется: вариант EXPENSE — provider-shaped отказ');
+  for (const vat of firstOfdManifest.vatCodes || []) {
+    const inServer = firstOfdServerCode.includes(`  ${vat}: '`);
+    const inOpenApi = firstOfdSchemas.includes(`"${vat}"`);
+    assertCheck('first-ofd:vat-code', vat, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+  for (const status of Object.keys(firstOfdManifest.queueStatuses || {})) {
+    const inServer = firstOfdServerCode.includes(`  ${status}: '`);
+    const inOpenApi = firstOfdSchemas.includes(`"${status}"`);
+    assertCheck('first-ofd:queue-status', status, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+  for (const layer of Object.keys(firstOfdManifest.errorLayers || {})) {
+    const inServer = firstOfdServerCode.includes(`  ${layer}: '`) && firstOfdServerCode.includes('ERROR_LAYERS');
+    const inOpenApi = firstOfdSchemas.includes(`"${layer}"`);
+    assertCheck('first-ofd:error-layer', layer, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+  for (const [layerName, codes] of Object.entries(firstOfdManifest.resultLayerCodes || {})) {
+    for (const code of codes) {
+      const inServer = (layerName === 'kkt' ? firstOfdServerCode.includes('KKT_ERROR_CODES') : firstOfdServerCode.includes('API_ERROR_CODES'))
+        && firstOfdServerCode.includes(`  ${code}: '`);
+      const inOpenApi = firstOfdSchemas.includes(`"${code}"`);
+      assertCheck('first-ofd:result-code', `${layerName}/${code}`, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+    }
+  }
+  for (const code of firstOfdManifest.errorCodes || []) {
+    const inServer = firstOfdServerCode.includes(`'${code}'`);
+    const inOpenApi = firstOfdSchemas.includes(`"${code}"`);
+    assertCheck('first-ofd:error-code', code, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+
+  const firstOfdCallback = firstOfdManifest.callback || {};
+  assertCheck('first-ofd:callback', 'подпись не выдумывается: signature=none, нет HMAC/RSA',
+    firstOfdCallback.signature === 'none' && firstOfdServerCode.includes("callbackSignature: 'none'")
+      && !/createHmac|createSign|RSA-SHA/.test(firstOfdServerCode)
+      && firstOfdGuide.includes('без подписи'),
+    'мок не добавляет подпись/checksum, которых нет в публичном срезе');
+  assertCheck('first-ofd:callback', 'исходящий webhook firstOfdCallback зафиксирован в OpenAPI',
+    Boolean((firstOfdOpenApi.webhooks || {}).firstOfdCallback) && firstOfdSchemas.includes('CallbackEnvelope'),
+    'webhooks.firstOfdCallback + CallbackEnvelope присутствуют');
+  assertCheck('first-ofd:callback', 'ACK 2xx и расписание повторов помечены mock-local [FORK]',
+    firstOfdServerCode.includes('[FORK') && firstOfdGuide.includes('[FORK]') && firstOfdServerCode.includes('2xx'),
+    'локальные правила ACK/retry честно помечены [FORK]');
+  assertCheck('first-ofd:callback', 'SSRF_BLOCKED терминален и без повторов',
+    firstOfdServerCode.includes('SSRF_BLOCKED') && firstOfdServerCode.includes('терминальн'),
+    'приватный callbackUrl даёт терминальный отказ');
+  assertCheck('first-ofd:callback', 'доставка через очередь ядра, сверка через status/{requestId}',
+    firstOfdServerCode.includes('createDeliveryQueue') && firstOfdGuide.includes('status/{requestId}'),
+    'callback — не единственный источник истины');
+
+  const firstOfdInvariants = [
+    ['first-ofd:invariant', 'getToken — JSON charset=utf-8, {login,pass} → {token}, TTL 24 ч на виртуальных часах',
+      firstOfdServerCode.includes('application/json; charset=utf-8') && firstOfdServerCode.includes('TOKEN_TTL_DEFAULT_SECS = 86400')
+        && firstOfdServerCode.includes('X-Mock-Token-Expires-At') && firstOfdServerCode.includes('clock.now()')],
+    ['first-ofd:invariant', 'бизнес-вызовы — Authorization: Bearer из getToken, а не API-ключ UUID',
+      firstOfdServerCode.includes('Authorization') && firstOfdServerCode.includes('API-ключ') && firstOfdServerCode.includes('invalid_token')],
+    ['first-ofd:invariant', 'очередь асинхронная: POST transaction/{type} → requestId, результат только методом статуса',
+      firstOfdServerCode.includes('function handleCreateTransaction') && firstOfdServerCode.includes('function handleGetStatus')
+        && firstOfdServerCode.includes('function handleGetTransaction')],
+    ['first-ofd:invariant', 'схемы строго по типу: receipt-тело в сменах отклоняется (StateCommandRequest)',
+      firstOfdServerCode.includes('StateCommandRequest') && firstOfdServerCode.includes('Document с operationType/items/totalSum'),
+      ],
+    ['first-ofd:invariant', 'обязательные поля чека: cashboxParameters.userInn, requestMetadata.userGroup, document.operationType|items|totalSum',
+      firstOfdServerCode.includes('userInn') && firstOfdServerCode.includes('userGroup') && firstOfdServerCode.includes('totalSum')],
+    ['first-ofd:invariant', 'document.items — массив Item (расхождение №2 трактуется в пользу OpenAPI)',
+      firstOfdServerCode.includes('document.items должен быть МАССИВОМ') && firstOfdGuide.includes('массив')],
+    ['first-ofd:invariant', 'оба слоя ошибок разделяются: errorType=API|KKT с errorCode/details',
+      firstOfdServerCode.includes('ERROR_LAYERS') && firstOfdServerCode.includes('KKT_ERROR_CODES')
+        && firstOfdServerCode.includes('API_ERROR_CODES') && firstOfdServerCode.includes('errorType')],
+    ['first-ofd:invariant', 'результат заявки несёт requestId/transactionType/errorCode/errorType/details/payload',
+      ['requestId', 'transactionType', 'errorCode', 'errorType', 'details', 'payload'].every((key) => firstOfdServerCode.includes(key))],
+    ['first-ofd:invariant', 'externalId не обещает идемпотентность: повтор помечается X-Mock-Duplicate-External-Id ([VERIFY])',
+      firstOfdServerCode.includes('X-Mock-Duplicate-External-Id') && firstOfdGuide.includes('дедупликац')
+        && firstOfdManifest.idempotency.externalId.includes('НЕ подтверждены')],
+    ['first-ofd:invariant', 'суммы — десятичные рубли (не копейки), сверка totalSum только предупреждает',
+      firstOfdServerCode.includes('ДЕСЯТИЧНЫЕ') && firstOfdGuide.includes('десятичные')],
+    ['first-ofd:invariant', 'SSRF-политика callback — общая для стенда (MOCK_BLOCK_PRIVATE_WEBHOOKS)',
+      firstOfdServerCode.includes('MOCK_BLOCK_PRIVATE_WEBHOOKS') && firstOfdServerCode.includes('createDeliveryQueue')],
+    ['first-ofd:invariant', 'per-sandbox изоляция заявок/смен/сценариев (X-Mock-Sandbox)',
+      firstOfdServerCode.includes('X-Mock-Sandbox') && firstOfdServerCode.includes('sandboxRuntime')],
+    ['first-ofd:invariant', 'виртуальные часы, сценарии, chaos и журнал подключены из core',
+      firstOfdServerCode.includes('core.createVirtualClock') && firstOfdServerCode.includes('createScenarioRegistry')
+        && firstOfdServerCode.includes('applyRequestChaos') && firstOfdServerCode.includes("'/mock/time'")
+        && firstOfdServerCode.includes('journal.record')],
+    ['first-ofd:invariant', 'control-plane fail-closed в hosted (checkControlAccess)',
+      firstOfdServerCode.includes('checkControlAccess') && firstOfdServerCode.includes('hosted-fail-closed')],
+    ['first-ofd:invariant', 'дефолтные креды синтетические и маскируются в логе/ответах',
+      firstOfdServerCode.includes('DEFAULT_LOGIN') && firstOfdServerCode.includes('DEFAULT_PASS') && firstOfdServerCode.includes('maskPiiValue')],
+    ['first-ofd:invariant', 'чужой контракт не подмешивается: нет form-urlencoded, ATOL/Ferma-маршрутов',
+      !firstOfdServerCode.includes('application/x-www-form-urlencoded') && !firstOfdServerCode.includes('atol-online')
+        && !firstOfdServerCode.includes("'/v4/")],
+  ];
+  for (const [category, item, ok] of firstOfdInvariants) {
+    assertCheck(category, item, Boolean(ok), ok ? 'инвариант соблюдён' : 'инвариант нарушен в server.js');
+  }
+
+  for (const [needle, label] of [
+    ['application/json; charset=utf-8', 'JSON-транспорт getToken'],
+    ['Bearer', 'авторизация бизнес-вызовов'],
+    ['requestId', 'заявка вместо синхронного результата'],
+    ['IN_PROGRESS', 'статус обработки'],
+    ['COMPLETED', 'успешный результат'],
+    ['EXPENCE', 'написание операций как в схеме'],
+    ['VAT_22', 'подтверждённые ставки НДС'],
+    ['statuses', 'сверка по externalId+groupId'],
+    ['externalId', 'ключ сверки'],
+    ['/api/external/receipts', 'документы за период'],
+    ['86400', 'TTL токена 24 ч'],
+    ['callbackUrl', 'адрес уведомления из заявки'],
+    ['SSRF', 'политика приватных адресов'],
+    ['[VERIFY]', 'незакрытые места среза'],
+    ['[FORK]', 'локальные решения мока'],
+    ['correctionCause', 'чек коррекции'],
+    ['StateCommandRequest', 'смены и отчёт'],
+    ['3107', 'порт стенда'],
+  ]) {
+    const inGuide = firstOfdGuide.includes(needle);
+    assertCheck('first-ofd:guide-point', `${label} (${needle})`, inGuide, inGuide ? 'есть в docs/integration/first-ofd.md' : 'гайд не содержит обязательную оговорку');
+  }
+
+  const firstOfdLimits = firstOfdManifest.limits || {};
+  assertCheck('first-ofd:limits', `tokenTtlSecsDefault=${firstOfdLimits.tokenTtlSecsDefault}`,
+    firstOfdServerCode.includes(`TOKEN_TTL_DEFAULT_SECS = ${firstOfdLimits.tokenTtlSecsDefault}`)
+      && firstOfdGuide.includes(String(firstOfdLimits.tokenTtlSecsDefault)),
+    'TTL токена совпадает в манифесте, адаптере и guide');
+  assertCheck('first-ofd:limits', `processMsDefault=${firstOfdLimits.processMsDefault}`,
+    firstOfdServerCode.includes(`PROCESS_DEFAULT_MS = ${firstOfdLimits.processMsDefault}`)
+      && firstOfdGuide.includes(String(firstOfdLimits.processMsDefault)),
+    'задержка очереди совпадает в манифесте, адаптере и guide');
+  assertCheck('first-ofd:limits', `callback retry=${firstOfdLimits.callbackAttemptsDefault}×${firstOfdLimits.callbackRetryMsDefault}ms`,
+    firstOfdServerCode.includes(`CALLBACK_RETRY_MS_DEFAULT = ${firstOfdLimits.callbackRetryMsDefault}`)
+      && firstOfdServerCode.includes(`CALLBACK_MAX_ATTEMPTS_DEFAULT = ${firstOfdLimits.callbackAttemptsDefault}`)
+      && firstOfdGuide.includes(`${firstOfdLimits.callbackAttemptsDefault} попытки`)
+      && firstOfdGuide.includes(`${firstOfdLimits.callbackRetryMsDefault / 1000} секунд`),
+    'callback schedule совпадает в manifest, server.js и guide (mock-local [FORK])');
+  assertCheck('first-ofd:limits', `receipts pageSize=${firstOfdLimits.receiptsPageSizeDefault}/${firstOfdLimits.receiptsPageSizeMax}`,
+    firstOfdServerCode.includes(`RECEIPTS_PAGE_SIZE_DEFAULT = ${firstOfdLimits.receiptsPageSizeDefault}`)
+      && firstOfdServerCode.includes(`RECEIPTS_PAGE_SIZE_MAX = ${firstOfdLimits.receiptsPageSizeMax}`)
+      && firstOfdGuide.includes('pageSize') && firstOfdGuide.includes(String(firstOfdLimits.receiptsPageSizeMax)),
+    'пагинация /receipts совпадает в манифесте, адаптере и guide');
+  assertCheck('first-ofd:limits', `maxItemsPerReceipt=${firstOfdLimits.maxItemsPerReceipt}`,
+    firstOfdServerCode.includes(`MAX_ITEMS = ${firstOfdLimits.maxItemsPerReceipt}`)
+      && firstOfdGuide.includes(String(firstOfdLimits.maxItemsPerReceipt)),
+    'safety cap позиций чека совпадает с guide');
+
+  assertCheck('first-ofd:idempotency', 'externalId: повтор даёт новую заявку, идемпотентность не обещана',
+    firstOfdServerCode.includes('X-Mock-Duplicate-External-Id') && firstOfdGuide.includes('X-Mock-Duplicate-External-Id')
+      && firstOfdGuide.includes('[VERIFY]'),
+    'поведение детерминировано и помечено [VERIFY]');
+  assertCheck('first-ofd:idempotency', 'requestId — ключ transaction/{requestId} и status/{requestId}',
+    firstOfdServerCode.includes('function handleGetTransaction') && firstOfdServerCode.includes('function handleGetStatus')
+      && firstOfdGuide.includes('transaction/{requestId}'),
+    'выданный requestId остаётся ключом сверки');
+
+  const firstOfdDivergencePoints = [
+    ['№1 requestMetadata: required в OpenAPI vs необязательное в manual',
+      firstOfdGuide.includes('requestMetadata') && firstOfdGuide.includes('[VERIFY]') && firstOfdServerCode.includes('userGroup')],
+    ['№2 document.items: массив в OpenAPI vs объект в таблице manual',
+      firstOfdGuide.includes('массив') && firstOfdGuide.includes('№2')],
+    ['№3 callbackUrl: http:// в PDF vs https:// в примерах',
+      firstOfdGuide.includes('http://') && firstOfdGuide.includes('https://')
+        && firstOfdGuide.includes('MOCK_FIRST_OFD_CALLBACK_HTTPS_ONLY')],
+    ['№4 getToken: error с кодом 0 в «успешном» примере',
+      firstOfdGuide.includes('Неверный логин и пароль') && firstOfdGuide.includes('getToken-error-quirk')],
+    ['№5 тег ATOL Online V5 тестового swagger — вне области',
+      firstOfdGuide.includes('V5') && (firstOfdManifest.outOfScope || []).some((item) => item.includes('ATOL Online V5'))],
+  ];
+  assertCheck('first-ofd:divergence', 'манифест фиксирует 5 расхождений среза',
+    (firstOfdManifest.divergences || []).length === 5,
+    `divergences=${(firstOfdManifest.divergences || []).length}`);
+  for (const [item, ok] of firstOfdDivergencePoints) {
+    assertCheck('first-ofd:divergence', item, Boolean(ok), ok ? 'расхождение помечено [VERIFY]/вне области' : 'расхождение не задокументировано');
+  }
+
+  const emptyFirstOfdRoutes = firstOfdRouteDrift('', { paths: {} }, firstOfdManifest);
+  assertCheck('first-ofd:negative-control', 'пустой server/openapi красит все API/mock routes',
+    emptyFirstOfdRoutes.length > 0 && emptyFirstOfdRoutes.every((route) => !route.inServer && !route.inOpenApi),
+    `routes в негативном контроле: ${emptyFirstOfdRoutes.length}`);
+  const emptyFirstOfdControlRoutes = firstOfdControlRouteDrift('', { paths: {} }, firstOfdManifest);
+  assertCheck('first-ofd:negative-control', 'пустой server/openapi красит все control routes',
+    emptyFirstOfdControlRoutes.length > 0 && emptyFirstOfdControlRoutes.every((route) => !route.inServer && !route.inOpenApi),
+    `control routes в негативном контроле: ${emptyFirstOfdControlRoutes.length}`);
+  const emptyFirstOfdTypes = Object.keys(firstOfdManifest.transactionTypes || {})
+    .map((type) => ({ type, inServer: firstOfdServerCode.includes(`  ${type}: '`), inOpenApi: JSON.stringify({}).includes(`"${type}"`) }));
+  assertCheck('first-ofd:negative-control', 'пустой OpenAPI красит типы заявок (server остаётся отдельно зелёным)',
+    emptyFirstOfdTypes.length > 0 && emptyFirstOfdTypes.every((entry) => entry.inServer && !entry.inOpenApi),
+    `типов заявок в негативном контроле: ${emptyFirstOfdTypes.length}`);
+  assertCheck('first-ofd:readme', 'сервисный README фиксирует getToken/Bearer, очередь и границы [VERIFY]/[FORK]',
+    firstOfdReadme.includes('getToken') && firstOfdReadme.includes('Bearer') && firstOfdReadme.includes('requestId')
+      && firstOfdReadme.includes('[VERIFY]') && firstOfdReadme.includes('[FORK]') && firstOfdReadme.includes('3107'),
+    'README должен объяснять авторизацию, асинхронность и известные пробелы среза');
+
   const summary = {
     ok: driftIssues.length === 0,
     checkedAt: new Date().toISOString(),
@@ -704,7 +970,7 @@ function main() {
   if (jsonOutput) {
     console.log(JSON.stringify(summary, null, 2));
   } else {
-    console.log(`\n== Protocol Drift Check (tbank-eacq + ferma-ofd + atol-online + alfa-eacq + sber-ecom + vtb-smb) ==`);
+    console.log(`\n== Protocol Drift Check (tbank-eacq + ferma-ofd + atol-online + alfa-eacq + sber-ecom + vtb-smb + first-ofd-okassa) ==`);
     console.log(`Проверено инвариантов контракта: ${summary.totalChecks}, пройдено: ${summary.passedChecks}, расхождений: ${summary.driftCount}`);
     if (driftIssues.length > 0) {
       console.error('\nОбнаружены расхождения (drift):');

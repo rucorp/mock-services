@@ -1,0 +1,2398 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "first-ofd-mock — облачная касса OKassa (Первый ОФД), мок-стенд",
+    "version": "0.5.0",
+    "description": "Zero-dependency mock of the OKassa cloud cash-register API slice documented in docs/reference/first-ofd/01-okassa-api.md and 02-test-and-open-issues.md (срез 2026-10-11). Auth: POST /getToken (application/json; charset=utf-8, {login, pass}) → {token}; business calls use Authorization: Bearer <token> with a 24-hour TTL on the stand's virtual clock. Receipts are submitted to an ASYNCHRONOUS QUEUE: POST /api/external/queue/v1/transaction/{type} returns requestId, and the fiscal result is retrieved via GET transaction/{requestId} or GET status/{requestId} (IN_PROGRESS → COMPLETED | ERROR). Operations are INCOME / INCOME_RETURN / EXPENCE / EXPENCE_RETURN — the EXPENCE spelling is kept exactly as in the schema and is NOT auto-corrected. Per-type schemas are strict: ReceiptRequest, ReceiptCorrectionRequest and StateCommandRequest are not merged. Callback is an unsigned POST to requestMetadata.callbackUrl: envelope, signature, ACK code and retry schedule are NOT fixed by the public slice, so the mock invents no signature — its 2xx ACK rule and retry schedule are a mock-local [FORK]. externalId deduplication is not confirmed publicly ([VERIFY])."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3107",
+      "description": "Локальный мок Первого ОФД (облачная касса OKassa)"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Auth",
+      "description": "getToken: login + API-ключ UUID → Bearer-токен (TTL 24 ч на виртуальных часах)"
+    },
+    {
+      "name": "OKassa queue",
+      "description": "Асинхронная очередь заявок на чек: POST transaction/{type} → requestId, статусы и сверка"
+    },
+    {
+      "name": "Receipts",
+      "description": "Фискальные документы за период (GET /api/external/receipts)"
+    },
+    {
+      "name": "Mock control",
+      "description": "Часы, сценарии, песочницы и административная поверхность мока"
+    }
+  ],
+  "webhooks": {
+    "firstOfdCallback": {
+      "post": {
+        "tags": [
+          "OKassa queue"
+        ],
+        "summary": "Исходящий callback: POST JSON без подписи на requestMetadata.callbackUrl",
+        "description": "The mock posts the queue result to requestMetadata.callbackUrl (or to MOCK_FIRST_OFD_CALLBACK_URL when the request has none — mock-local [FORK]). The public manual/OpenAPI fixes neither the envelope nor a signature, an ACK code or a retry schedule: the mock adds NO HMAC/RSA signature at all, treats any 2xx as delivered ([FORK], not a protocol claim) and retries on a mock-local schedule (default 3 × 60s). The receiver must be idempotent; reconcile with GET /api/external/queue/v1/status/{requestId}.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallbackEnvelope"
+              }
+            }
+          }
+        },
+        "responses": {
+          "2xx": {
+            "description": "Любой 2xx считается доставкой ([FORK]: ACK-код публичным срезом не зафиксирован)."
+          },
+          "default": {
+            "description": "Не-2xx: повтор по локальному графику мока; SSRF_BLOCKED — терминальный отказ без повторов."
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/getToken": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Получить Bearer-токен (login + API-ключ UUID)",
+        "description": "Срез фиксирует Content-Type application/json; charset=utf-8 и тело {login, pass}, где pass — API-ключ UUID из ЛК. Токен живёт 24 ч на виртуальных часах. Квирк примера PDF (объект error с кодом 0 на «успешном» ответе) не воспроизводится по умолчанию: успех мока — только {token} (+ заголовки X-Mock-Token-TTL-Secs/X-Mock-Token-Expires-At); сценарий getToken-error-quirk отдаёт пример PDF как есть.",
+        "requestBody": {
+          "required": true,
+          "description": "login (идентификатор организации) и pass (API-ключ UUID)",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Токен выдан",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "login/pass отсутствуют или тело не JSON-объект",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неверный логин и пароль (invalid_credentials)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не POST",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type не application/json",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/external/queue/v1/transaction/{type}": {
+      "post": {
+        "tags": [
+          "OKassa queue"
+        ],
+        "summary": "Создать заявку на чек/смену/отчёт → requestId",
+        "description": "Заявка становится в очередь и обрабатывается на виртуальных часах (MOCK_FIRST_OFD_PROCESS_MS, по умолчанию 2 с): сначала IN_PROGRESS, затем COMPLETED или ERROR. Схема тела СТРОГО по типу: receipt → ReceiptRequest, receiptCorrection → ReceiptCorrectionRequest, openShift/closeShift/currentStateReport → StateCommandRequest (receipt-тело в них отклоняется). Повтор externalId в той же группе создаёт новую заявку — идемпотентность externalId публично не подтверждена ([VERIFY], ответ помечается X-Mock-Duplicate-External-Id).",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "path",
+            "required": true,
+            "description": "Тип заявки",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "receipt",
+                "receiptCorrection",
+                "openShift",
+                "closeShift",
+                "currentStateReport"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "ReceiptRequest | ReceiptCorrectionRequest | StateCommandRequest — строго по типу из пути",
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ReceiptRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ReceiptCorrectionRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/StateCommandRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Заявка принята в очередь (финальный результат — через status/transaction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateTransactionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Ошибка валидации заявки/параметров (provider-shaped envelope мока, [FORK])",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Отсутствует/неизвестен/истёк Bearer-токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type не application/json",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Исчерпана квота документов песочницы",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/external/queue/v1/transaction/{requestId}": {
+      "get": {
+        "tags": [
+          "OKassa queue"
+        ],
+        "summary": "Полная заявка печати и результат",
+        "description": "Возвращает исходное тело заявки (как принято) и объект result с полями requestId, transactionType, errorCode, errorType, details, payload. Ошибки слоя API очереди и слоя ККТ разделяются полем errorType.",
+        "parameters": [
+          {
+            "name": "requestId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Заявка и результат",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Ошибка валидации заявки/параметров (provider-shaped envelope мока, [FORK])",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Отсутствует/неизвестен/истёк Bearer-токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "request_not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/external/queue/v1/status/{requestId}": {
+      "get": {
+        "tags": [
+          "OKassa queue"
+        ],
+        "summary": "Текущий статус обработки документа",
+        "description": "Статусы очереди: IN_PROGRESS — заявка в очереди/обрабатывается; COMPLETED — заявка обработана успешно; ERROR — заявка обработана с ошибкой. После callback это метод сверки: уведомление — не единственный источник истины.",
+        "parameters": [
+          {
+            "name": "requestId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Статус и результат заявки",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Ошибка валидации заявки/параметров (provider-shaped envelope мока, [FORK])",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Отсутствует/неизвестен/истёк Bearer-токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "request_not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/external/queue/v1/statuses": {
+      "get": {
+        "tags": [
+          "OKassa queue"
+        ],
+        "summary": "Заявки по externalId и группе",
+        "description": "externalId и groupId обязательны; status — необязательный фильтр. Envelope списка публичным срезом не зафиксирован: мок отдаёт JSON-массив статусов ([VERIFY]) — сохраняйте выданный requestId.",
+        "parameters": [
+          {
+            "name": "externalId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "groupId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "IN_PROGRESS",
+                "COMPLETED",
+                "ERROR"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Массив статусов заявок этой группы с этим externalId",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StatusResponse"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Ошибка валидации заявки/параметров (provider-shaped envelope мока, [FORK])",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Отсутствует/неизвестен/истёк Bearer-токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/external/receipts": {
+      "get": {
+        "tags": [
+          "Receipts"
+        ],
+        "summary": "Фискальные документы за период",
+        "description": "from и to обязательны; доступны фильтры transactionType, groupId, kkmRegId, page, pageSize. Возвращаются фискальные документы (отчёты об открытии/закрытии смены тоже), а не состояние заявок; отчёт о текущем состоянии расчётов фискальным документом не является и в список не попадает ([VERIFY]). Envelope списка — локальная договорённость мока [FORK].",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Начало периода: unix-время или ISO 8601 ([VERIFY]: форма в срезе не зафиксирована)"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Конец периода: unix-время или ISO 8601"
+          },
+          {
+            "name": "transactionType",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "receipt",
+                "receiptCorrection",
+                "openShift",
+                "closeShift"
+              ]
+            }
+          },
+          {
+            "name": "groupId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kkmRegId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница фискальных документов",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReceiptsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Ошибка валидации заявки/параметров (provider-shaped envelope мока, [FORK])",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Отсутствует/неизвестен/истёк Bearer-токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Health мока: TTL токена, задержка очереди, статусы, callback-политика",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Самоописание мока (OpenAPI 3.1)",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin": {
+      "get": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "HTML-консоль: заявки, группы, callbacks, журнал",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/journal": {
+      "get": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Журнал обращений к OKassa API",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/action": {
+      "post": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Действия консоли (CSRF): process-request, redeliver-callback, duplicate-callback",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mock/time": {
+      "get": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Виртуальные часы: advance/offset/iso/reset, обработка созревших заявок",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Виртуальные часы: advance/offset/iso/reset, обработка созревших заявок",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Виртуальные часы: advance/offset/iso/reset, обработка созревших заявок",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mock/scenarios": {
+      "get": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Правила сценариев и история срабатываний (per-sandbox)",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Правила сценариев и история срабатываний (per-sandbox)",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Правила сценариев и история срабатываний (per-sandbox)",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mock/state": {
+      "get": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Экспорт/импорт состояния песочницы",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Экспорт/импорт состояния песочницы",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Экспорт/импорт состояния песочницы",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mock/reset": {
+      "post": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Сброс песочницы (заявки, документы, сценарии, журнал)",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sandboxes": {
+      "get": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Песочницы RFC-001: список/создание/удаление",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Песочницы RFC-001: список/создание/удаление",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Песочницы RFC-001: список/создание/удаление",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sandboxes/me": {
+      "get": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Текущая песочница владельца",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Текущая песочница владельца",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sandboxes/me/reset": {
+      "post": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Сброс своей песочницы",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sandboxes/me/reset-creds": {
+      "post": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Ротация кредов песочницы",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mock/sandboxes": {
+      "get": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Алиас /sandboxes для оператора",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Алиас /sandboxes для оператора",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Mock control"
+        ],
+        "summary": "Алиас /sandboxes для оператора",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Управляющий токен (MOCK_ADMIN_TOKEN/MOCK_OPERATOR_TOKEN) в hosted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Метод не поддерживается",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": {
+                    "$ref": "#/components/schemas/ErrorResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "TokenRequest": {
+        "type": "object",
+        "required": [
+          "login",
+          "pass"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "login": {
+            "type": "string",
+            "description": "Идентификатор организации (login) из ЛК; синтетический дефолт мока — firstofdmocktest"
+          },
+          "pass": {
+            "type": "string",
+            "description": "API-ключ UUID. НЕ bearer-токен: bearer выдаёт getToken. Синтетический дефолт мока — 11111111-2222-4333-8444-555555555555"
+          }
+        }
+      },
+      "TokenResponse": {
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "Bearer-токен для Authorization (TTL 24 ч на виртуальных часах стенда)"
+          },
+          "error": {
+            "$ref": "#/components/schemas/TokenQuirkError"
+          }
+        }
+      },
+      "TokenQuirkError": {
+        "type": "object",
+        "description": "Квирк примера PDF: на «успешном» ответе может присутствовать error с кодом 0 и текстом «Неверный логин и пароль». Дефолтный успех мока объект error не содержит; квирк воспроизводится сценарием getToken-error-quirk. Семантику требуется согласовать с провайдером ([VERIFY]).",
+        "properties": {
+          "code": {
+            "type": [
+              "integer",
+              "string"
+            ]
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "CashboxParameters": {
+        "type": "object",
+        "required": [
+          "userInn"
+        ],
+        "additionalProperties": true,
+        "description": "Кассовые параметры. По срезу для ReceiptRequest обязателен userInn; имена тегов выбора кассовой группы публично не перечислены ([VERIFY]), поэтому дополнительные поля принимаются как есть.",
+        "properties": {
+          "userInn": {
+            "type": "string",
+            "pattern": "^\\d{10}$|^\\d{12}$",
+            "description": "ИНН организации (10 цифр) или ИП/физлица (12 цифр)"
+          }
+        }
+      },
+      "RequestMetadata": {
+        "type": "object",
+        "required": [
+          "userGroup"
+        ],
+        "additionalProperties": true,
+        "description": "Метаданные заявки. Обязательность расходится в срезе: manual называет объект необязательным, OpenAPI держит requestMetadata в required — мок следует строгой схеме OpenAPI ([VERIFY]).",
+        "properties": {
+          "userGroup": {
+            "type": "string",
+            "description": "Кассовая группа (groupId для сверки). Синтетический каталог мока: MOCKGROUP, firstofd-mock"
+          },
+          "externalId": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "Внешний идентификатор вызывающей стороны; дедупликация НЕ подтверждена ([VERIFY])"
+          },
+          "callbackUrl": {
+            "type": "string",
+            "maxLength": 2048,
+            "description": "Куда послать unsigned POST после обработки; схема http/https (расхождение PDF vs примеры, [VERIFY])"
+          },
+          "timestamp": {
+            "description": "Метка времени: unix-число или ISO 8601 ([VERIFY]: форма не зафиксирована)"
+          },
+          "timeZone": {
+            "type": "string",
+            "maxLength": 32
+          }
+        }
+      },
+      "Item": {
+        "type": "object",
+        "required": [
+          "label",
+          "measurementUnit",
+          "price",
+          "quantity",
+          "vatCode"
+        ],
+        "additionalProperties": true,
+        "description": "Позиция чека. Другие реквизиты ФФД (агент, маркировка и т. п.) срез описывает отдельными схемами — дополнительные поля принимаются как есть.",
+        "properties": {
+          "label": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "Наименование предмета расчёта"
+          },
+          "measurementUnit": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "Мера количества ([VERIFY]: полный справочник в срезе не приведён)"
+          },
+          "price": {
+            "type": "number",
+            "description": "Цена — ДЕСЯТИЧНЫЕ рубли (например 100.00), не копейки; до 2 знаков после точки"
+          },
+          "quantity": {
+            "type": "number",
+            "description": "Количество — положительное число, до 3 знаков после точки (mock safety cap)"
+          },
+          "vatCode": {
+            "$ref": "#/components/schemas/VatCode"
+          }
+        }
+      },
+      "ReceiptDocument": {
+        "type": "object",
+        "required": [
+          "operationType",
+          "items",
+          "totalSum"
+        ],
+        "additionalProperties": true,
+        "description": "Документ чека (Receipt). items — МАССИВ (OpenAPI); таблица manual трактует форму иначе — расхождение №2 среза, мок следует строгой OpenAPI-схеме [VERIFY].",
+        "properties": {
+          "operationType": {
+            "$ref": "#/components/schemas/OperationType"
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/Item"
+            }
+          },
+          "totalSum": {
+            "type": "number",
+            "description": "Итог чека в ДЕСЯТИЧНЫХ рублях. Правила сверки totalSum с позициями срез не описывает — вне области, мок их не требует ([FORK])"
+          },
+          "taxationType": {
+            "type": "string",
+            "description": "СНО ([VERIFY]: enum в публичном срезе не приведён — принимается непустая строка)"
+          },
+          "cashier": {
+            "type": "string",
+            "maxLength": 512
+          },
+          "cashierInn": {
+            "type": "string",
+            "pattern": "^\\d{10}$|^\\d{12}$"
+          },
+          "retailAddress": {
+            "type": "string",
+            "maxLength": 512
+          },
+          "retailPlace": {
+            "type": "string",
+            "maxLength": 512
+          },
+          "sendCheckTo": {
+            "description": "Куда отправить чек (e-mail/телефон или массив): строка или массив строк ([VERIFY])"
+          },
+          "buyer": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Реквизиты покупателя ([VERIFY]: состав не приведён)"
+          },
+          "industryProps": {
+            "description": "Отраслевые реквизиты: объект или массив объектов ([VERIFY])"
+          },
+          "vatSums": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            },
+            "description": "Суммы по ставкам НДС: {VAT_22: 12.34}; ключи вне каталога не отклоняются, но логируются ([VERIFY])"
+          },
+          "ecashSums": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            },
+            "description": "Безналичные суммы по типам оплаты ([VERIFY]: каталог ключей в срезе не приведён)"
+          },
+          "timeZone": {
+            "type": "string",
+            "maxLength": 32
+          }
+        }
+      },
+      "ReceiptCorrectionDocument": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ReceiptDocument"
+          },
+          {
+            "type": "object",
+            "required": [
+              "correctionCause"
+            ],
+            "properties": {
+              "correctionCause": {
+                "description": "Основание коррекции ([VERIFY]: справочник значений в срезе не приведён — принимается непустая строка или число)"
+              }
+            }
+          }
+        ]
+      },
+      "ReceiptRequest": {
+        "type": "object",
+        "required": [
+          "cashboxParameters",
+          "requestMetadata",
+          "document"
+        ],
+        "additionalProperties": true,
+        "description": "Заявка receipt: чек (INCOME, INCOME_RETURN, EXPENCE, EXPENCE_RETURN). Обязательны cashboxParameters.userInn, requestMetadata.userGroup, document.operationType|items|totalSum.",
+        "properties": {
+          "cashboxParameters": {
+            "$ref": "#/components/schemas/CashboxParameters"
+          },
+          "requestMetadata": {
+            "$ref": "#/components/schemas/RequestMetadata"
+          },
+          "document": {
+            "$ref": "#/components/schemas/ReceiptDocument"
+          }
+        }
+      },
+      "ReceiptCorrectionRequest": {
+        "type": "object",
+        "required": [
+          "cashboxParameters",
+          "requestMetadata",
+          "document"
+        ],
+        "additionalProperties": true,
+        "description": "Заявка receiptCorrection: чек коррекции, в документе обязателен correctionCause.",
+        "properties": {
+          "cashboxParameters": {
+            "$ref": "#/components/schemas/CashboxParameters"
+          },
+          "requestMetadata": {
+            "$ref": "#/components/schemas/RequestMetadata"
+          },
+          "document": {
+            "$ref": "#/components/schemas/ReceiptCorrectionDocument"
+          }
+        }
+      },
+      "StateCommandRequest": {
+        "type": "object",
+        "required": [
+          "requestMetadata"
+        ],
+        "additionalProperties": true,
+        "description": "Заявка openShift/closeShift/currentStateReport. Receipt-тело (document) не принимается: мок отклоняет его, чтобы не собирать «универсальный» объект из разных схем. Состав обязательных полей StateCommandRequest публично не зафиксирован ([VERIFY]): мок требует документированный requestMetadata.userGroup.",
+        "properties": {
+          "cashboxParameters": {
+            "$ref": "#/components/schemas/CashboxParameters"
+          },
+          "requestMetadata": {
+            "$ref": "#/components/schemas/RequestMetadata"
+          }
+        }
+      },
+      "OperationType": {
+        "type": "string",
+        "enum": [
+          "INCOME",
+          "INCOME_RETURN",
+          "EXPENCE",
+          "EXPENCE_RETURN"
+        ],
+        "description": "Операция чека: INCOME — приход; INCOME_RETURN — возврат прихода; EXPENCE — расход; EXPENCE_RETURN — возврат расхода. Написание EXPENCE/EXPENCE_RETURN сохранено как в схеме и автоматически не «исправляется»."
+      },
+      "VatCode": {
+        "type": "string",
+        "enum": [
+          "VAT_NONE",
+          "VAT_0",
+          "VAT_10",
+          "VAT_20",
+          "VAT_110",
+          "VAT_120",
+          "VAT_22",
+          "VAT_22122"
+        ],
+        "description": "Ставка НДС: VAT_22 — 22 % и VAT_22122 — 22/122 (расчётная) подтверждены срезом; VAT_NONE — без НДС, VAT_0 — 0 %, VAT_10 — 10 %, VAT_20 — 20 %, VAT_110 — 10/110, VAT_120 — 20/120 — [VERIFY]: полный enum vatCode в публичном срезе не приведён."
+      },
+      "QueueStatus": {
+        "type": "string",
+        "enum": [
+          "IN_PROGRESS",
+          "COMPLETED",
+          "ERROR"
+        ],
+        "description": "Статус очереди: IN_PROGRESS — заявка в очереди/обрабатывается; COMPLETED — заявка обработана успешно; ERROR — заявка обработана с ошибкой."
+      },
+      "ErrorLayer": {
+        "type": "string",
+        "enum": [
+          "API",
+          "KKT"
+        ],
+        "description": "Слой ошибки результата: API — ошибка уровня API очереди; KKT — ошибка ККТ/фискального накопителя. Оба слоя сохраняются раздельно (срез)."
+      },
+      "CreateTransactionResponse": {
+        "type": "object",
+        "required": [
+          "requestId"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "description": "Идентификатор заявки очереди (формат в срезе не зафиксирован: мок отдаёт UUID, [VERIFY])"
+          }
+        }
+      },
+      "ResultErrorCode": {
+        "type": "string",
+        "enum": [
+          "DOCUMENT_REJECTED",
+          "SHIFT_ALREADY_OPEN",
+          "SHIFT_NOT_OPEN",
+          "KKT_UNAVAILABLE"
+        ],
+        "description": "[FORK] Срез фиксирует ПОЛЯ errorCode/errorType/details результата, но не таблицу значений: каталог ниже — локальная договорённость мока (слой API: DOCUMENT_REJECTED; слой KKT: SHIFT_ALREADY_OPEN — смена уже открыта, SHIFT_NOT_OPEN — смены нет, KKT_UNAVAILABLE — сбой ККТ/ФН). Это НЕ production-каталог Первого ОФД."
+      },
+      "StatusResponse": {
+        "type": "object",
+        "required": [
+          "requestId",
+          "transactionType",
+          "status",
+          "errorCode",
+          "errorType",
+          "details",
+          "payload"
+        ],
+        "additionalProperties": true,
+        "description": "Результат заявки: requestId, transactionType, errorCode, errorType, details, payload (срез). pending-поля равны null до завершения обработки; externalId/userGroup/createdAt/updatedAt добавлены моком для сверки ([FORK]).",
+        "properties": {
+          "requestId": {
+            "type": "string"
+          },
+          "transactionType": {
+            "type": "string",
+            "enum": [
+              "receipt",
+              "receiptCorrection",
+              "openShift",
+              "closeShift",
+              "currentStateReport"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/QueueStatus"
+          },
+          "errorCode": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ResultErrorCode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Код ошибки: локальный [FORK]-каталог мока по слою (API: DOCUMENT_REJECTED; KKT: SHIFT_ALREADY_OPEN/SHIFT_NOT_OPEN/KKT_UNAVAILABLE); null при успехе. Таблица значений публично не зафиксирована ([FORK])"
+          },
+          "errorType": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ErrorLayer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "details": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Человекочитаемые детали ошибки (текст) либо null"
+          },
+          "payload": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/FiscalDocument"
+              },
+              {
+                "$ref": "#/components/schemas/StateReportPayload"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "externalId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "userGroup": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "FiscalDocument": {
+        "type": "object",
+        "description": "Фискальный документ (payload успешной заявки). Состав реквизитов результаты среза не фиксирует: имена полей — локальная договорённость мока [FORK], значения синтетические.",
+        "properties": {
+          "fiscalDocumentNumber": {
+            "type": "integer",
+            "description": "Номер ФД"
+          },
+          "fiscalDocumentSign": {
+            "type": "string",
+            "description": "ФПД — фискальный признак документа (синтетический)"
+          },
+          "fiscalDriveNumber": {
+            "type": "string",
+            "description": "Номер фискального накопителя (синтетический)"
+          },
+          "kkmRegId": {
+            "type": "string",
+            "description": "Регистрационный номер ККТ (синтетический)"
+          },
+          "shiftNumber": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "documentDate": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "transactionType": {
+            "type": "string"
+          },
+          "operationType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "totalSum": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "taxationType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "correctionCause": {
+            "type": [
+              "string",
+              "number",
+              "null"
+            ]
+          },
+          "itemsCount": {
+            "type": "integer"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Item"
+            }
+          }
+        }
+      },
+      "StateReportPayload": {
+        "type": "object",
+        "description": "Payload команд смены и отчёта о текущем состоянии ([FORK]: срез фиксирует только факт StateCommandRequest).",
+        "properties": {
+          "kkmRegId": {
+            "type": "string"
+          },
+          "fiscalDriveNumber": {
+            "type": "string"
+          },
+          "shiftNumber": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "shiftState": {
+            "type": "string",
+            "enum": [
+              "OPEN",
+              "CLOSED"
+            ]
+          },
+          "documentsInShift": {
+            "type": "integer"
+          },
+          "reportDate": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "responseType": {
+            "type": "string",
+            "enum": [
+              "CURRENT_STATE_REPORT"
+            ]
+          },
+          "fiscalDocumentNumber": {
+            "type": "integer"
+          },
+          "fiscalDocumentSign": {
+            "type": "string"
+          },
+          "transactionType": {
+            "type": "string"
+          },
+          "documentDate": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "TransactionView": {
+        "type": "object",
+        "required": [
+          "requestId",
+          "status",
+          "transactionType",
+          "request",
+          "result"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "requestId": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/QueueStatus"
+          },
+          "transactionType": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "request": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Исходное тело заявки как принято (cashboxParameters/requestMetadata/document)"
+          },
+          "result": {
+            "$ref": "#/components/schemas/StatusResponse"
+          }
+        }
+      },
+      "ReceiptsResponse": {
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "pageSize"
+        ],
+        "additionalProperties": true,
+        "description": "Envelope списка документов не зафиксирован срезом: форма {items,total,page,pageSize} — локальная договорённость мока [FORK].",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReceiptListItem"
+            }
+          },
+          "total": {
+            "type": "integer"
+          },
+          "page": {
+            "type": "integer"
+          },
+          "pageSize": {
+            "type": "integer"
+          }
+        }
+      },
+      "ReceiptListItem": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string"
+          },
+          "externalId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "userGroup": {
+            "type": "string"
+          },
+          "transactionType": {
+            "type": "string"
+          },
+          "fiscalDocumentNumber": {
+            "type": "integer"
+          },
+          "fiscalDocumentSign": {
+            "type": "string"
+          },
+          "fiscalDriveNumber": {
+            "type": "string"
+          },
+          "kkmRegId": {
+            "type": "string"
+          },
+          "shiftNumber": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "documentDate": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "operationType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "totalSum": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        }
+      },
+      "CallbackEnvelope": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Оболочка callback не зафиксирована публичным срезом: мок отправляет результат заявки как есть (те же поля, что и status) плюс externalId и userGroup, БЕЗ подписи и без checksum ([FORK]).",
+        "properties": {
+          "requestId": {
+            "type": "string"
+          },
+          "transactionType": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/QueueStatus"
+          },
+          "errorCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "errorType": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ErrorLayer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "details": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "payload": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "externalId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "userGroup": {
+            "type": "string"
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "additionalProperties": true,
+        "description": "[FORK] Схема тела HTTP-ошибки публичным срезом не зафиксирована: envelope {error:{code,text,layer}} + DX {field,hint,doc} — локальная договорённость мока, не production-каталог Первого ОФД.",
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "text"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "invalid_credentials",
+                  "invalid_token",
+                  "invalid_request",
+                  "invalid_amount",
+                  "invalid_vat_code",
+                  "invalid_operation_type",
+                  "invalid_item",
+                  "unknown_user_group",
+                  "unknown_transaction_type",
+                  "request_not_found",
+                  "missing_parameter",
+                  "invalid_callback_url",
+                  "limit_exceeded",
+                  "unsupported_method",
+                  "not_found",
+                  "system_error"
+                ],
+                "description": "[FORK] Локальный каталог HTTP-ошибок мока: публичный срез envelope и таблицу кодов не фиксирует."
+              },
+              "text": {
+                "type": "string"
+              },
+              "layer": {
+                "$ref": "#/components/schemas/ErrorLayer"
+              }
+            }
+          },
+          "field": {
+            "type": "string",
+            "description": "Какое поле/параметр отвергнут"
+          },
+          "hint": {
+            "type": "string",
+            "description": "Что сделать и на что смотрит срез (DX мока)"
+          },
+          "doc": {
+            "type": "string",
+            "description": "Раздел docs/reference/first-ofd/* с датой сверки"
+          }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "api": {
+            "type": "string",
+            "enum": [
+              "okassa-queue"
+            ]
+          },
+          "base": {
+            "type": "string"
+          },
+          "tokenPath": {
+            "type": "string"
+          },
+          "tokenTtlSecs": {
+            "type": "integer"
+          },
+          "tokenSingle": {
+            "type": "boolean"
+          },
+          "processMs": {
+            "type": "integer"
+          },
+          "transactionTypes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "queueStatuses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "operations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "callbackMethod": {
+            "type": "string",
+            "enum": [
+              "POST"
+            ]
+          },
+          "callbackSignature": {
+            "type": "string",
+            "enum": [
+              "none"
+            ]
+          },
+          "callbackRetryMs": {
+            "type": "integer"
+          },
+          "callbackMaxAttempts": {
+            "type": "integer"
+          },
+          "callbackHttpsOnly": {
+            "type": "boolean"
+          },
+          "sandbox": {
+            "type": "string"
+          },
+          "tenancy": {
+            "type": "string"
+          },
+          "userGroups": {
+            "description": "Каталог userGroup или \"*\""
+          }
+        }
+      },
+      "TimeRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "advance": {
+            "type": "string"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "iso": {
+            "type": "string"
+          },
+          "reset": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ScenarioRequest": {
+        "type": "object",
+        "required": [
+          "scenario"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "scenario": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "match": {
+            "type": "object"
+          },
+          "times": {
+            "type": "integer"
+          },
+          "persistent": {
+            "type": "boolean"
+          }
+        }
+      },
+      "AdminActionRequest": {
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "process-request",
+              "redeliver-callback",
+              "duplicate-callback"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "_csrf": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

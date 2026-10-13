@@ -1,0 +1,204 @@
+{
+  "id": "first-ofd-okassa",
+  "title": "Первый ОФД — облачная касса OKassa: асинхронная очередь заявок на чек",
+  "version": "2026.10",
+  "upstreamDocs": [
+    "docs/reference/first-ofd/01-okassa-api.md",
+    "docs/reference/first-ofd/02-test-and-open-issues.md"
+  ],
+  "guide": "docs/integration/first-ofd.md",
+  "readme": "services/first-ofd-mock/README.md",
+  "openapi": "docs/openapi/first-ofd-mock.openapi.json",
+  "upstreamSources": [
+    {
+      "title": "Руководство OKassa, редакция 23.07.2026 (PDF)",
+      "url": "https://help.1-ofd.ru/upload/medialibrary/docs/oblachnaya_kassa_opisanie_api.pdf"
+    },
+    {
+      "title": "Тестовая OpenAPI 3.1 спецификация OKassa (26.13.3)",
+      "url": "https://external-api-farm.1-ofd-test.ru/api/v3/spec"
+    },
+    {
+      "title": "Тестовый Swagger UI Первого ОФД",
+      "url": "https://external-api-farm.1-ofd-test.ru/swagger-ui/index.html"
+    }
+  ],
+  "baseUrls": {
+    "test": "https://external-api-farm.1-ofd-test.ru",
+    "production": "[VERIFY] — публично не подтверждён (02-test-and-open-issues.md, «Что публично не установлено»)"
+  },
+  "productionNote": "Публичный production API base не подтверждён: не выводить его из тестового host-а. Mock base URL задаётся MOCK_FIRST_OFD_PUBLIC_BASE_URL; тестовые login/API-key UUID публично не опубликованы и выдаются в тестовом ЛК.",
+  "transport": {
+    "method": "POST/GET JSON",
+    "requestFormat": "application/json; charset=utf-8",
+    "responseFormat": "application/json",
+    "encoding": "UTF-8",
+    "amountUnits": "десятичные рубли (100.00) — не копейки",
+    "queue": "асинхронная: POST transaction/{type} возвращает requestId, фискальный результат читается методами статуса"
+  },
+  "auth": {
+    "type": "bearer-from-getToken",
+    "tokenRoute": "/getToken",
+    "tokenRequestFormat": "application/json; charset=utf-8",
+    "tokenRequestFields": ["login", "pass"],
+    "tokenResponse": ["token"],
+    "businessHeader": "Authorization: Bearer <token>",
+    "tokenTtlSecsDefault": 86400,
+    "note": "login — идентификатор организации, pass — API-ключ UUID из ЛК. API-ключ UUID НЕ используется как bearer-токен: bearer выдаёт getToken.",
+    "tokenSingleEnv": "MOCK_FIRST_OFD_TOKEN_SINGLE",
+    "reissueNote": "Публичный срез не отвечает, аннулируется ли прежний токен при повторной выдаче ([VERIFY]). По умолчанию мок сохраняет прежние токены живыми до TTL; режим MOCK_FIRST_OFD_TOKEN_SINGLE=1 аннулирует их — оба поведения детерминированы и настраиваемы.",
+    "tokenQuirk": "В PDF под заголовком успешного ответа приведён объект error с кодом 0 и текстом «Неверный логин и пароль» (расхождение №4 среза). Семантику требуется согласовать с провайдером: одного HTTP 200 недостаточно. Дефолтный успех мока — только {token}; документированный квирк воспроизводится сценарием getToken-error-quirk."
+  },
+  "tokenRoute": "/getToken",
+  "routes": [
+    "/api/external/queue/v1/transaction/{type}",
+    "/api/external/queue/v1/transaction/{requestId}",
+    "/api/external/queue/v1/status/{requestId}",
+    "/api/external/queue/v1/statuses",
+    "/api/external/receipts"
+  ],
+  "mockRoutes": [
+    "/health",
+    "/openapi.json",
+    "/admin",
+    "/admin/journal",
+    "/admin/action"
+  ],
+  "mockControlRoutes": [
+    "/mock/time",
+    "/mock/scenarios",
+    "/mock/state",
+    "/mock/reset",
+    "/sandboxes",
+    "/sandboxes/me",
+    "/sandboxes/me/reset",
+    "/sandboxes/me/reset-creds",
+    "/mock/sandboxes"
+  ],
+  "transactionTypes": {
+    "receipt": "ReceiptRequest — чек: обязательны cashboxParameters.userInn, requestMetadata.userGroup, document.operationType|items|totalSum",
+    "receiptCorrection": "ReceiptCorrectionRequest — чек коррекции: то же + обязательный document.correctionCause",
+    "openShift": "StateCommandRequest — открытие смены; receipt-тело (document) отклоняется",
+    "closeShift": "StateCommandRequest — закрытие смены; receipt-тело (document) отклоняется",
+    "currentStateReport": "StateCommandRequest — отчёт о текущем состоянии расчётов; фискальным документом не является"
+  },
+  "typeSchemaNote": "Схема тела строго по типу заявки: ReceiptRequest, ReceiptCorrectionRequest и StateCommandRequest НЕ собираются в один «универсальный» объект из примеров разных провайдеров. Состав обязательных полей StateCommandRequest публичным срезом не зафиксирован ([VERIFY]): мок требует документированный requestMetadata.userGroup и отклоняет document.",
+  "operations": {
+    "INCOME": "приход",
+    "INCOME_RETURN": "возврат прихода",
+    "EXPENCE": "расход",
+    "EXPENCE_RETURN": "возврат расхода"
+  },
+  "operationSpellingNote": "Написание EXPENCE/EXPENCE_RETURN сохранено КАК В СХЕМЕ: автоматически не «исправляется» ни при валидации, ни в payload, ни в документации. Вариант EXPENSE отклоняется как invalid_operation_type с подсказкой.",
+  "vatCodes": [
+    "VAT_NONE",
+    "VAT_0",
+    "VAT_10",
+    "VAT_20",
+    "VAT_110",
+    "VAT_120",
+    "VAT_22",
+    "VAT_22122"
+  ],
+  "vatCodeNote": "VAT_22 и VAT_22122 подтверждены срезом; остальные — стандартные коды ФФД и помечены [VERIFY] (полный enum vatCode в публичном срезе не приведён).",
+  "queueStatuses": {
+    "IN_PROGRESS": "заявка в очереди/обрабатывается",
+    "COMPLETED": "заявка обработана успешно",
+    "ERROR": "заявка обработана с ошибкой"
+  },
+  "resultFields": [
+    "requestId",
+    "transactionType",
+    "errorCode",
+    "errorType",
+    "details",
+    "payload"
+  ],
+  "errorLayers": {
+    "API": "ошибка уровня API очереди",
+    "KKT": "ошибка уровня ККТ/фискального накопителя"
+  },
+  "errorLayerNote": "Срез требует сохранять оба слоя ошибок (API и ККТ) раздельно — мок кладёт слой в errorType, код в errorCode, текст в details. Таблица кодов публично не зафиксирована: KKT_ERROR_CODES/API_ERROR_CODES — локальный [FORK] мока.",
+  "resultLayerCodes": {
+    "kkt": ["SHIFT_ALREADY_OPEN", "SHIFT_NOT_OPEN", "KKT_UNAVAILABLE"],
+    "api": ["DOCUMENT_REJECTED"]
+  },
+  "callback": {
+    "method": "POST",
+    "contentType": "application/json",
+    "target": "requestMetadata.callbackUrl (per-request); MOCK_FIRST_OFD_CALLBACK_URL — fallback мока [FORK], когда URL в заявке не передан",
+    "envelope": "не зафиксирована публичным срезом: мок отправляет результат заявки как есть (requestId, transactionType, status, errorCode, errorType, details, payload) плюс externalId и userGroup — [FORK]",
+    "signature": "none",
+    "signatureNote": "Публичный manual/OpenAPI не закрепляет ни envelope, ни подпись, ни обязательный ACK, ни расписание повторов. Мок не выдумывает HMAC/RSA: подписи нет вовсе.",
+    "ack": "[FORK/mock-local] любой HTTP 2xx считается доставкой; публичный ACK-код не зафиксирован",
+    "retries": "[FORK/mock-local] MOCK_FIRST_OFD_CALLBACK_RETRY_MS × MOCK_FIRST_OFD_CALLBACK_MAX_ATTEMPTS (дефолт 3 × 60s); публичное расписание повторов не установлено",
+    "reconciliation": "Рекомендация среза: приёмник идемпотентен, результат подтверждается методом статуса GET /api/external/queue/v1/status/{requestId} — уведомление не единственный источник истины.",
+    "urlSchemeQuirk": "PDF требует префикс http://, примеры PDF и OpenAPI используют https:// (расхождение №3 среза). По умолчанию мок принимает обе схемы; строгий HTTPS включается MOCK_FIRST_OFD_CALLBACK_HTTPS_ONLY=1.",
+    "ssrf": "callbackUrl проходит SSRF-политику core-очереди: при MOCK_BLOCK_PRIVATE_WEBHOOKS (в hosted — по умолчанию) приватный адрес даёт терминальный отказ ERR SSRF_BLOCKED без повторов."
+  },
+  "idempotency": {
+    "externalId": "дедупликация и срок хранения externalId публично НЕ подтверждены ([VERIFY]): повтор с тем же externalId в той же группе создаёт НОВУЮ заявку со своим requestId и помечается заголовком X-Mock-Duplicate-External-Id. Идемпотентность не обещается — сохраняйте выданный requestId.",
+    "requestId": "requestId уникален в пределах песочницы стенда и является ключом для transaction/{requestId} и status/{requestId}."
+  },
+  "limits": {
+    "tokenTtlSecsDefault": 86400,
+    "tokenTtlNote": "24 часа по срезу; TTL живёт на виртуальных часах стенда (MOCK_FIRST_OFD_TOKEN_TTL_SECS).",
+    "processMsDefault": 2000,
+    "processMsNote": "Задержка обработки заявки в очереди на виртуальных часах — настройка мока [FORK] (MOCK_FIRST_OFD_PROCESS_MS), публичного значения срез не даёт.",
+    "callbackAttemptsDefault": 3,
+    "callbackRetryMsDefault": 60000,
+    "receiptsPageSizeDefault": 20,
+    "receiptsPageSizeMax": 100,
+    "maxItemsPerReceipt": 100,
+    "maxItemsNote": "100 позиций — mock safety cap; upstream-граница в срезе не зафиксирована (правила сверки сумм — вне области)."
+  },
+  "errorCodes": [
+    "invalid_credentials",
+    "invalid_token",
+    "invalid_request",
+    "invalid_amount",
+    "invalid_vat_code",
+    "invalid_operation_type",
+    "invalid_item",
+    "unknown_user_group",
+    "unknown_transaction_type",
+    "request_not_found",
+    "missing_parameter",
+    "invalid_callback_url",
+    "limit_exceeded",
+    "unsupported_method",
+    "not_found",
+    "system_error"
+  ],
+  "errorEnvelope": {
+    "shape": ["error.code", "error.text", "error.layer", "field", "hint", "doc"],
+    "note": "[FORK] публичный срез фиксирует поля результата очереди (errorCode/errorType/details), но не envelope HTTP-ошибок; {error:{code,text,layer}} + DX {field,hint,doc} — локальная договорённость мока, не production-каталог Первого ОФД."
+  },
+  "testCredentials": {
+    "login": "firstofdmocktest",
+    "pass": "11111111-2222-4333-8444-555555555555",
+    "synthetic": true,
+    "note": "Синтетические дефолты мока. Публичных тестовых login/API-key UUID у Первого ОФД нет: реквизиты берутся в тестовом ЛК. Реальные креды не добавлять в конфиг, тесты или документацию."
+  },
+  "userGroups": {
+    "defaultCatalog": ["MOCKGROUP", "firstofd-mock"],
+    "env": "MOCK_FIRST_OFD_USER_GROUPS",
+    "any": "*",
+    "note": "[VERIFY] Значения кассовых групп реального сервиса публично не перечислены: каталог синтетический, «*» отключает проверку, неизвестная группа даёт unknown_user_group."
+  },
+  "divergences": [
+    "№1 requestMetadata: manual описывает как необязательное поле, OpenAPI держит в required — мок следует строгой схеме OpenAPI ([VERIFY], согласование с провайдером до production)",
+    "№2 document.items: OpenAPI описывает массив, таблица manual — объект — мок принимает МАССИВ ([VERIFY])",
+    "№3 callbackUrl: PDF требует префикс http://, примеры PDF и OpenAPI используют https:// — по умолчанию принимаются обе схемы, строгий HTTPS — env-режим ([VERIFY])",
+    "№4 getToken: в примере «успешного» ответа присутствует error с кодом 0 и текстом «Неверный логин и пароль» — воспроизводится сценарием getToken-error-quirk, а не дефолтом ([VERIFY])",
+    "№5 в тестовом swagger есть отдельный тег ATOL Online V5 (/api/external/possystem/v5/…) — другой API, вне области этого адаптера"
+  ],
+  "outOfScope": [
+    "Ferma/АТОЛ-совместимость и перенос контракта kassa-mock на OKassa",
+    "тег ATOL Online V5 из тестового swagger Первого ОФД",
+    "production API base и реальные тестовые креды",
+    "подпись callback, обязательный ACK и расписание повторов — публично не установлены, не выдумывать",
+    "правила сверки сумм, не описанные в схеме (мок только предупреждает в логе)",
+    "гарантии порядка доставки callback и точный срок хранения requestId/externalId"
+  ]
+}
