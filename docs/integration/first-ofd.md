@@ -138,6 +138,11 @@ curl -sS http://localhost:3107/api/external/queue/v1/status/$REQUEST_ID -H "Auth
 | `GET .../statuses?externalId=…&groupId=…` | заявки по внешнему ID и группе; **оба параметра обязательны**, `status` — необязательный фильтр |
 | `GET /api/external/receipts?from=…&to=…` | **фискальные документы** за период, не состояние заявок; фильтры `transactionType`, `groupId`, `kkmRegId`, `page`, `pageSize` (дефолт 20, максимум 100) |
 
+Окно `from`/`to` сверяется с **виртуальными часами стенда**: документ попадает в
+выборку по времени создания на виртуальных часах, поэтому после `POST /mock/time`
+`to` из wall-clock может отрезать свежие документы — берите запас или текущее
+время стенда.
+
 Статусы очереди: `IN_PROGRESS` → `COMPLETED` | `ERROR`. `pending`-поля до
 завершения обработки равны `null`. Заявка сразу после подачи:
 
@@ -255,6 +260,10 @@ curl -sS "http://localhost:3107/api/external/queue/v1/statuses?externalId=shop-o
   время (TTL токена, задержка очереди, повторы callback).
 - `X-Mock-Sandbox` изолирует заявки, фискальные документы, токены, очередь
   callback, сценарии, часы и журнал — состояние не пересекается между песочницами.
+- В `owned`-модели (`MOCK_HOSTED=1`) доступ к песочнице даёт owner-token
+  (`X-Sandbox-Token`); общая для Bearer-адаптеров особенность стенда: совмещать
+  его с `Authorization: Bearer <токен очереди>` в одном запросе нельзя — отказ
+  «знание ID не является доступом» (воспроизводится и на `vtb-mock`) `[VERIFY]`.
 - `/admin` — консоль: заявки, кассовые группы, callbacks, журнал; в hosted-режиме
   задайте управляющие токены (`MOCK_ADMIN_TOKEN`/`MOCK_OPERATOR_TOKEN`).
 - `npm run test:first-ofd` — end-to-end selftest без Docker.

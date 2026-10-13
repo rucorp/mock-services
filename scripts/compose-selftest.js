@@ -799,7 +799,9 @@ async function scenario(runId) {
     && foTransaction.result && foTransaction.result.requestId === foRequestId);
   const foStatuses = (await firstOfdApi('GET', `${FIRST_OFD_QUEUE}/statuses?externalId=${encodeURIComponent(foExternalId)}&groupId=MOCKGROUP`)).json();
   check('first-ofd statuses по externalId+groupId -> список заявок', Array.isArray(foStatuses) && foStatuses.length === 1 && foStatuses[0].requestId === foRequestId);
-  const foReceipts = (await firstOfdApi('GET', `/api/external/receipts?from=2020-01-01T00:00:00.000Z&to=${encodeURIComponent(new Date().toISOString())}`)).json() || {};
+  // Окно берём с запасом в будущее: документы датируются виртуальными часами
+  // стенда, поэтому wall-clock "to" после /mock/time отрезал бы их.
+  const foReceipts = (await firstOfdApi('GET', '/api/external/receipts?from=2020-01-01T00:00:00.000Z&to=2099-12-31T23:59:59.999Z')).json() || {};
   check('first-ofd /receipts -> фискальные документы за период с пагинацией',
     Array.isArray(foReceipts.items) && foReceipts.total >= 1 && foReceipts.items.some((item) => item.requestId === foRequestId));
 
