@@ -39,6 +39,8 @@ jobs:
         run: npm run test:atol
       - name: selftest мока Альфа-Банка
         run: npm run test:alfa
+      - name: selftest мока Сбербанк Ecom REST
+        run: npm run test:sber
       - name: офлайн selftest синхронизатора upstream snapshot
         run: npm run test:upstream
       - name: проверка относительных ссылок документации
@@ -67,6 +69,7 @@ jobs:
           echo "$SERVICES_MOCK" | grep -q "yookassa-mock"
           echo "$SERVICES_MOCK" | grep -q "atol-mock"
           echo "$SERVICES_MOCK" | grep -q "alfa-mock"
+          echo "$SERVICES_MOCK" | grep -q "sber-mock"
       - name: Проверка безопасного bind root compose и явного сетевого override
         run: |
           docker compose config --format json > /tmp/mock-compose-default.json
@@ -81,13 +84,13 @@ jobs:
         run: |
           docker compose up -d
           for i in $(seq 1 30); do
-            if curl -fsS http://localhost:3100/health >/dev/null && curl -fsS http://localhost:3101/healthz >/dev/null && curl -fsS http://localhost:3102/health >/dev/null && curl -fsS http://localhost:3103/health >/dev/null && curl -fsS http://localhost:3104/health >/dev/null; then
+            if curl -fsS http://localhost:3100/health >/dev/null && curl -fsS http://localhost:3101/healthz >/dev/null && curl -fsS http://localhost:3102/health >/dev/null && curl -fsS http://localhost:3103/health >/dev/null && curl -fsS http://localhost:3104/health >/dev/null && curl -fsS http://localhost:3105/health >/dev/null; then
               echo "стенд поднялся"; exit 0
             fi
             sleep 1
           done
           echo "стенд не поднялся за 30 с"; docker compose logs; exit 1
-      - name: Black-box selftest против контейнеров compose (:3100, :3101, :3102, :3103, :3104)
+      - name: Black-box selftest против контейнеров compose (:3100–:3105)
         run: npm run test:compose
       - name: Прогон selftest-наборов внутри собранного образа
         run: |
@@ -97,6 +100,7 @@ jobs:
           docker compose exec -T yookassa-mock node services/yookassa-mock/selftest.js
           docker compose exec -T atol-mock node services/atol-mock/selftest.js
           docker compose exec -T alfa-mock node services/alfa-mock/selftest.js
+          docker compose exec -T sber-mock node services/sber-mock/selftest.js
       - name: Логи и остановка
         if: always()
         run: docker compose down -v

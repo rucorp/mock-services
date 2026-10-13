@@ -4,7 +4,7 @@
   "private": true,
   "description": "Mock bank & fiscal (OFD) services for testing payment integrations against official provider protocols",
   "scripts": {
-    "test": "npm run test:core && npm run test:tbank && npm run test:kassa && npm run test:yookassa && npm run test:atol && npm run test:alfa && npm run test:upstream && npm run check:links && npm run check:drift",
+    "test": "npm run test:core && npm run test:tbank && npm run test:kassa && npm run test:yookassa && npm run test:atol && npm run test:alfa && npm run test:sber && npm run test:upstream && npm run check:links && npm run check:drift",
     "test:core": "node packages/core/selftest.js",
     "test:upstream": "node scripts/sync-upstream-selftest.js",
     "test:docker": "node scripts/docker-smoke.js",
@@ -15,6 +15,7 @@
     "test:yookassa": "node services/yookassa-mock/selftest.js",
     "test:atol": "node services/atol-mock/selftest.js",
     "test:alfa": "node services/alfa-mock/selftest.js",
+    "test:sber": "node services/sber-mock/selftest.js",
     "test:compose": "node scripts/compose-selftest.js",
     "check:drift": "node scripts/check-protocol-drift.js",
     "start:tbank": "node services/tbank-mock/server.js",
@@ -22,7 +23,8 @@
     "start:yookassa": "node services/yookassa-mock/server.js",
     "start:atol": "node services/atol-mock/server.js",
     "start:alfa": "node services/alfa-mock/server.js",
-    "smoke": "node -e \"const h=require('http');for(const [name,url] of [['tbank','http://127.0.0.1:3100/health'],['kassa','http://127.0.0.1:3101/healthz'],['yookassa','http://127.0.0.1:3102/health'],['atol','http://127.0.0.1:3103/health'],['alfa','http://127.0.0.1:3104/health']]){h.get(url,(r)=>console.log(name,r.statusCode)).on('error',(e)=>console.log(name,'нет ответа:',e.message))}\""
+    "start:sber": "node services/sber-mock/server.js",
+    "smoke": "node -e \"const h=require('http');for(const [name,url] of [['tbank','http://127.0.0.1:3100/health'],['kassa','http://127.0.0.1:3101/healthz'],['yookassa','http://127.0.0.1:3102/health'],['atol','http://127.0.0.1:3103/health'],['alfa','http://127.0.0.1:3104/health'],['sber','http://127.0.0.1:3105/health']]){h.get(url,(r)=>console.log(name,r.statusCode)).on('error',(e)=>console.log(name,'нет ответа:',e.message))}\""
   },
   "engines": {
     "node": ">=18"

@@ -1,0 +1,157 @@
+{
+  "id": "sber-ecom-rest",
+  "title": "Сбербанк — интернет-эквайринг Ecom REST v1.1.11.1",
+  "version": "2026.10",
+  "upstreamDocs": [
+    "docs/reference/sber/01-payment-api.md",
+    "docs/reference/sber/02-callbacks-and-test.md"
+  ],
+  "guide": "docs/integration/sber.md",
+  "readme": "services/sber-mock/README.md",
+  "openapi": "docs/openapi/sber-mock.openapi.json",
+  "upstreamSources": [
+    {
+      "title": "Официальный портал API Ecom (срез 1.1.11.1)",
+      "url": "https://ecomtest.sberbank.ru/doc"
+    },
+    {
+      "title": "OpenAPI YAML шлюза Ecom",
+      "url": "https://ecomtest.sberbank.ru/yaml/ecom.yaml"
+    },
+    {
+      "title": "Официальное описание числового orderStatus (термины и значения)",
+      "url": "https://developer.sberbank.ru/doc/v1/acquiring/rest-requests1pay"
+    }
+  ],
+  "baseUrls": {
+    "test": "https://ecomtest.sberbank.ru/ecomm/gw/partner/api/v1/",
+    "production": "https://epay.sberbank.ru/ecomm/gw/partner/api/v1/"
+  },
+  "productionNote": "Координаты и допущенные операции подтверждать по merchant-настройкам; mock base URL задаётся MOCK_SBER_PUBLIC_BASE_URL.",
+  "transport": {
+    "method": "POST",
+    "requestFormat": "application/json",
+    "responseFormat": "application/json",
+    "encoding": "UTF-8",
+    "amountUnits": "минимальные единицы валюты (для RUB — копейки)",
+    "currency": 643
+  },
+  "auth": {
+    "type": "per-request",
+    "fields": ["userName", "password"],
+    "note": "Ecom merchant credentials передаются в каждом запросе. Дефолты мока SBERMOCKTEST/mockpass123 — синтетические; реальные банковские креды выдаются отдельно."
+  },
+  "restMethods": [
+    "register.do",
+    "registerPreAuth.do",
+    "deposit.do",
+    "reverse.do",
+    "refund.do",
+    "decline.do",
+    "getOrderStatusExtended.do"
+  ],
+  "routes": [
+    "/ecomm/gw/partner/api/v1/register.do",
+    "/ecomm/gw/partner/api/v1/registerPreAuth.do",
+    "/ecomm/gw/partner/api/v1/deposit.do",
+    "/ecomm/gw/partner/api/v1/reverse.do",
+    "/ecomm/gw/partner/api/v1/refund.do",
+    "/ecomm/gw/partner/api/v1/decline.do",
+    "/ecomm/gw/partner/api/v1/getOrderStatusExtended.do"
+  ],
+  "formRoutes": [
+    "/payment/{orderId}",
+    "/payment/{orderId}/pay",
+    "/payment/{orderId}/3ds"
+  ],
+  "mockRoutes": [
+    "/health",
+    "/openapi.json",
+    "/admin",
+    "/admin/journal",
+    "/admin/action"
+  ],
+  "mockControlRoutes": [
+    "/mock/time",
+    "/mock/scenarios",
+    "/mock/reset",
+    "/mock/state",
+    "/sandboxes",
+    "/sandboxes/me",
+    "/sandboxes/me/reset",
+    "/sandboxes/me/reset-creds",
+    "/mock/sandboxes"
+  ],
+  "registerFields": ["userName", "password", "orderNumber", "amount", "returnUrl"],
+  "registerOptionalFields": ["currency", "failUrl", "description", "sessionTimeoutSecs", "dynamicCallbackUrl", "additionalParams"],
+  "registerResponse": ["orderId", "formUrl", "errorCode", "errorMessage"],
+  "orderStatuses": {
+    "0": "заказ зарегистрирован, не оплачен",
+    "1": "сумма захолдирована (двухстадийная схема)",
+    "2": "полная авторизация/оплата проведена",
+    "3": "авторизация отменена",
+    "4": "по заказу проведён возврат",
+    "5": "начата аутентификация через ACS эмитента",
+    "6": "авторизация отклонена"
+  },
+  "orderStatusSourceNote": "Значения сняты в docs/reference/sber/01-payment-api.md. orderStatus — состояние заказа; actionCode — отдельный код операции; errorCode=0 — успешная обработка REST-вызова, не доказательство оплаты.",
+  "errorCodes": [0, 1, 2, 3, 4, 5, 6],
+  "errorCodeNote": "Полный merchant-specific Ecom errorCode catalog не зафиксирован локальным reference. Код 0 и envelope документированы; конкретные 1…6 и частный mapping в server.js — [VERIFY]/[FORK], не утверждение о production-таблице Сбера.",
+  "callback": {
+    "method": "POST",
+    "contentType": "application/json",
+    "params": ["mdOrder", "orderNumber", "operation", "status", "additionalParams"],
+    "statusValues": { "1": "операция успешна", "0": "операция завершилась ошибкой" },
+    "operations": ["created", "approved", "deposited", "reversed", "refunded", "declinedByTimeout"],
+    "ack": "ровно HTTP 200 OK; любой иной код считается неуспехом",
+    "retries": "три попытки с интервалом 60 секунд по локальному Ecom reference; mock settings MOCK_SBER_CALLBACK_RETRY_MS и MOCK_SBER_CALLBACK_MAX_ATTEMPTS задают локальный график",
+    "signature": "none",
+    "unsignedNote": "Ecom callback JSON в локальном срезе не содержит checksum/signature. Не переносить legacy Secure Payments checksum; статус подтверждать getOrderStatusExtended.do.",
+    "urlSelection": "dynamicCallbackUrl регистрации либо mock default MOCK_SBER_CALLBACK_URL; URL без merchant callback configuration — [FORK/mock extension]."
+  },
+  "testCards": [
+    "2202205000012424",
+    "2202205300068092",
+    "4006800900962514",
+    "5469980100048525",
+    "2202206100040083",
+    "2202206000270541",
+    "2202205000060910",
+    "2202202107593166"
+  ],
+  "testCardNote": "Официальные synthetic test values из docs/reference/sber/02-callbacks-and-test.md. PAN используется только как fixture для form matching; состояние хранит маску. Повторяемые actionCode 116 и 101; ACS password 111111.",
+  "actionCodes": [0, 101, 116],
+  "actionCodeNote": "101 и 116 привязаны к официальным повторяемым тестовым картам; success actionCode=0 и поведение form-модели — реализация мока. Не путать actionCode с orderStatus.",
+  "twoStage": {
+    "envFlag": "MOCK_SBER_TWO_STAGE",
+    "default": true,
+    "note": "registerPreAuth.do включён в локальном стенде; upstream доступность зависит от merchant-разрешения."
+  },
+  "limits": {
+    "sessionTimeoutSecsDefault": 1200,
+    "sessionTimeoutNote": "Дефолт 20 минут и до трёх попыток оплаты зафиксированы в docs/reference/sber/01-payment-api.md. sessionTimeoutSecs также задаётся при регистрации.",
+    "maxPaymentAttempts": 3,
+    "callbackAttemptsDefault": 3,
+    "callbackRetryMsDefault": 60000,
+    "orderNumberMaxLength": 128,
+    "orderNumberNote": "128 символов — mock safety cap; локальный Ecom reference точный upstream limit не фиксирует.",
+    "currency": 643,
+    "currencyNote": "Стенд поддерживает только RUB (643)."
+  },
+  "testCredentials": {
+    "userName": "SBERMOCKTEST",
+    "password": "mockpass123",
+    "synthetic": true,
+    "note": "Синтетические дефолты мока. Реальные тестовые userName/password Сбербанка не добавлять в config, тесты или документацию."
+  },
+  "outOfScope": [
+    "paymentOrder.do: прямой server-to-server карточный поток; нужна подтверждённая merchant-разрешённость",
+    "legacy Secure Payments API и его callback checksum/signature",
+    "SberPay и отдельное мобильное Sandbox-приложение",
+    "СБП",
+    "orderBundle",
+    "subscriptionCreated callback",
+    "непроверенные merchant-specific поля и полный Ecom errorCode catalog",
+    "четвёртый внешний банк"
+  ]
+}

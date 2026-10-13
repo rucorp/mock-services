@@ -1,6 +1,6 @@
 # © 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0
 # SPDX-License-Identifier: Apache-2.0
-# Стенд «банк + касса + ЮKassa + АТОЛ Онлайн + Альфа-Банк»: docker compose up
+# Стенд «банк + касса + ЮKassa + АТОЛ Онлайн + Альфа-Банк + Сбер Ecom»: docker compose up
 # Конфиг — переменными окружения (см. services/*/README.md).
 services:
   tbank-mock:
@@ -143,6 +143,55 @@ services:
     mem_limit: "${MOCK_MEM_LIMIT:-128m}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3104,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    restart: unless-stopped
+
+  sber-mock:
+    build: .
+    image: mock-services:local
+    working_dir: /app
+    command: node services/sber-mock/server.js
+    # Безопасный локальный default; сетевой bind включается явно.
+    ports: ["${MOCK_SBER_BIND_IP:-127.0.0.1}:${MOCK_SBER_HOST_PORT:-3105}:3105"]
+    environment:
+      MOCK_HOST: "0.0.0.0"
+      MOCK_PORT: "3105"
+      MOCK_HEALTH_PATH: "/health"
+      MOCK_STATE_FILE: "/data/sber-state.json"
+      MOCK_SANDBOX_FILE: "/data/sber-sandboxes.json"
+      # Дефолты синтетические, реальные банковские тестовые креды выдаются merchant отдельно.
+      MOCK_SBER_USERNAME: "${MOCK_SBER_USERNAME:-SBERMOCKTEST}"
+      MOCK_SBER_PASSWORD: "${MOCK_SBER_PASSWORD:-mockpass123}"
+      MOCK_SBER_PUBLIC_BASE_URL: "${MOCK_SBER_PUBLIC_BASE_URL:-http://localhost:3105}"
+      MOCK_SBER_CALLBACK_URL: "${MOCK_SBER_CALLBACK_URL:-}"
+      MOCK_SBER_CALLBACK_RETRY_MS: "${MOCK_SBER_CALLBACK_RETRY_MS:-60000}"
+      MOCK_SBER_CALLBACK_MAX_ATTEMPTS: "${MOCK_SBER_CALLBACK_MAX_ATTEMPTS:-3}"
+      MOCK_SBER_SESSION_TIMEOUT_SECS: "${MOCK_SBER_SESSION_TIMEOUT_SECS:-1200}"
+      MOCK_SBER_TWO_STAGE: "${MOCK_SBER_TWO_STAGE:-true}"
+      MOCK_SANDBOX_SWEEP_MS: "${MOCK_SANDBOX_SWEEP_MS:-60000}"
+      MOCK_BLOCK_PRIVATE_WEBHOOKS: "${MOCK_BLOCK_PRIVATE_WEBHOOKS:-}"
+      MOCK_VIRTUAL_CLOCK: "${MOCK_VIRTUAL_CLOCK:-}"
+      MOCK_ADMIN_TOKEN: "${MOCK_ADMIN_TOKEN:-}"
+      MOCK_OPERATOR_TOKEN: "${MOCK_OPERATOR_TOKEN:-}"
+      MOCK_HOSTED: "${MOCK_HOSTED:-false}"
+      MOCK_TENANCY: "${MOCK_TENANCY:-}"
+      MOCK_SANDBOX_TOKEN: "${MOCK_SANDBOX_TOKEN:-}"
+      MOCK_SANDBOX_TTL_MS: "${MOCK_SANDBOX_TTL_MS:-}"
+      MOCK_SANDBOX_MAX: "${MOCK_SANDBOX_MAX:-}"
+      MOCK_SANDBOX_MAX_DOCUMENTS: "${MOCK_SANDBOX_MAX_DOCUMENTS:-}"
+      MOCK_SANDBOX_RETENTION_MS: "${MOCK_SANDBOX_RETENTION_MS:-}"
+      MOCK_SANDBOX_HOST_SUFFIX: "${MOCK_SANDBOX_HOST_SUFFIX:-}"
+      MOCK_SANDBOX_CREATE_LIMIT: "${MOCK_SANDBOX_CREATE_LIMIT:-}"
+    volumes: ["mock-data:/data"]
+    labels:
+      caddy: "${MOCK_SBER_CADDY_DOMAIN:-}"
+      caddy.reverse_proxy: "{{upstreams 3105}}"
+    mem_limit: "${MOCK_MEM_LIMIT:-128m}"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3105,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 10s
       timeout: 3s
       retries: 3

@@ -11,7 +11,8 @@
  * Что проверяется (всё то, что нельзя увидеть из compose-стенда):
  *   1. tbank-mock (CMD по умолчанию) и kassa-mock (команда из шапки Dockerfile,
  *      БЕЗ переменных healthcheck) становятся healthy со стандартным
- *      HEALTHCHECK образа — F-35 (kassa слушает /healthz, а не /health);
+ *      HEALTHCHECK образа — F-35 (kassa слушает /healthz, а не /health); sber-mock
+ *      на :3105 также проверяется с явной портовой парой;
  *   2. процессы идут от непривилегированного UID 10001 — F-36;
  *   3. persist/restore переживает --read-only rootfs с volume /data: Init
  *      до рестарта виден после рестарта — F-36;
@@ -28,6 +29,7 @@ const SKIP_BUILD = /^(1|true|yes|on)$/i.test(process.env.MOCK_SMOKE_SKIP_BUILD |
 const PREFIX = `mock-smoke-${process.pid}`;
 const NAME_TBANK = `${PREFIX}-tbank`;
 const NAME_KASSA = `${PREFIX}-kassa`;
+const NAME_SBER = `${PREFIX}-sber`;
 const NAME_RO = `${PREFIX}-ro`;
 const VOLUME = `${PREFIX}-data`;
 
@@ -86,7 +88,7 @@ function assertEqual(actual, expected, message) {
 }
 
 function cleanup() {
-  for (const name of [NAME_TBANK, NAME_KASSA, NAME_RO]) {
+  for (const name of [NAME_TBANK, NAME_KASSA, NAME_SBER, NAME_RO]) {
     try { docker(['rm', '-f', name]); } catch { /* не создан */ }
   }
   try { docker(['volume', 'rm', '-f', VOLUME]); } catch { /* не создан */ }
@@ -111,11 +113,23 @@ async function main() {
   await waitForHealth(NAME_KASSA);
   console.log('[smoke] kassa-mock: healthy ✅');
 
+  // 2b. Sber Ecom на выделенном порту :3105; Docker healthcheck берёт пару из env.
+  console.log('[smoke] sber-mock: порт :3105 + /health');
+  docker(['run', '-d', '--name', NAME_SBER, '-p', '127.0.0.1:3903:3105', '-e', 'MOCK_PORT=3105', '-e', 'MOCK_HEALTH_PATH=/health', IMAGE, 'node', 'services/sber-mock/server.js']);
+  await waitForHealth(NAME_SBER);
+  const sberHealth = await request(3903, 'GET', '/health');
+  assertEqual(sberHealth.statusCode, 200, 'sber-mock /health');
+  const sberOpenApi = await request(3903, 'GET', '/openapi.json');
+  if (JSON.parse(sberOpenApi.body).openapi !== '3.1.0') throw new Error('sber-mock /openapi.json недоступен в image');
+  console.log('[smoke] sber-mock: healthy + OpenAPI ✅');
+
   // 3. Непривилегированный runtime-пользователь (F-36).
+
   const user = docker(['inspect', '--format', '{{.Config.User}}', NAME_TBANK]);
   assertEqual(user, 'mock:mock', 'Dockerfile должен запускать сервисы от mock:mock');
   assertEqual(docker(['exec', NAME_TBANK, 'id', '-u']), '10001', 'UID runtime-пользователя');
   assertEqual(docker(['exec', NAME_KASSA, 'id', '-u']), '10001', 'UID runtime-пользователя (kassa)');
+  assertEqual(docker(['exec', NAME_SBER, 'id', '-u']), '10001', 'UID runtime-пользователя (sber)');
   console.log('[smoke] непривилегированный пользователь mock (10001) ✅');
 
   // 4. persist/restore при --read-only rootfs (F-36): Init до рестарта виден
