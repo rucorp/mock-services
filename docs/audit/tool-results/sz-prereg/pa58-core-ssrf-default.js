@@ -39,10 +39,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   q1.tick();
   await sleep(600);
   const delivered = hits.length >= 1 && e1.done;
+  // Адаптация 2026-10-13 (волна #51, head PR #68): дефолт стал hosted-осознанным (core.defaultBlockPrivateHosts).
+  // Верифицирующая конфигурация — прогон с MOCK_HOSTED=1; прогон без hosted фиксирует осознанный локальный дефолт.
+  const hosted = ['1', 'true', 'yes', 'on'].includes(String(process.env.MOCK_HOSTED || '').trim().toLowerCase());
+  const defVal = typeof core.defaultBlockPrivateHosts === 'function' ? core.defaultBlockPrivateHosts() : 'n/a (до #68)';
   report('PA-58a', 'createDeliveryQueue БЕЗ blockPrivateHosts: loopback-доставка уходит (fail-open)',
-    delivered ? 'ПОДТВЕРЖДЕНО (небезопасный дефолт ядра)' : 'не подтвердилось',
-    `доставок на http://127.0.0.1:${port}/hook: ${hits.length}; entry.done=${e1.done}\n` +
-    `дефолт в ядре: blockPrivateHosts = false (packages/core/index.js — параметры createDeliveryQueue и verifyMerchantWebhook)`);
+    delivered
+      ? (hosted ? 'ПОДТВЕРЖДЕНО (небезопасный hosted-дефолт ядра)' : 'ИНФО (не дефект после #68): локальный дефолт false — осознанная семантика; для верификации запускать с MOCK_HOSTED=1')
+      : 'ЗАКРЫТО (hosted-дефолт true: доставка на приватный блокирована)',
+    `доставок на http://127.0.0.1:${port}/hook: ${hits.length}; entry.done=${e1.done}; MOCK_HOSTED=${hosted ? '1' : 'не задан'}; core.defaultBlockPrivateHosts()=${defVal}\n` +
+    `дефолт в ядре: blockPrivateHosts = defaultBlockPrivateHosts(env) — flagEnabled(MOCK_BLOCK_PRIVATE_WEBHOOKS, flagEnabled(MOCK_HOSTED, false))`);
 
   /* ---- Фаза 2: явный true -> блок SSRF ---- */
   const hitsBefore = hits.length;

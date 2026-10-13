@@ -98,11 +98,16 @@ async function getToken(port) {
   const kassaCode = require('fs').readFileSync(path.join(REPO, 'services', 'kassa-mock', 'server.js'), 'utf8').split('\n');
   const envLine = kassaCode.findIndex((l) => l.includes("MOCK_BLOCK_PRIVATE_WEBHOOKS = 'false'")) + 1;
   const flagLine = kassaCode.findIndex((l) => l.includes('flagEnabled(MOCK_BLOCK_PRIVATE_WEBHOOKS, HOSTED)')) + 1;
+  // Адаптация 2026-10-13 (волна #51, head PR #68): флип-логика — на исправленном дереве литерал 'false' отсутствует.
+  const literalGone = envLine <= 0;
   report('PF-01a', 'статика: дефолт-литерал \'false\' убивает HOSTED-дефолт; README обещает true',
-    'ПОДТВЕРЖДЕНО (факты кода)',
-    `server.js:${envLine}: MOCK_BLOCK_PRIVATE_WEBHOOKS = 'false' (литерал, не пустая строка)\n` +
-    `server.js:${flagLine}: flagEnabled('false', HOSTED) -> false всегда (значение передано — дефолт-параметр не применяется)\n` +
-    `README.md:122 обещает: «false (в MOCK_HOSTED=1 — true)» — код это обещание не выполняет`);
+    literalGone ? 'ЗАКРЫТО (статика: дефолт-литерал \'false\' отсутствует — дефолт выровнен с остальными сервисами)' : 'ПОДТВЕРЖДЕНО (факты кода)',
+    literalGone
+      ? `server.js: MOCK_BLOCK_PRIVATE_WEBHOOKS = 'false' не найден (фикс волны #51: дефолт '' + core.defaultBlockPrivateHosts)\n` +
+        (flagLine > 0 ? `server.js:${flagLine}: flagEnabled(MOCK_BLOCK_PRIVATE_WEBHOOKS, HOSTED) — hosted-дефолт применяется` : '')
+      : `server.js:${envLine}: MOCK_BLOCK_PRIVATE_WEBHOOKS = 'false' (литерал, не пустая строка)\n` +
+        `server.js:${flagLine}: flagEnabled('false', HOSTED) -> false всегда (значение передано — дефолт-параметр не применяется)\n` +
+        `README.md:122 обещает: «false (в MOCK_HOSTED=1 — true)» — код это обещание не выполняет`);
 
   /* ---- Фаза 1: hosted БЕЗ переопределений -> callback доставлен на 127.0.0.1 ---- */
   const hits = [];
@@ -117,16 +122,21 @@ async function getToken(port) {
     const tk = await getToken(a.port);
     const sell = await req(a.port, 'POST', `/possystem/v1/Main/sell?token=${tk}`, { body: sellBody('pf01-hosted-1', `http://127.0.0.1:${fixPort}/callback`) });
     if (!sell.json || sell.json.error) console.log(`[info] sell: status=${sell.status} body=${sell.text.slice(0, 300)}`);
+    // Адаптация 2026-10-13 (волна #51): таймаут доставки — не падение, а «после»-поведение; идём дальше в контроль.
+    let delivered = false;
     try {
       await waitFor(async () => hits.length > 0, 6000, 'доставка callback в hosted-режиме');
+      delivered = true;
     } catch (e) {
-      console.log(`[info] доставка не дождались. Лог kassa (хвост):\n${a.log().split('\n').slice(-12).join('\n')}`);
-      throw e;
+      console.log(`[info] доставка не дождались (ожидаемо после #68 — гард режет loopback). Лог kassa (хвост):\n${a.log().split('\n').slice(-8).join('\n')}`);
     }
+    const guardTrue = /hosted=true block_private_webhooks=true/.test(a.log());
+    const ssrfInLog = /SSRF/i.test(a.log());
     report('PF-01b', 'MOCK_HOSTED=1 (без переопределений): callback кассы ДОСТАВЛЕН на 127.0.0.1',
-      flagInLog && hits.length > 0 && sell.status === 200 ? 'ПОДТВЕРЖДЕНО (гард мёртв в hosted)' : 'не подтвердилось',
-      `стартовый лог: block_private_webhooks=false при hosted=true: ${flagInLog}\n` +
-      `sell: status=${sell.status}, uuid=${(sell.json || {}).uuid}; доставок на loopback-приёмник: ${hits.length} (ожидалось по README: 0, ERR SSRF)`);
+      delivered && flagInLog && sell.status === 200 ? 'ПОДТВЕРЖДЕНО (гард мёртв в hosted)'
+        : (!delivered && guardTrue && ssrfInLog ? 'ЗАКРЫТО (hosted-дефолт true: доставка на loopback блокирована SSRF-политикой)' : 'не подтвердилось'),
+      `стартовый лог: block_private_webhooks=false при hosted=true: ${flagInLog}; block_private_webhooks=true: ${guardTrue}\n` +
+      `sell: status=${sell.status}, uuid=${(sell.json || {}).uuid}; доставок на loopback-приёмник: ${hits.length} (после фикса: 0, ERR SSRF)`);
 
     /* ---- Фаза 2: контроль — явный =1 в hosted: блок SSRF ---- */
     const b = await startKassa({ MOCK_HOSTED: '1', MOCK_BLOCK_PRIVATE_WEBHOOKS: '1', MOCK_ADMIN_TOKEN: 'sz-admin' }, 'kassa-pf01-ctl');
