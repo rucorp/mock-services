@@ -1,0 +1,39 @@
+SZ wave #87 (vtb-mock) — независимый регресс-базлайн, ревизия 11329556 (`1132955`)
+Свежий клон main, checkout `1132955` (squash PR #89, волна #87 — ВТБ SMB E-commerce).
+Прогон: npm test (все 8 сервисов + upstream + links + drift) и проба sz-wave87-vtb-baseline.js.
+
+npm-срез (полный лог — npm-test-1132955.txt вне репо; здесь сводка):
+  core        65 passed, 0 failed
+  tbank       SELFTEST PASSED (31 webhook deliveries, 31 payment sessions)
+  kassa       161 passed, 0 failed
+  yookassa    246 passed, 0 failed (вебхуков доставлено: 26)
+  atol        220 passed, 0 failed (callback-доставок: 8)
+  alfa        360 passed, 0 failed (callback-доставок: 32)
+  sber         67 passed, 0 failed (callback requests: 21)
+  vtb          72 passed, 0 failed (callback requests: 8)   ← новый 8-й сервис (#89)
+  upstream     11 passed, 0 failed
+  check:links  docs links OK: 78 файлов, битых ссылок нет
+  check:drift  521 инвариантов, пройдено 521, расхождений 0 (tbank-eacq + ferma-ofd + atol-online + alfa-eacq + sber-ecom + vtb-smb)
+
+Сверка с сигналом волны #87 (issue #62, комментарий 6153478615): СОШЛОСЬ ПОЛЕ-В-ПОЛЕ
+  core 65 · tbank PASSED · kassa 161 · yookassa 246 · atol 220 · alfa 360 · sber 67 · vtb 72 · upstream 11 · links 78 · drift 521/521
+
+Дельты к базлайну волны #81 (3f4dea2):
+  vtb    0 → 72   (новый selftest services/vtb-mock, #89)
+  links  76 → 78  (docs/integration/vtb.md + docs/openapi/vtb-mock.openapi.json)
+  drift  420 → 521 (+101 — protocols/vtb-smb.json в контуре check:drift)
+
+CI ревизии 1132955 (сверено независимо по API, ci-checks.json вне репо):
+  test (20) success · test (22) success · test (24) success · docker success · GHCR success  → 5/5
+
+Проба (sz-wave87-vtb-baseline.js, 4 ноги, инварианты сигнала):
+  ИТОГ: 62 passed, 0 failed · 12s
+  V1 OAuth (expires_in=170, RFC 6749 §5.2) · V2 Bearer + X-IBM-Client-Id (lowercase, без @ext.vtb.ru)
+  V3 decimal-рубли · V4 orderId идемпотентен (X-Mock-Replayed) / refundId НЕТ (409 duplicate_refund_id)
+  V5 [FORK]-карты (официальная 4111… истекла) · V6 callbacks payload как есть (Status/status, ACK/ретраи)
+  V7 preauth-холд/complete/cancel · V8 PAN-скан хранилищ (маска 424242**4242)
+  V9 виртуальные часы (+171s токен, +20m ордер) · V10 дефолтные креды + ретрай 60s×3
+  V11 SSRF-терминальность (hosted) · V12 preauth_disabled + «без callback URL очереди нет»
+
+Примечание: HEAD main на момент прогона — 49f5997 (#91 pin/tag v0.6.0) поверх b1f3c40 (#90 release
+v0.6.0); оба docs/infra, на пробы не влияют — прогон выполнен на ревизии сигнала 1132955.
