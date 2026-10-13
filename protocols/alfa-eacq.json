@@ -72,7 +72,8 @@
     "/health",
     "/openapi.json",
     "/admin",
-    "/admin/journal"
+    "/admin/journal",
+    "/admin/action"
   ],
   "mockControlRoutes": [
     "/mock/time",
@@ -180,6 +181,7 @@
     "orderBundle: принимается, но не моделируется (позиции корзины не влияют на флоу)",
     "SberPay/СБП/Apple Pay-подобные каналы и paymentOrder.do (server-to-server проведение)",
     "различия координат r-/i-логинов",
+    "/mock/verify-merchant (активный экзаменатор вебхук-приёмника не реализован: ядро рассчитано на POST-JSON, callback Альфа-Банка — GET с query-параметрами; форк задокументирован в README сервиса)",
     "третий банк (Сбер/ВТБ) — следующая волна"
   ]
 }

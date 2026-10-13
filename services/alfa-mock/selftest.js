@@ -514,6 +514,37 @@ async function main() {
       && String(flowAcsFail.status.actionCodeDescription).includes('Fail'),
       JSON.stringify({ st: flowAcsFail.status.orderStatus, ac: flowAcsFail.status.actionCode, d: flowAcsFail.status.actionCodeDescription }));
 
+    /* ----------------------------- PG-08 / MS-16: заголовки страниц оплаты */
+    console.log('— PG-08 / MS-16: security-заголовки страниц оплаты (XFO/CSP/Referrer-Policy/nosniff)');
+    {
+      const hasPageHeaders = (res) => res && res.statusCode === 200
+        && String(res.headers['content-type'] || '').includes('text/html')
+        && res.headers['x-frame-options'] === 'DENY'
+        && res.headers['referrer-policy'] === 'no-referrer'
+        && String(res.headers['content-security-policy'] || '').includes("frame-ancestors 'none'")
+        && res.headers['x-content-type-options'] === 'nosniff'
+        && res.headers['cache-control'] === 'no-store, private';
+      const hdrReg = await rest(port, 'register.do', { ...CREDS, orderNumber: nextOrderNumber('hdr'), amount: '1234', returnUrl: 'https://shop.test/ok' });
+      const hdrOrderId = (hdrReg.json() || {}).orderId;
+      const payErrorPage = await request(port, 'POST', `/payment/${hdrOrderId}/pay`, form({ pan: CARD_3DS1_OK, exp: '1234', cvv: '123', cardholder: 'IVAN' }));
+      const headerPages = [
+        ['GET /payment/{id} (форма)', formPageBefore],
+        ['GET /payment/{id} (статус)', formPageRes],
+        ['POST /pay (ACS-страница)', flow1.pay],
+        ['POST /pay (перерисовка формы)', payErrorPage],
+        ['GET /admin', await request(port, 'GET', '/admin')],
+      ];
+      for (const [label, res] of headerPages) {
+        check(`PG-08: ${label} -> no-store + XFO DENY + CSP frame-ancestors + Referrer-Policy + nosniff`,
+          hasPageHeaders(res),
+          JSON.stringify({ s: res && res.statusCode, xfo: res && res.headers['x-frame-options'], csp: res && res.headers['content-security-policy'], ref: res && res.headers['referrer-policy'], nosniff: res && res.headers['x-content-type-options'] }));
+      }
+      // /3ds HTML отдаётся тем же sendPage; отдельная проверка — единая точка выхода HTML.
+      const serverSrc = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+      check('PG-08: весь HTML платёжных страниц идёт через sendPage (ветка /3ds в общем контуре), html(res, …) не осталось',
+        serverSrc.includes('function sendPage(') && !/html\(res,/.test(serverSrc));
+    }
+
     const flowAcsBadPass = await fullFlow(port, { tdsPassword: '00000000', callbackUrl: HOOK_URL });
     check('неверный пароль ACS: отказ 71015', flowAcsBadPass.status.orderStatus === 6 && flowAcsBadPass.status.actionCode === 71015);
 
@@ -1303,15 +1334,36 @@ async function main() {
         });
         check('#51 PF-01: MOCK_HOSTED=1 в alfa-mock включает block_private_webhooks=true по умолчанию',
           rebindLog.includes('hosted=true block_private_webhooks=true'));
-        const blockedCb = await waitForCondition(async () => {
+        const readRebindCb = async () => {
           const st = (await request(rebindPort, 'GET', '/mock/state', undefined, { 'X-Operator-Token': 'op-ssrf' })).json();
           const stateSlice = (st && st.state) || st || {};
-          const entry = Object.values(stateSlice.callbacks || {})[0];
-          return entry && String(entry.lastStatus).includes('SSRF_BLOCKED') ? entry : null;
+          return Object.values(stateSlice.callbacks || {})[0] || null;
+        };
+        const blockedCb = await waitForCondition(async () => {
+          const entry = await readRebindCb();
+          return Boolean(entry && String(entry.lastStatus).includes('SSRF_BLOCKED'));
         }, { timeoutMs: 5000, description: 'PG-11 SSRF_BLOCKED recorded in /mock/state' });
+        const blockedEntry = await readRebindCb();
         const hitsAfter = HITS.filter((h) => h.path === '/rebind-pg11').length;
         check('#51 PG-11 / §7.3: DNS TOCTOU rebinding блокируется с SSRF_BLOCKED и 0 соединений к loopback',
           Boolean(blockedCb) && hitsAfter === hitsBefore, `hits=${hitsAfter - hitsBefore}`);
+
+        // PG-07: SSRF-отказ — терминальное состояние, а не ретрай-цикл 24×10 с.
+        // Ядро после onFailure печатает безусловное «retry in …» один раз (это
+        // поведение core вне области правки) — проверяем, что повторов доставки
+        // и роста попыток НЕТ, а запись помечена dumped с терминальным логом.
+        const attemptsAtBlock = blockedEntry && blockedEntry.attempts;
+        await sleep(2600); // 2+ тика очереди при MOCK_CALLBACK_RETRY_MS=1000
+        const entryAfterPg07 = await readRebindCb();
+        check('PG-07: SSRF-блок терминален — запись dumped, попытки не растут, доставок нет',
+          Boolean(entryAfterPg07) && entryAfterPg07.dumped === true && entryAfterPg07.attempts === attemptsAtBlock
+          && HITS.filter((h) => h.path === '/rebind-pg11').length === hitsBefore,
+          JSON.stringify({ before: attemptsAtBlock, after: entryAfterPg07 && entryAfterPg07.attempts, dumped: entryAfterPg07 && entryAfterPg07.dumped }));
+        const ssrfTerminalLogs = (rebindLog.match(/цель заблокирована политикой SSRF/g) || []).length;
+        const coreRetryLogs = (rebindLog.match(/retry in \d+ms/g) || []).length;
+        check('PG-07: терминальный лог SSRF напечатан один раз (не тишина), повторов «retry in …» нет',
+          ssrfTerminalLogs === 1 && coreRetryLogs <= 1,
+          `терминальных=${ssrfTerminalLogs}, core retry-строк=${coreRetryLogs}`);
       } finally {
         await new Promise((resolve) => {
           if (rebindProc.exitCode !== null) { resolve(); return; }
@@ -1320,6 +1372,137 @@ async function main() {
           setTimeout(() => { if (rebindProc.exitCode === null) rebindProc.kill('SIGKILL'); }, 1500).unref();
         });
       }
+    }
+    /* ---------- PB-11/PB-12/PB-14: env-парсер, квота документов, негативы ядра ---------- */
+    console.log('— PB-11: env-парсер alfa (суффиксы времени и семантика нуля)');
+    {
+      const childEnvConf = startChild({
+        MOCK_SESSION_TIMEOUT_SECS: '1h',
+        MOCK_CALLBACK_RETRY_MS: '1h',
+        MOCK_CALLBACK_MAX_ATTEMPTS: '0',
+        MOCK_SANDBOX_MAX_DOCUMENTS: '2',
+        MOCK_SANDBOX_CREATE_LIMIT: '2',
+        MOCK_TENANCY: 'owned',
+        MOCK_SANDBOX_TOKEN: 'root-pb11',
+      });
+      children.push(childEnvConf);
+      const portEnvConf = await childEnvConf.port;
+      const logEnvConf = childEnvConf.output();
+      check('PB-11: MOCK_SESSION_TIMEOUT_SECS=1h -> session_timeout=3600s (не 1 с)',
+        /session_timeout=3600s/.test(logEnvConf), (logEnvConf.match(/session_timeout=\S+/) || [''])[0]);
+      check('PB-11: MOCK_CALLBACK_RETRY_MS=1h -> retry 3600000ms (не 1000 мс)',
+        /retry 3600000ms/.test(logEnvConf), (logEnvConf.match(/retry \d+ms/) || [''])[0]);
+      check('PB-11: MAX_ATTEMPTS=0 — WARN и минимум одна попытка (не тихий дефолт)',
+        /WARN MOCK_CALLBACK_MAX_ATTEMPTS=0 меньше минимума 1/.test(logEnvConf) && /retry 3600000ms x1/.test(logEnvConf));
+
+      const sbxCreate1 = await request(portEnvConf, 'POST', '/sandboxes', {});
+      const sbxCreate2 = await request(portEnvConf, 'POST', '/sandboxes', {});
+      const sbxCreate3 = await request(portEnvConf, 'POST', '/sandboxes', {});
+      const createLimitBody = sbxCreate3.json() || {};
+      check('PB-14: MOCK_SANDBOX_CREATE_LIMIT=2 -> третий POST /sandboxes отдаёт 429 + DX',
+        sbxCreate1.statusCode === 201 && sbxCreate2.statusCode === 201 && sbxCreate3.statusCode === 429
+        && createLimitBody.errorCode === 5 && String(createLimitBody.hint || '').includes('MOCK_SANDBOX_CREATE_LIMIT'),
+        `HTTP ${sbxCreate1.statusCode}/${sbxCreate2.statusCode}/${sbxCreate3.statusCode}: ${sbxCreate3.body.slice(0, 160)}`);
+
+      const sbxLimits = sbxCreate1.json();
+      const limitsHeaders = { 'X-Mock-Sandbox': sbxLimits.id, 'X-Sandbox-Token': sbxLimits.ownerToken };
+      const limFields = (n) => ({ ...sbxLimits.creds, orderNumber: nextOrderNumber(`lim${n}`), amount: '1000', returnUrl: 'https://shop.test/ok' });
+      const limReg1 = await rest(portEnvConf, 'register.do', limFields(1), limitsHeaders);
+      const limReg2 = await rest(portEnvConf, 'register.do', limFields(2), limitsHeaders);
+      const limReg3 = await rest(portEnvConf, 'register.do', limFields(3), limitsHeaders);
+      check('PB-12: MOCK_SANDBOX_MAX_DOCUMENTS=2 -> два register.do успешны (индекс orderNumbers квоту не жжёт)',
+        (limReg1.json() || {}).errorCode === 0 && (limReg2.json() || {}).errorCode === 0,
+        `${limReg1.body.slice(0, 90)} | ${limReg2.body.slice(0, 90)}`);
+      check('PB-12/PB-14: третий register.do отклонён квотой документов (errorCode=5, «2/2»)',
+        (limReg3.json() || {}).errorCode === 5 && /Лимит документов песочницы исчерпан \(2\/2/.test(limReg3.body),
+        limReg3.body.slice(0, 200));
+      await childEnvConf.stop();
+    }
+
+    console.log('— PB-11: RETRY_MS=0 — повтор без паузы (терминальный dumped после лимита попыток)');
+    {
+      const childZero = startChild({
+        MOCK_DEFAULT_CALLBACK_URL: NOACK_URL,
+        MOCK_CALLBACK_RETRY_MS: '0',
+        MOCK_CALLBACK_MAX_ATTEMPTS: '3',
+        MOCK_OPERATOR_TOKEN: 'op-zero',
+      });
+      children.push(childZero);
+      const portZero = await childZero.port;
+      check('PB-11: RETRY_MS=0 честно доезжает до конфига (retry 0ms x3, не 10000ms)',
+        /retry 0ms x3/.test(childZero.output()), (childZero.output().match(/retry \d+ms x\d+/) || [''])[0]);
+      await fullFlow(portZero, { pan: CARD_3DS2_FRICTIONLESS, orderNumber: nextOrderNumber('zero'), amount: 1000 });
+      const readZeroCb = async () => {
+        const st = (await request(portZero, 'GET', '/mock/state', undefined, { 'X-Operator-Token': 'op-zero' })).json() || {};
+        return Object.values((((st.state || st).callbacks) || {}))[0] || null;
+      };
+      await waitForCondition(async () => {
+        const entry = await readZeroCb();
+        return Boolean(entry && entry.dumped === true);
+      }, { timeoutMs: 9000, description: 'callback dumped после лимита попыток при RETRY_MS=0' });
+      const zeroEntry = await readZeroCb();
+      check('PB-11: RETRY_MS=0 -> повторы без пауз до лимита, затем dumped (0 — определённая семантика)',
+        Boolean(zeroEntry) && zeroEntry.attempts === 3 && zeroEntry.dumped === true && zeroEntry.done !== true,
+        JSON.stringify({ attempts: zeroEntry && zeroEntry.attempts, dumped: zeroEntry && zeroEntry.dumped }));
+      await childZero.stop();
+    }
+
+    console.log('— PB-14: негативы ядра на alfa (413 / CSRF / proto-import / non-REST сценарий)');
+    {
+      const tooLarge = await request(port, 'POST', '/mock/state', ' '.repeat(5 * 1024 * 1024 + 1));
+      const tooLargeBody = tooLarge.json() || {};
+      check('PB-14 / F-02: тело > 5 MiB -> HTTP 413 + errorCode=6, field=body, hint про байты',
+        tooLarge.statusCode === 413 && tooLargeBody.errorCode === 6 && tooLargeBody.field === 'body'
+        && /байт/.test(String(tooLargeBody.hint)),
+        `HTTP ${tooLarge.statusCode} ${tooLarge.body.slice(0, 140)}`);
+
+      const csrfNeg = await request(port, 'POST', '/admin/action', form({ action: 'reset' }));
+      const csrfNegBody = csrfNeg.json() || {};
+      check('PB-14: POST /admin/action без CSRF -> 403 + errorCode=2, field=_csrf',
+        csrfNeg.statusCode === 403 && csrfNegBody.errorCode === 2 && csrfNegBody.field === '_csrf',
+        `HTTP ${csrfNeg.statusCode} ${csrfNeg.body.slice(0, 160)}`);
+
+      const stateBeforeProto = JSON.stringify(state);
+      const protoEvil = JSON.parse('{"__proto__":{"sandbox":"polluted"}}');
+      const protoRes = await request(port, 'POST', '/mock/state', { state: protoEvil });
+      const protoBody = protoRes.json() || {};
+      check('PB-14: POST /mock/state с __proto__ -> 400 + errorCode=6, field=state, hint про опасные ключи',
+        protoRes.statusCode === 400 && protoBody.errorCode === 6 && protoBody.field === 'state'
+        && String(protoBody.errorMessage).includes('__proto__') && String(protoBody.hint).includes('__proto__'),
+        protoRes.body.slice(0, 200));
+      const ctorRes = await request(port, 'POST', '/mock/state', { state: JSON.parse('{"constructor":{"prototype":{"x":"1"}}}') });
+      check('PB-14: POST /mock/state с constructor -> 400 + отказ в hint',
+        ctorRes.statusCode === 400 && /constructor/.test(ctorRes.body), ctorRes.body.slice(0, 160));
+      check('PB-14: отклонённые импорты не меняют состояние и не загрязняют Object.prototype',
+        JSON.stringify(state) === stateBeforeProto && ({}).sandbox === undefined && ({}).x === undefined);
+
+      const scenarioNonRest = await request(port, 'GET', '/health', undefined, { 'X-Mock-Scenario': 'http-500' });
+      check('PB-14: X-Mock-Scenario не действует вне REST/form-маршрутов (/health -> 200)',
+        scenarioNonRest.statusCode === 200 && (scenarioNonRest.json() || {}).ok === true,
+        `HTTP ${scenarioNonRest.statusCode}`);
+    }
+
+    console.log('— PB-14: TTL-песочница истекла -> 410 без утечки состояния');
+    {
+      const childTtl = startChild({
+        MOCK_TENANCY: 'owned',
+        MOCK_SANDBOX_TOKEN: 'root-ttl',
+        MOCK_SANDBOX_TTL_MS: '500',
+        MOCK_SANDBOX_SWEEP_MS: '60000',
+      });
+      children.push(childTtl);
+      const portTtl = await childTtl.port;
+      const sbxTtl = (await request(portTtl, 'POST', '/sandboxes', {})).json();
+      await sleep(900); // TTL 500 мс; sweep намеренно редкий — ловим «истекла, но ещё в реестре»
+      const expiredRes = await rest(portTtl, 'register.do',
+        { ...sbxTtl.creds, orderNumber: nextOrderNumber('ttl'), amount: '1000', returnUrl: 'https://shop.test/ok' },
+        { 'X-Mock-Sandbox': sbxTtl.id, 'X-Sandbox-Token': sbxTtl.ownerToken });
+      const expiredBody = expiredRes.json() || {};
+      check('PB-14: истёкшая песочница -> 410 + errorCode=3 + hint «POST /sandboxes»',
+        expiredRes.statusCode === 410 && expiredBody.errorCode === 3 && /TTL/.test(String(expiredBody.errorMessage))
+        && String(expiredBody.hint).includes('POST /sandboxes'),
+        `HTTP ${expiredRes.statusCode} ${expiredRes.body.slice(0, 200)}`);
+      await childTtl.stop();
     }
   } finally {
     for (const child of children) await child.stop();

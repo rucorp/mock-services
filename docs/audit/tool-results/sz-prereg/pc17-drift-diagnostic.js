@@ -30,10 +30,15 @@ function runDrift(cwd) {
   const bad = [];
   lines.forEach((l, i) => { if (l.includes('openapi=${inServer}')) bad.push(i + 1); });
   const callbackLine = lines.findIndex((l) => l.includes("alfa:callback-operation'") && l.includes('openapi=${inServer}')) + 1;
+  // Адаптация 2026-10-13 (волна #58): на исправленном дереве строки с копипастом
+  // больше нет — фаза обязана завершаться вердиктом «не подтвердилось», а не падать.
+  const staticEvidence = callbackLine > 0
+    ? `фрагмент :${callbackLine}: ${lines[callbackLine - 1].trim().slice(0, 160)}`
+    : '(строки с копипастом нет — фикс применён)';
   report('PC-17a', 'статика: диагностика печатает openapi=${inServer} вместо inOpenApi',
     bad.length >= 1 ? 'ПОДТВЕРЖДЕНО' : 'не подтвердилось',
-    `scripts/check-protocol-drift.js, строк(с) с openapi=\${inServer}: ${bad.join(', ')} (алфа-callback-проверка: :${callbackLine})\n` +
-    `фрагмент :${callbackLine}: ${lines[callbackLine - 1].trim().slice(0, 160)}`);
+    `scripts/check-protocol-drift.js, строк(с) с openapi=\${inServer}: ${bad.join(', ') || '—'} (алфа-callback-проверка: :${callbackLine || '—'})\n` +
+    staticEvidence);
 
   /* ---------- Динамика: scratch-копия с удалённой схемой 'approved' ---------- */
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'sz-pc17-'));

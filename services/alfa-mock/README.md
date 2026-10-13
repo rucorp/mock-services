@@ -54,6 +54,7 @@ Zero npm dependencies, Node ≥ 18. Стартовый лог печатает *
 | `POST /payment/{orderId}/pay`, `/3ds` | отправка данных карты и пароля ACS (эмуляция формы) |
 | `GET /health`, `GET /openapi.json` | живость/счётчики и спецификация OpenAPI 3.1 |
 | `GET /admin`, `GET /admin/journal` | консоль (заказы, callback, журнал с curl) |
+| `POST /admin/action` | действие консоли (`deposit-order`, `reverse-order`, `expire-order`, `duplicate-callback`); same-origin + CSRF `_csrf` из формы `/admin`, иначе 403 |
 | `/mock/time`, `/mock/scenarios`, `/mock/state`, `/mock/reset` | виртуальные часы, сценарии, снимок состояния |
 | `/sandboxes*`, `/mock/sandboxes` | песочницы RFC-001 (свои креды на арендатора) |
 
@@ -197,16 +198,22 @@ default-стенд): `POST /sandboxes` выдаёт песочницу с **св
 | `MOCK_PARTIAL_REFUND` | `true` | частичные возвраты («разрешённый контур») |
 | `MOCK_SSL_PERMITTED` | `false` | SSL-разрешение на операции без 3DS (карта `5555555555555599`) |
 | `MOCK_CALLBACK_CHECKSUM` | `true` | `false` — неподписанные callback (эмуляция оговорки PDF) |
-| `MOCK_SESSION_TIMEOUT_SECS` | `1200` | дефолтный срок жизни заказа (переопределяется `sessionTimeoutSecs`) |
+| `MOCK_SESSION_TIMEOUT_SECS` | `1200` | дефолтный срок жизни заказа (переопределяется `sessionTimeoutSecs`); число секунд либо длительность (`'20m'`, `'1h'`), `0`/непарсимое — WARN и `1200` |
 | `MOCK_ALFA_TERMINAL_ID` | `ALFA-MOCK-1` | `terminalId` в ответах статуса |
 | `MOCK_PUBLIC_BASE_URL` | `http://localhost:3104` | база для `formUrl` |
 | `MOCK_DEFAULT_CALLBACK_URL` | — | приёмник GET-callback по умолчанию (mock-расширение) |
-| `MOCK_CALLBACK_RETRY_MS` / `MOCK_CALLBACK_MAX_ATTEMPTS` | `10000` / `24` | ретраи доставки — **mock-конфиг** (PDF параметры не задаёт) |
+| `MOCK_CALLBACK_RETRY_MS` / `MOCK_CALLBACK_MAX_ATTEMPTS` | `10000` / `24` | ретраи доставки — **mock-конфиг** (PDF параметры не задаёт); интервал — мс или длительность (`'1h'`), `0` — повтор без паузы; число попыток < 1 — WARN и 1 попытка |
 | `MOCK_STATE_FILE` | — | персистентность состояния между рестартами |
 | `MOCK_BLOCK_PRIVATE_WEBHOOKS` | `false` (hosted → `true`) | SSRF-защита исходящих callback |
 | `MOCK_VIRTUAL_CLOCK` | — | стартовое смещение виртуальных часов |
 | `MOCK_ADMIN_TOKEN` / `MOCK_OPERATOR_TOKEN` | — | токены `/admin*` и `/mock/*` |
 | `MOCK_HOSTED` | `false` | `1` — fail-closed управляющей поверхности + SSRF-защита |
+| `MOCK_SANDBOX_TTL_MS` / `MOCK_SANDBOX_MAX` | `0` / `owned: 100` | TTL песочницы и лимит их числа (RFC-001) |
+| `MOCK_SANDBOX_MAX_DOCUMENTS` | `5000` в `owned`, иначе `0` (выкл.) | квота документов песочницы: заказ + запись очереди callback; внутренний индекс `orderNumbers` документом не считается |
+| `MOCK_SANDBOX_CREATE_LIMIT` | `20` в `owned`, иначе `0` (выкл.) | лимит создания песочниц на IP в час |
+| `MOCK_SANDBOX_RETENTION_MS` | `0` (выкл.) | retention терминальных записей callback (история заказов не удаляется) |
+| `MOCK_SANDBOX_FILE` | `<MOCK_STATE_FILE>.sandboxes.json` | база реестра песочниц: поштучные файлы в каталоге `<база без .json>.records/` (owner-токены — только хэши); в include не проброшена (долг «пяти мест», §2.6 AUDIT-PREP) |
+| `MOCK_SANDBOX_SWEEP_MS` | `60000` | интервал воркера TTL/retention; воркер стартует при `TTL>0`, квоте документов `>0` или `RETENTION_MS>0` (в дефолтном `namespaces` не стартует — просрочка удаляется «по касанию»); в include не проброшена (тот же долг) |
 | `MOCK_TENANCY`, `MOCK_SANDBOX_*` | — | песочницы RFC-001 (см. выше) |
 
 ## Отличия от `tbank-mock` и `yookassa-mock` — не drop-in

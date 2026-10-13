@@ -241,16 +241,34 @@ function main() {
     .replace('/payment/{orderId}/3ds', '/3ds')
     .replace('/payment/{orderId}', '/payment/');
 
-  for (const route of [...(alfaManifest.routes || []), ...(alfaManifest.formRoutes || []), ...(alfaManifest.mockRoutes || [])]) {
-    const needle = alfaNeedle(route);
-    const inServer = alfaServerCode.includes(needle);
-    const inOpenApi = Boolean(alfaOpenApi.paths && alfaOpenApi.paths[route]);
+  // Вынесено в функции: те же предикаты используются негативным контролем
+  // синтетического «пустого» контура (PC-17) — иначе контроль проверял бы
+  // не то, что реально считает чекер.
+  const alfaRouteDrift = (code, openApi, manifest) => [
+    ...(manifest.routes || []), ...(manifest.formRoutes || []), ...(manifest.mockRoutes || []),
+  ].map((route) => ({
+    route,
+    inServer: code.includes(alfaNeedle(route)),
+    inOpenApi: Boolean(openApi.paths && openApi.paths[route]),
+  }));
+  const alfaControlRouteDrift = (code, openApi, manifest) => (manifest.mockControlRoutes || [])
+    .map((route) => ({
+      route,
+      inServer: code.includes(route),
+      inOpenApi: Boolean(openApi.paths && openApi.paths[route]),
+    }));
+  const alfaCallbackOperations = (code, openApi, manifest) => ((manifest.callback || {}).operations || [])
+    .map((op) => ({
+      op,
+      inServer: code.includes(`'${op}'`),
+      inOpenApi: JSON.stringify((openApi.components || {}).schemas || {}).includes(op),
+    }));
+
+  for (const { route, inServer, inOpenApi } of alfaRouteDrift(alfaServerCode, alfaOpenApi, alfaManifest)) {
     assertCheck('alfa:route', route, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
   }
 
-  for (const route of alfaManifest.mockControlRoutes || []) {
-    const inServer = alfaServerCode.includes(route);
-    const inOpenApi = Boolean(alfaOpenApi.paths && alfaOpenApi.paths[route]);
+  for (const { route, inServer, inOpenApi } of alfaControlRouteDrift(alfaServerCode, alfaOpenApi, alfaManifest)) {
     assertCheck('alfa:control-route', route, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
   }
 
@@ -267,10 +285,8 @@ function main() {
     assertCheck('alfa:error-code', String(code), inServer, inServer ? 'код ошибки в каталоге DX' : 'кода нет в каталоге');
   }
 
-  for (const op of (alfaManifest.callback || {}).operations || []) {
-    const inServer = alfaServerCode.includes(`'${op}'`);
-    const inOpenApi = JSON.stringify((alfaOpenApi.components || {}).schemas || {}).includes(op);
-    assertCheck('alfa:callback-operation', op, inServer && inOpenApi, `server=${inServer}, openapi=${inServer}`);
+  for (const { op, inServer, inOpenApi } of alfaCallbackOperations(alfaServerCode, alfaOpenApi, alfaManifest)) {
+    assertCheck('alfa:callback-operation', op, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
   }
 
   for (const pan of alfaManifest.testCards || []) {
@@ -321,6 +337,40 @@ function main() {
     const inGuide = alfaGuide.includes(needle);
     assertCheck('alfa:guide-point', `${label} (${needle})`, inGuide, inGuide ? 'есть в docs/integration/alfa.md' : 'гайд не упоминает оговорку');
   }
+
+  // PC-17 (расширение PE-09/PE-01 на alfa): блоки limits/idempotency манифеста
+  // сверяются с кодом адаптера (и с гайдом интегратора там, где гайд — источник).
+  const alfaLimits = alfaManifest.limits || {};
+  assertCheck('alfa:limits', `sessionTimeoutSecsDefault=${alfaLimits.sessionTimeoutSecsDefault}`,
+    alfaServerCode.includes(`MOCK_SESSION_TIMEOUT_SECS = '${alfaLimits.sessionTimeoutSecsDefault}'`)
+      && alfaGuide.includes(String(alfaLimits.sessionTimeoutSecsDefault)),
+    'дефолт sessionTimeoutSecs сходится с env-дефолтом server.js и docs/integration/alfa.md');
+  assertCheck('alfa:limits', `orderNumberMaxLength=${alfaLimits.orderNumberMaxLength}`,
+    alfaServerCode.includes(`ORDER_NUMBER_MAX = ${alfaLimits.orderNumberMaxLength}`)
+      && alfaGuide.includes(String(alfaLimits.orderNumberMaxLength)),
+    'лимит orderNumber сходится с константой server.js и гайдом');
+  assertCheck('alfa:limits', `currency=${alfaLimits.currency} (только RUB)`,
+    alfaServerCode.includes(`'${alfaLimits.currency}'`) && alfaServerCode.includes('RUB'),
+    'валюта 643/RUB проверяется в server.js');
+  const alfaIdempotency = alfaManifest.idempotency || {};
+  assertCheck('alfa:idempotency', `field=${alfaIdempotency.field}: уникальность ведётся в state`,
+    alfaServerCode.includes('state.orderNumbers') && alfaServerCode.includes(`'${alfaIdempotency.field}'`),
+    'индекс уникальности orderNumber жив в server.js');
+  assertCheck('alfa:idempotency', 'onDuplicate: errorCode 1 «уже зарегистрирован» (не replay)',
+    alfaServerCode.includes('aerr(1,') && /уже зарегистрирован/.test(alfaServerCode) && alfaGuide.includes('errorCode 1'),
+    'поведение повтора зафиксировано в коде и гайде');
+
+  // PC-17: негативный контроль — синтетический «пустой» контур обязан красить
+  // маршруты и callback-операции, причём диагностика указывает сторону OpenAPI
+  // (именно её маскировала копипаст-подстановка значения серверной проверки).
+  const emptyRoutes = alfaRouteDrift('', { paths: {} }, alfaManifest);
+  assertCheck('alfa:negative-control', 'пустой синтетический server/openapi красит все маршруты манифеста',
+    emptyRoutes.length > 0 && emptyRoutes.every((r) => !r.inServer && !r.inOpenApi),
+    `маршрутов в контроле: ${emptyRoutes.length}`);
+  const emptyCallbackOps = alfaCallbackOperations(alfaServerCode, { components: {} }, alfaManifest);
+  assertCheck('alfa:negative-control', 'пустой синтетический openapi красит callback-операции (openapi=false)',
+    emptyCallbackOps.length > 0 && emptyCallbackOps.every((c) => c.inServer && !c.inOpenApi),
+    `операций в контроле: ${emptyCallbackOps.length}`);
 
   const summary = {
     ok: driftIssues.length === 0,

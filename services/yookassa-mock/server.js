@@ -166,7 +166,7 @@ const sandboxRuntime = createSandboxRuntime({
   operatorTokens: [MOCK_ADMIN_TOKEN, OPERATOR_TOKEN],
   createLimit: SANDBOX_CREATE_LIMIT,
   onSandboxRemoved: (record) => dropSandboxChildState(record),
-  log: (msg) => console.error(`[mock] ${msg}`),
+  log: (msg) => console.error(`[yookassa-mock] ${msg}`),
 });
 
 const state = sandboxRuntime.state;
@@ -598,7 +598,7 @@ function cancelPayment(payment, { party, reason }, { spec = null, url } = {}) {
   payment.canceled_at = clock.iso();
   persist();
   scheduleWebhook('payment.canceled', paymentView(payment), { url: url ?? webhookUrlFor(payment), spec });
-  console.log(`[mock] payment ${payment.id} canceled: ${party}/${reason}`);
+  console.log(`[yookassa-mock] payment ${payment.id} canceled: ${party}/${reason}`);
   return payment;
 }
 
@@ -613,7 +613,7 @@ function succeedPayment(payment, kopecks, { spec = null } = {}) {
   payment.refunded_amount = amountView(payment.refundedKopecks);
   persist();
   scheduleWebhook('payment.succeeded', paymentView(payment), { url: webhookUrlFor(payment), spec });
-  console.log(`[mock] payment ${payment.id} succeeded (captured ${(kopecks / 100).toFixed(2)} RUB)`);
+  console.log(`[yookassa-mock] payment ${payment.id} succeeded (captured ${(kopecks / 100).toFixed(2)} RUB)`);
   return payment;
 }
 
@@ -625,7 +625,7 @@ function finalizeRefund(refund) {
   persist();
   const payment = findPayment(refund.payment_id);
   scheduleWebhook('refund.succeeded', refundView(refund), { url: webhookUrlFor(payment) });
-  console.log(`[mock] refund ${refund.id} succeeded for payment ${refund.payment_id}`);
+  console.log(`[yookassa-mock] refund ${refund.id} succeeded for payment ${refund.payment_id}`);
   return refund;
 }
 
@@ -945,7 +945,7 @@ function handleCreatePayment(body, spec) {
   if (payment.expires_at === undefined) delete payment.expires_at;
   state.payments[id] = payment;
   persist();
-  console.log(`[mock] payment created: ${id} ${(amountCheck.kopecks / 100).toFixed(2)} RUB capture=${capture}`);
+  console.log(`[yookassa-mock] payment created: ${id} ${(amountCheck.kopecks / 100).toFixed(2)} RUB capture=${capture}`);
   return { status: 200, body: paymentView(payment) };
 }
 
@@ -1166,7 +1166,7 @@ function handleCreateRefund(body, spec) {
   payment.refunded_amount = amountView(payment.refundedKopecks);
   state.refunds[refund.id] = refund;
   persist();
-  console.log(`[mock] refund created: ${refund.id} -> payment ${payment.id} ${(amountCheck.kopecks / 100).toFixed(2)} RUB status=${refund.status}`);
+  console.log(`[yookassa-mock] refund created: ${refund.id} -> payment ${payment.id} ${(amountCheck.kopecks / 100).toFixed(2)} RUB status=${refund.status}`);
   if (refund.status === 'succeeded') {
     scheduleWebhook('refund.succeeded', refundView(refund), { url: webhookUrlFor(payment), spec });
   }
@@ -1405,7 +1405,7 @@ function finalizeSuccess(payment, { pan, month, year }, { tds, spec = null }) {
     payment.expires_at = clock.iso(payment.holdExpiresAtMs);
     persist();
     scheduleWebhook('payment.waiting_for_capture', paymentView(payment), { url: webhookUrlFor(payment), spec });
-    console.log(`[mock] payment ${payment.id} waiting_for_capture (hold until ${payment.expires_at})`);
+    console.log(`[yookassa-mock] payment ${payment.id} waiting_for_capture (hold until ${payment.expires_at})`);
   }
   return { stage: 'done', redirect: payment.confirmation.return_url };
 }
@@ -2108,7 +2108,7 @@ const server = http.createServer((req, res) => {
       } catch { /* headers sent */ }
       return;
     }
-    console.error('[mock] request error:', e);
+    console.error('[yookassa-mock] request error:', e);
     try { sendJson(res, yerr('internal_server_error', { description: 'Internal server error' }), 500); } catch { /* headers sent */ }
   });
 });
@@ -2117,7 +2117,7 @@ const server = http.createServer((req, res) => {
 // TTL холдов/pending и финализация возвратов не смешивают состояния (F-11).
 setInterval(() => {
   sandboxRuntime.tickAll(() => {
-    deliveryQueue.tick().catch((e) => console.error('[mock] delivery loop:', e.message));
+    deliveryQueue.tick().catch((e) => console.error('[yookassa-mock] delivery loop:', e.message));
     tickYookassa();
   });
 }, 1000).unref();
@@ -2127,7 +2127,7 @@ const SANDBOX_SWEEP_MS = parseMsOr(process.env.MOCK_SANDBOX_SWEEP_MS, 60000);
 if (SANDBOX_TTL_MS > 0 || SANDBOX_MAX_DOCUMENTS > 0 || SANDBOX_RETENTION_MS > 0) {
   setInterval(() => {
     const result = sandboxRuntime.sweep();
-    if (result.expired) log(`[mock] sandbox sweep: удалено по TTL — ${result.expired}`);
+    if (result.expired) log(`[yookassa-mock] sandbox sweep: удалено по TTL — ${result.expired}`);
   }, Math.max(1000, SANDBOX_SWEEP_MS)).unref();
 }
 
@@ -2136,13 +2136,13 @@ restore();
 if (require.main === module) {
   server.listen(parseInt(MOCK_PORT, 10), MOCK_HOST, () => {
     const port = server.address().port; // MOCK_PORT=0 -> реальный порт
-    console.log(`[mock] YooKassa mock on http://${MOCK_HOST}:${port}`);
-    console.log(`[mock] basic auth: shopId=${SHOP_ID} secret=${SECRET_KEY} (тестовые креды, MOCK_SHOP_ID/MOCK_SECRET_KEY переопределяют)`);
-    console.log(`[mock] tenancy=${TENANCY} public_base=${MOCK_PUBLIC_BASE_URL}`);
-    console.log(`[mock] webhooks: retry ${RETRY_MS}ms x${MAX_ATTEMPTS}${process.env.MOCK_DEFAULT_WEBHOOK_URL ? `, default ${process.env.MOCK_DEFAULT_WEBHOOK_URL}` : ', default none'} (ACK=200)`);
-    console.log(`[mock] ttls: hold=${CAPTURE_TTL_MS}ms pending=${PENDING_TTL_MS}ms refund_delay=${REFUND_DELAY_MS}ms`);
-    console.log(`[mock] control-plane: admin_token=${MOCK_ADMIN_TOKEN ? 'on' : 'off'} operator_token=${OPERATOR_TOKEN ? 'on' : 'off'} hosted=${HOSTED} block_private_webhooks=${BLOCK_PRIVATE_WEBHOOKS}`);
-    console.log(`[mock] sandboxes: mode=${TENANCY} ttl_ms=${SANDBOX_TTL_MS} max=${SANDBOX_MAX} max_documents=${SANDBOX_MAX_DOCUMENTS} host_suffix=${SANDBOX_HOST_SUFFIX || '-'} registry=${sandboxRuntime.stats().file || 'memory'}${TENANCY === 'owned' && !SANDBOX_OWNER_TOKEN ? ' (default-песочница открыта: задайте MOCK_SANDBOX_TOKEN, чтобы закрыть)' : ''}`);
+    console.log(`[yookassa-mock] YooKassa mock on http://${MOCK_HOST}:${port}`);
+    console.log(`[yookassa-mock] basic auth: shopId=${SHOP_ID} secret=${SECRET_KEY} (тестовые креды, MOCK_SHOP_ID/MOCK_SECRET_KEY переопределяют)`);
+    console.log(`[yookassa-mock] tenancy=${TENANCY} public_base=${MOCK_PUBLIC_BASE_URL}`);
+    console.log(`[yookassa-mock] webhooks: retry ${RETRY_MS}ms x${MAX_ATTEMPTS}${process.env.MOCK_DEFAULT_WEBHOOK_URL ? `, default ${process.env.MOCK_DEFAULT_WEBHOOK_URL}` : ', default none'} (ACK=200)`);
+    console.log(`[yookassa-mock] ttls: hold=${CAPTURE_TTL_MS}ms pending=${PENDING_TTL_MS}ms refund_delay=${REFUND_DELAY_MS}ms`);
+    console.log(`[yookassa-mock] control-plane: admin_token=${MOCK_ADMIN_TOKEN ? 'on' : 'off'} operator_token=${OPERATOR_TOKEN ? 'on' : 'off'} hosted=${HOSTED} block_private_webhooks=${BLOCK_PRIVATE_WEBHOOKS}`);
+    console.log(`[yookassa-mock] sandboxes: mode=${TENANCY} ttl_ms=${SANDBOX_TTL_MS} max=${SANDBOX_MAX} max_documents=${SANDBOX_MAX_DOCUMENTS} host_suffix=${SANDBOX_HOST_SUFFIX || '-'} registry=${sandboxRuntime.stats().file || 'memory'}${TENANCY === 'owned' && !SANDBOX_OWNER_TOKEN ? ' (default-песочница открыта: задайте MOCK_SANDBOX_TOKEN, чтобы закрыть)' : ''}`);
   });
 }
 

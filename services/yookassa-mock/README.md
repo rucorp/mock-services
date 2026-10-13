@@ -34,10 +34,10 @@ npm run start:yookassa
 Стартовый лог печатает дефолтные тестовые креды:
 
 ```
-[mock] basic auth: shopId=YOOKASSAMOCKTEST secret=mockpass123
+[yookassa-mock] basic auth: shopId=YOOKASSAMOCKTEST secret=mockpass123 (тестовые креды, MOCK_SHOP_ID/MOCK_SECRET_KEY переопределяют)
 ```
 
-Самотест (227 проверок: контракт /v3, идемпотентность, карты, вебхуки,
+Самотест (246 проверок: контракт /v3, идемпотентность, карты, вебхуки,
 сценарии, часы, песочницы, рестарт, control-plane):
 
 ```bash
