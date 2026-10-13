@@ -46,20 +46,30 @@ function req(port, method, path, { body = null, headers = {}, form = null } = {}
 }
 
 function startAlfa(env, label) {
+  // Адаптация 2026-10-13 (после #63, ревизия f6e7cf3e): НЕ снимаем слушатели вывода при обнаружении
+  // порта — boot-блок (creds/callbacks/control-plane) печатается СЛЕДУЮЩИМИ console.error-чанками,
+  // и ранее снятые слушатели теряли его (гонка чанков; P1-лог/P5/P6 слепли: retry=undefined,
+  // session_timeout=undefined, guardOn=false). Слушатели держим до конца процесса, резолвимся с
+  // задержкой 300мс, чтобы boot-блок долился в буфер.
   return new Promise((resolve, reject) => {
     const child = spawn('node', ['services/alfa-mock/server.js'], {
       cwd: REPO, env: { ...process.env, MOCK_HOST: '127.0.0.1', MOCK_PORT: '0', ...env }, stdio: ['ignore', 'pipe', 'pipe'],
     });
     let out = '';
+    let settled = false;
     const onData = (c) => {
       out += c.toString();
+      if (settled) return;
       const m = out.match(/on http:\/\/127\.0\.0\.1:(\d+)/);
-      if (m) { child.stdout.removeListener('data', onData); child.stderr.removeListener('data', onData); resolve({ child, port: Number(m[1]), log: () => out }); }
+      if (m) {
+        settled = true;
+        setTimeout(() => resolve({ child, port: Number(m[1]), log: () => out }), 300);
+      }
     };
     child.stdout.on('data', onData);
     child.stderr.on('data', onData);
-    child.on('exit', (code) => reject(new Error(`${label} exited early: ${code}\n${out}`)));
-    setTimeout(() => reject(new Error(`${label}: порт не найден за 5с\n${out}`)), 5000);
+    child.on('exit', (code) => { if (!settled) reject(new Error(`${label} exited early: ${code}\n${out}`)); });
+    setTimeout(() => { if (!settled) reject(new Error(`${label}: порт не найден за 5с\n${out}`)); }, 5000);
   });
 }
 
@@ -181,9 +191,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       const t = log();
       const retryLine = (t.match(/retry (\d+)ms/) || [])[1];
       const timeoutLine = (t.match(/session_timeout=(\d+)s/) || [])[1];
+      // PG-05 ≡ PB-11 (до #58): '1h' тихо → parseInt=1 → Math.max(1000,1)=1000мс (не 3600000),
+      // '0' без семантики тихо → 1200; WARN нет. После #58 ожидание инвертируется (WARN или честный парс).
       report('P5', 'env-парсинг: MOCK_CALLBACK_RETRY_MS=1h и MOCK_SESSION_TIMEOUT_SECS=0 (тихий fallback)',
-        retryLine === '10000' && timeoutLine === '1200' ? 'ПОДТВЕРЖДЕНО (класс MS-08/PB-03/PF-03)' : 'не подтвердилось',
-        `retry=${retryLine}ms (ожидался тихий 10000), session_timeout=${timeoutLine}s (тихий 1200)`);
+        retryLine === '1000' && timeoutLine === '1200' ? 'ПОДТВЕРЖДЕНО (класс MS-08/PB-03/PF-03: тихий миспарс)' : 'не подтвердилось',
+        `retry=${retryLine}ms (дефект PG-05: '1h' → 1000мс, а не 3600000), session_timeout=${timeoutLine}s ('0' тихо → 1200)`);
     }
 
     /* ---------- P6: SSRF-гард callback в hosted (PF-01 не растиражирован?) ---------- */
