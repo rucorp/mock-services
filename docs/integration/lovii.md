@@ -64,7 +64,7 @@ include:
 ```yaml
 services:
   tbank-mock:
-    image: ghcr.io/rucorp/mock-services:${MOCK_IMAGE_TAG:-0.5.0}${MOCK_IMAGE_DIGEST-@sha256:5e2b030f04672691c92b33f9e78099bed3a10616fbf7bcbc1f89668a99e30ef6}
+    image: ghcr.io/rucorp/mock-services:${MOCK_IMAGE_TAG:-0.5.0}${MOCK_IMAGE_DIGEST-@sha256:403e1bd293c3ba18d345d22612b118b0fe788f83c51ae4b3ee79e70ba216b90d}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/tbank-mock/server.js"]
@@ -96,7 +96,7 @@ services:
     restart: unless-stopped
 
   kassa-mock:
-    image: ghcr.io/rucorp/mock-services:${MOCK_IMAGE_TAG:-0.5.0}${MOCK_IMAGE_DIGEST-@sha256:5e2b030f04672691c92b33f9e78099bed3a10616fbf7bcbc1f89668a99e30ef6}
+    image: ghcr.io/rucorp/mock-services:${MOCK_IMAGE_TAG:-0.5.0}${MOCK_IMAGE_DIGEST-@sha256:403e1bd293c3ba18d345d22612b118b0fe788f83c51ae4b3ee79e70ba216b90d}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/kassa-mock/server.js"]
