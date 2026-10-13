@@ -62,6 +62,12 @@ function check(name, cond, extra = '') {
 
 const CREDS = { userName: 'ALFAMOCKTEST', password: 'mockpass123' };
 const CALLBACK_SECRET = 'mocksecret123';
+// Фиктивные PG-01/PG-02 маркеры: ни одна проверка не использует настоящие креды.
+const CREDENTIAL_SENTINELS = Object.freeze({
+  userName: 'PG01_USERNAME_SENTINEL_60',
+  password: 'PG01_PASSWORD_SENTINEL_60',
+  callbackSecret: 'PG02_CALLBACK_SECRET_SENTINEL_60',
+});
 
 /* --------------------------------------------------- тестовые карты (конспект 03) */
 
@@ -365,6 +371,72 @@ async function main() {
     checkError('неверный password', badPass, { code: 2, field: 'password' });
     check('неверный password: hint объясняет, что креды синтетические и где их взять',
       String((badPass.json() || {}).hint || '').includes('ALFAMOCKTEST'));
+
+    /* --------------------------------------------- PG-01/PG-02 sentinels */
+    console.log('— PG-01/PG-02: env-креды не попадают в hint и стартовый лог');
+    const childCredentialProbe = startChild({
+      MOCK_ALFA_USERNAME: CREDENTIAL_SENTINELS.userName,
+      MOCK_ALFA_PASSWORD: CREDENTIAL_SENTINELS.password,
+      MOCK_ALFA_CALLBACK_SECRET: CREDENTIAL_SENTINELS.callbackSecret,
+    });
+    children.push(childCredentialProbe);
+    const portCredentialProbe = await childCredentialProbe.port;
+    await waitForCondition(
+      () => childCredentialProbe.output().includes('вне области: асимметричный checksum'),
+      { description: 'alfa startup log' },
+    );
+
+    const wrongConfiguredPass = await rest(portCredentialProbe, 'register.do', {
+      userName: CREDENTIAL_SENTINELS.userName,
+      password: 'wrong-probe-password',
+      orderNumber: nextOrderNumber('pg60-pass'),
+      amount: '100',
+      returnUrl: 'https://shop.test/ok',
+    });
+    const wrongConfiguredPassJson = wrongConfiguredPass.json() || {};
+    check('PG-01: custom userName + неверный password → errorCode=2',
+      wrongConfiguredPass.statusCode === 200 && wrongConfiguredPassJson.errorCode === 2
+      && wrongConfiguredPassJson.field === 'password' && Boolean(wrongConfiguredPassJson.hint));
+
+    const wrongConfiguredUser = await rest(portCredentialProbe, 'register.do', {
+      userName: 'wrong-probe-user',
+      password: 'wrong-probe-password',
+      orderNumber: nextOrderNumber('pg60-user'),
+      amount: '100',
+      returnUrl: 'https://shop.test/ok',
+    });
+    const wrongConfiguredUserJson = wrongConfiguredUser.json() || {};
+    check('PG-01: неверный userName при custom env → errorCode=2',
+      wrongConfiguredUser.statusCode === 200 && wrongConfiguredUserJson.errorCode === 2
+      && wrongConfiguredUserJson.field === 'userName' && Boolean(wrongConfiguredUserJson.hint));
+
+    const credentialMarkers = Object.values(CREDENTIAL_SENTINELS);
+    const responseHasCredentialMarker = credentialMarkers.some((marker) =>
+      wrongConfiguredPass.body.includes(marker) || wrongConfiguredUser.body.includes(marker));
+    check('PG-01: errorCode=2 responses не раскрывают configured env values',
+      !responseHasCredentialMarker,
+      responseHasCredentialMarker ? 'sentinel found; value suppressed' : '');
+    check('PG-01: оба hint используют синтетический fallback для примера',
+      String(wrongConfiguredPassJson.hint || '').includes('ALFAMOCKTEST/mockpass123')
+      && String(wrongConfiguredUserJson.hint || '').includes('ALFAMOCKTEST'));
+
+    await waitForCondition(
+      () => childCredentialProbe.output().includes('отказ авторизации: неверный password'),
+      { description: 'alfa wrong-password log' },
+    );
+    const credentialProbeOutput = childCredentialProbe.output();
+    const startupCredsLine = credentialProbeOutput.split('\n').find((line) => line.includes('creds (')) || '';
+    const logHasCredentialMarker = credentialMarkers.some((marker) => credentialProbeOutput.includes(marker));
+    check('PG-02: startup/auth logs не раскрывают configured env values',
+      !logHasCredentialMarker,
+      logHasCredentialMarker ? 'sentinel found; value suppressed' : '');
+    check('PG-02: custom env overrides не меняют synthetic defaults в startup log',
+      startupCredsLine.includes('userName=ALFAMOCKTEST')
+      && startupCredsLine.includes('password=mockpass123')
+      && startupCredsLine.includes('callback_secret=mocksecret123')
+      && !logHasCredentialMarker,
+      startupCredsLine ? 'строка лога проверена без вывода значений' : 'startup creds line missing');
+    await childCredentialProbe.stop();
 
     const noOrderNumber = await rest(port, 'register.do', { ...CREDS, amount: '10000', returnUrl: 'https://shop.test/ok' });
     checkError('нет orderNumber', noOrderNumber, { code: 3, field: 'orderNumber' });
