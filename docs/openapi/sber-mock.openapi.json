@@ -1,0 +1,638 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "sber-mock — Сбербанк Ecom REST v1.1.11.1 (мок-стенд)",
+    "version": "0.5.0",
+    "description": "Zero-dependency mock adapter for the Ecom JSON REST slice documented in docs/reference/sber/01-payment-api.md and docs/reference/sber/02-callbacks-and-test.md. This is not legacy Secure Payments. Business methods are POST JSON at /ecomm/gw/partner/api/v1/*.do. errorCode=0 means the REST call was processed, not that payment succeeded; reconcile the numeric orderStatus with getOrderStatusExtended.do. Ecom callback is unsigned JSON POST and accepts exactly HTTP 200 as ACK."
+  },
+  "servers": [
+    { "url": "http://localhost:3105", "description": "Локальный Sber Ecom mock" }
+  ],
+  "tags": [
+    { "name": "Ecom REST", "description": "JSON REST API совместимого среза Сбербанк Ecom" },
+    { "name": "Hosted form", "description": "Тестовая форма оплаты и эмуляция ACS" },
+    { "name": "Mock control", "description": "Часы, сценарии, sandbox и административная поверхность мока" }
+  ],
+  "components": {
+    "parameters": {
+      "XMockSandbox": {
+        "name": "X-Mock-Sandbox",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string" },
+        "description": "Имя изолированной песочницы mock-services (RFC-001)."
+      },
+      "XMockScenario": {
+        "name": "X-Mock-Scenario",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string" },
+        "description": "Сценарий мока: fail, hang, latency, http-500/http-504, webhook-drop или webhook-duplicate."
+      },
+      "OrderId": {
+        "name": "orderId",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "SandboxQuery": {
+        "name": "sandbox",
+        "in": "query",
+        "required": false,
+        "schema": { "type": "string" },
+        "description": "Целевая песочница для capability-маршрута."
+      }
+    },
+    "schemas": {
+      "MerchantCredentials": {
+        "type": "object",
+        "required": ["userName", "password"],
+        "properties": {
+          "userName": { "type": "string", "description": "Merchant-логин. Дефолт стенда SBERMOCKTEST синтетический, не банковский." },
+          "password": { "type": "string", "writeOnly": true, "description": "Пароль merchant. Дефолт стенда mockpass123 синтетический." }
+        }
+      },
+      "RegisterRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/MerchantCredentials" },
+          {
+            "type": "object",
+            "required": ["orderNumber", "amount", "returnUrl"],
+            "properties": {
+              "orderNumber": { "type": "string", "minLength": 1, "maxLength": 128, "description": "Уникальный номер заказа в пределах песочницы; 128 — локальный mock safety cap, не утверждение о лимите банка." },
+              "amount": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "string", "pattern": "^[0-9]+$" }], "description": "Целая положительная сумма в копейках." },
+              "currency": { "oneOf": [{ "const": 643 }, { "const": "643" }], "default": 643, "description": "В этом срезе поддерживается RUB (643)." },
+              "returnUrl": { "type": "string", "format": "uri", "description": "Абсолютный URL возврата покупателя." },
+              "failUrl": { "type": "string", "format": "uri", "description": "Необязательный абсолютный URL для отказного результата." },
+              "description": { "type": "string", "maxLength": 512 },
+              "sessionTimeoutSecs": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "string", "pattern": "^[0-9]+$" }], "description": "Mock поддерживает срок в секундах; default стенда 1200 секунд." },
+              "dynamicCallbackUrl": { "type": "string", "format": "uri", "description": "Опциональное mock callback-назначение; hosted-режим применяет SSRF-защиту." },
+              "additionalParams": { "type": "object", "additionalProperties": true, "description": "Необязательный JSON-объект, включаемый в callback после secret redaction." }
+            }
+          }
+        ]
+      },
+      "OrderReferenceRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/MerchantCredentials" },
+          {
+            "type": "object",
+            "properties": {
+              "orderId": { "type": "string", "format": "uuid" },
+              "orderNumber": { "type": "string" }
+            },
+            "anyOf": [{ "required": ["orderId"] }, { "required": ["orderNumber"] }]
+          }
+        ]
+      },
+      "AmountOperationRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/OrderReferenceRequest" },
+          {
+            "type": "object",
+            "required": ["amount"],
+            "properties": {
+              "amount": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "string", "pattern": "^[0-9]+$" }], "description": "Сумма в копейках; deposit не может превысить холд, refund — не возвращённый остаток списанного." }
+            }
+          }
+        ]
+      },
+      "ProviderError": {
+        "type": "object",
+        "required": ["errorCode", "errorMessage"],
+        "properties": {
+          "errorCode": { "type": "integer", "description": "Код ответа. Полная таблица Ecom для конкретного merchant не представлена в локальном reference; mapping 1…6 — mock fork." },
+          "errorMessage": { "type": "string" },
+          "field": { "type": "string", "description": "Mock DX field; не заявляется как поле upstream." },
+          "hint": { "type": "string", "description": "Mock DX hint; не заявляется как поле upstream." },
+          "doc": { "type": "string", "format": "uri", "description": "Mock DX documentation link." }
+        }
+      },
+      "RegistrationResponse": {
+        "type": "object",
+        "required": ["errorCode", "errorMessage"],
+        "properties": {
+          "errorCode": { "type": "integer", "const": 0, "description": "Ноль подтверждает обработку вызова, не оплату." },
+          "errorMessage": { "type": "string" },
+          "orderId": { "type": "string", "format": "uuid" },
+          "formUrl": { "type": "string", "format": "uri" },
+          "hint": { "type": "string", "description": "Диагностика мока." }
+        }
+      },
+      "OperationResponse": {
+        "type": "object",
+        "required": ["errorCode", "errorMessage"],
+        "properties": {
+          "errorCode": { "type": "integer", "description": "Успешный REST-вызов имеет 0; не выводите из этого статус оплаты." },
+          "errorMessage": { "type": "string" },
+          "field": { "type": "string" },
+          "hint": { "type": "string" },
+          "doc": { "type": "string", "format": "uri" }
+        }
+      },
+      "OrderStatus": {
+        "type": "integer",
+        "enum": [0, 1, 2, 3, 4, 5, 6],
+        "description": "Числовой статус заказа по локальному Ecom/RBS reference: 0 — зарегистрирован, не оплачен; 1 — холд; 2 — полная авторизация/оплата; 3 — авторизация отменена; 4 — по заказу проведён возврат; 5 — начата аутентификация ACS; 6 — авторизация отклонена. Это не actionCode."
+      },
+      "OrderStatusResponse": {
+        "type": "object",
+        "required": ["errorCode", "errorMessage", "orderId", "orderNumber", "orderStatus", "actionCode"],
+        "properties": {
+          "errorCode": { "type": "integer", "const": 0 },
+          "errorMessage": { "type": "string" },
+          "orderId": { "type": "string", "format": "uuid" },
+          "orderNumber": { "type": "string" },
+          "orderStatus": { "$ref": "#/components/schemas/OrderStatus" },
+          "actionCode": { "type": ["integer", "null"], "description": "Отдельный mock action result; null, пока карточная операция не завершилась. Не является orderStatus." },
+          "actionCodeDescription": { "type": "string" },
+          "amount": { "type": "integer", "description": "Сумма исходного заказа в копейках; mock status field." },
+          "currency": { "type": "integer", "const": 643 },
+          "date": { "type": "integer", "description": "Время регистрации, epoch milliseconds (формат ответа мока)." },
+          "authorizedAmount": { "type": "integer", "minimum": 0, "description": "Mock aggregate в копейках." },
+          "depositedAmount": { "type": "integer", "minimum": 0, "description": "Mock aggregate списания в копейках." },
+          "refundedAmount": { "type": "integer", "minimum": 0, "description": "Mock aggregate возврата в копейках." },
+          "paymentAttempts": { "type": "integer", "minimum": 0, "maximum": 3 },
+          "maxPaymentAttempts": { "type": "integer", "const": 3 },
+          "cardholderPan": { "type": "string", "pattern": "^[0-9]{6}\\*\\*[0-9]{4}$", "description": "Mock mask only; full PAN is not retained." },
+          "authDate": { "type": "integer" },
+          "depositDate": { "type": "integer" },
+          "reverseDate": { "type": "integer" },
+          "refundDate": { "type": "integer" },
+          "declinedDate": { "type": "integer" }
+        }
+      },
+      "CallbackPayload": {
+        "type": "object",
+        "required": ["mdOrder", "orderNumber", "operation", "status"],
+        "properties": {
+          "mdOrder": { "type": "string", "format": "uuid" },
+          "orderNumber": { "type": "string" },
+          "operation": { "type": "string", "enum": ["created", "approved", "deposited", "reversed", "refunded", "declinedByTimeout"] },
+          "status": { "type": "integer", "enum": [0, 1], "description": "Operation status, not payment orderStatus." },
+          "additionalParams": { "type": "object", "additionalProperties": true }
+        },
+        "additionalProperties": false,
+        "description": "Ecom callback mock payload: HTTP POST JSON without checksum/signature. ACK is exactly HTTP 200."
+      },
+      "HealthResponse": {
+        "type": "object",
+        "required": ["ok", "api", "base", "sessionTimeoutSecs", "callbackMethod", "callbackSignature", "callbackRetryMs", "callbackMaxAttempts", "maxPaymentAttempts"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "sandbox": { "type": "string" },
+          "tenancy": { "type": "string" },
+          "api": { "type": "string", "const": "rest-json" },
+          "base": { "type": "string" },
+          "twoStage": { "type": "boolean" },
+          "sessionTimeoutSecs": { "type": "integer" },
+          "callbackMethod": { "type": "string", "const": "POST" },
+          "callbackSignature": { "type": "string", "const": "none" },
+          "callbackRetryMs": { "type": "integer" },
+          "callbackMaxAttempts": { "type": "integer" },
+          "maxPaymentAttempts": { "type": "integer", "const": 3 },
+          "orders": { "type": "integer" },
+          "awaiting": { "type": "integer" },
+          "callbacks": { "type": "integer" }
+        }
+      },
+      "SandboxResponse": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "mode": { "type": "string" },
+          "current": { "type": "string" },
+          "id": { "type": "string" },
+          "url": { "type": "string", "format": "uri" },
+          "ownerToken": { "type": "string", "writeOnly": true },
+          "creds": { "$ref": "#/components/schemas/MerchantCredentials" },
+          "expiresAt": { "type": ["string", "null"], "format": "date-time" },
+          "ttlMs": { "type": "integer" }
+        }
+      },
+      "TimeRequest": {
+        "type": "object",
+        "properties": {
+          "advance": { "type": "string", "examples": ["+20m", "+60s"] },
+          "offset": { "type": "integer" },
+          "iso": { "type": "string", "format": "date-time" },
+          "reset": { "type": "boolean" }
+        }
+      },
+      "ScenarioRequest": {
+        "type": "object",
+        "required": ["scenario"],
+        "properties": {
+          "id": { "type": "string" },
+          "scenario": { "type": "string" },
+          "target": { "type": "string" },
+          "match": { "type": "object" },
+          "times": { "type": "integer" },
+          "persistent": { "type": "boolean" }
+        }
+      },
+      "StateEnvelope": {
+        "type": "object",
+        "properties": {
+          "sandbox": { "type": "string" },
+          "state": { "type": "object", "additionalProperties": true }
+        }
+      },
+      "AdminActionRequest": {
+        "type": "object",
+        "required": ["action", "id", "_csrf"],
+        "properties": {
+          "action": { "type": "string", "enum": ["deposit-order", "reverse-order", "expire-order", "duplicate-callback"] },
+          "id": { "type": "string" },
+          "_csrf": { "type": "string" }
+        }
+      }
+    },
+    "requestBodies": {
+      "RegisterRequestBody": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegisterRequest" } } }
+      },
+      "OrderReferenceBody": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrderReferenceRequest" } } }
+      },
+      "AmountOperationBody": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AmountOperationRequest" } } }
+      },
+      "TimeRequestBody": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TimeRequest" } } }
+      },
+      "ScenarioRequestBody": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ScenarioRequest" } } }
+      },
+      "StateEnvelopeBody": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StateEnvelope" } } }
+      },
+      "AdminActionBody": {
+        "required": true,
+        "content": {
+          "application/json": { "schema": { "$ref": "#/components/schemas/AdminActionRequest" } },
+          "application/x-www-form-urlencoded": { "schema": { "$ref": "#/components/schemas/AdminActionRequest" } }
+        }
+      }
+    },
+    "responses": {
+      "RestResponse": {
+        "description": "HTTP 200: Ecom-shaped success or documented mock ProviderError. errorCode=0 is not payment success.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "oneOf": [
+                { "$ref": "#/components/schemas/RegistrationResponse" },
+                { "$ref": "#/components/schemas/OperationResponse" },
+                { "$ref": "#/components/schemas/OrderStatusResponse" },
+                { "$ref": "#/components/schemas/ProviderError" }
+              ]
+            }
+          }
+        }
+      },
+      "TransportError": {
+        "description": "Transport/HTTP error (400, 404, 405, 413, 415, 500).",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProviderError" } } }
+      },
+      "HtmlPage": {
+        "description": "HTML test payment/ACS page.",
+        "content": { "text/html": { "schema": { "type": "string" } } }
+      },
+      "JsonControl": {
+        "description": "JSON response from a mock control-plane operation.",
+        "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+      }
+    }
+  },
+  "webhooks": {
+    "ecomCallback": {
+      "post": {
+        "tags": ["Ecom REST"],
+        "summary": "Исходящий Ecom callback: JSON без подписи",
+        "description": "The mock posts a JSON CallbackPayload to dynamicCallbackUrl or MOCK_SBER_CALLBACK_URL. Only HTTP 200 acknowledges delivery; retries default to 3 attempts at 60 seconds. Do not use this unsigned notification as payment proof; query getOrderStatusExtended.do.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CallbackPayload" } } }
+        },
+        "responses": {
+          "200": { "description": "ACK — ровно HTTP 200." },
+          "default": { "description": "Не ACK; очередь повторит доставку в пределах настроенного лимита." }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/ecomm/gw/partner/api/v1/register.do": {
+      "post": {
+        "tags": ["Ecom REST"],
+        "summary": "Создать заказ для одностадийной оплаты",
+        "description": "Возвращает orderId/formUrl. Покупателя нужно направить на форму, затем сверить orderStatus; errorCode=0 — только результат REST-вызова.",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }, { "$ref": "#/components/parameters/XMockScenario" }],
+        "requestBody": { "$ref": "#/components/requestBodies/RegisterRequestBody" },
+        "responses": { "200": { "$ref": "#/components/responses/RestResponse" }, "400": { "$ref": "#/components/responses/TransportError" }, "415": { "$ref": "#/components/responses/TransportError" } }
+      }
+    },
+    "/ecomm/gw/partner/api/v1/registerPreAuth.do": {
+      "post": {
+        "tags": ["Ecom REST"],
+        "summary": "Создать заказ для двухстадийной оплаты / холда",
+        "description": "Доступность preAuth зависит от merchant; мок управляет методом через MOCK_SBER_TWO_STAGE.",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }, { "$ref": "#/components/parameters/XMockScenario" }],
+        "requestBody": { "$ref": "#/components/requestBodies/RegisterRequestBody" },
+        "responses": { "200": { "$ref": "#/components/responses/RestResponse" }, "400": { "$ref": "#/components/responses/TransportError" }, "415": { "$ref": "#/components/responses/TransportError" } }
+      }
+    },
+    "/ecomm/gw/partner/api/v1/deposit.do": {
+      "post": {
+        "tags": ["Ecom REST"],
+        "summary": "Подтвердить списание по холду",
+        "description": "Сумма deposit не может превышать authorizedAmount; мок допускает частичный deposit.",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }, { "$ref": "#/components/parameters/XMockScenario" }],
+        "requestBody": { "$ref": "#/components/requestBodies/AmountOperationBody" },
+        "responses": { "200": { "$ref": "#/components/responses/RestResponse" }, "415": { "$ref": "#/components/responses/TransportError" } }
+      }
+    },
+    "/ecomm/gw/partner/api/v1/reverse.do": {
+      "post": {
+        "tags": ["Ecom REST"],
+        "summary": "Отменить авторизацию",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }, { "$ref": "#/components/parameters/XMockScenario" }],
+        "requestBody": { "$ref": "#/components/requestBodies/OrderReferenceBody" },
+        "responses": { "200": { "$ref": "#/components/responses/RestResponse" }, "415": { "$ref": "#/components/responses/TransportError" } }
+      }
+    },
+    "/ecomm/gw/partner/api/v1/refund.do": {
+      "post": {
+        "tags": ["Ecom REST"],
+        "summary": "Полный или частичный возврат уже списанного заказа",
+        "description": "Нельзя вернуть сумму сверх ещё не возмещённого остатка depositedAmount.",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }, { "$ref": "#/components/parameters/XMockScenario" }],
+        "requestBody": { "$ref": "#/components/requestBodies/AmountOperationBody" },
+        "responses": { "200": { "$ref": "#/components/responses/RestResponse" }, "415": { "$ref": "#/components/responses/TransportError" } }
+      }
+    },
+    "/ecomm/gw/partner/api/v1/decline.do": {
+      "post": {
+        "tags": ["Ecom REST"],
+        "summary": "Отменить заказ до начала ввода карточных данных",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }, { "$ref": "#/components/parameters/XMockScenario" }],
+        "requestBody": { "$ref": "#/components/requestBodies/OrderReferenceBody" },
+        "responses": { "200": { "$ref": "#/components/responses/RestResponse" }, "415": { "$ref": "#/components/responses/TransportError" } }
+      }
+    },
+    "/ecomm/gw/partner/api/v1/getOrderStatusExtended.do": {
+      "post": {
+        "tags": ["Ecom REST"],
+        "summary": "Серверная сверка заказа",
+        "description": "orderStatus — источник истины 0…6. actionCode — отдельное поле причины/кода операции; не подменяйте им состояние. errorCode=0 не означает успешный платёж.",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }, { "$ref": "#/components/parameters/XMockScenario" }],
+        "requestBody": { "$ref": "#/components/requestBodies/OrderReferenceBody" },
+        "responses": { "200": { "$ref": "#/components/responses/RestResponse" }, "415": { "$ref": "#/components/responses/TransportError" } }
+      }
+    },
+    "/payment/{orderId}": {
+      "get": {
+        "tags": ["Hosted form"],
+        "summary": "Получить HTML платёжной формы или текущего статуса",
+        "parameters": [{ "$ref": "#/components/parameters/OrderId" }, { "$ref": "#/components/parameters/XMockSandbox" }],
+        "responses": { "200": { "$ref": "#/components/responses/HtmlPage" }, "404": { "$ref": "#/components/responses/HtmlPage" } }
+      }
+    },
+    "/payment/{orderId}/pay": {
+      "post": {
+        "tags": ["Hosted form"],
+        "summary": "Отправить данные тестовой карты",
+        "parameters": [{ "$ref": "#/components/parameters/OrderId" }, { "$ref": "#/components/parameters/XMockSandbox" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "required": ["pan", "exp", "cvv"],
+                "properties": {
+                  "pan": { "type": "string", "description": "Только официальная синтетическая тестовая карта из локального reference; не передавать real PAN." },
+                  "exp": { "type": "string", "description": "Срок в формате MMYY для соответствующей карты." },
+                  "cvv": { "type": "string" },
+                  "preset": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "$ref": "#/components/responses/HtmlPage" }, "302": { "description": "Успешная оплата/авторизация — redirect на merchant returnUrl." } }
+      }
+    },
+    "/payment/{orderId}/3ds": {
+      "post": {
+        "tags": ["Hosted form"],
+        "summary": "Отправить результат эмулированного ACS",
+        "parameters": [{ "$ref": "#/components/parameters/OrderId" }, { "$ref": "#/components/parameters/XMockSandbox" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "required": ["password"],
+                "properties": {
+                  "password": { "type": "string", "description": "Синтетический пароль тестового ACS: 111111." },
+                  "action": { "type": "string", "enum": ["fail"] }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "$ref": "#/components/responses/HtmlPage" }, "302": { "description": "Успешная аутентификация — redirect на returnUrl." } }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": ["Mock control"],
+        "summary": "Health/status конфигурации mock",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }],
+        "responses": { "200": { "description": "Состояние стенда.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HealthResponse" } } } } }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": ["Mock control"],
+        "summary": "Эта OpenAPI 3.1 спецификация",
+        "responses": { "200": { "description": "OpenAPI document.", "content": { "application/json": { "schema": { "type": "object" } } } } }
+      }
+    },
+    "/admin": {
+      "get": {
+        "tags": ["Mock control"],
+        "summary": "HTML операторская консоль",
+        "parameters": [{ "name": "admin_token", "in": "query", "schema": { "type": "string" } }, { "$ref": "#/components/parameters/XMockSandbox" }],
+        "responses": { "200": { "$ref": "#/components/responses/HtmlPage" }, "401": { "$ref": "#/components/responses/TransportError" } }
+      }
+    },
+    "/admin/journal": {
+      "get": {
+        "tags": ["Mock control"],
+        "summary": "Записи REST-журнала текущей песочницы",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }],
+        "responses": { "200": { "$ref": "#/components/responses/JsonControl" }, "401": { "$ref": "#/components/responses/TransportError" } }
+      }
+    },
+    "/admin/action": {
+      "post": {
+        "tags": ["Mock control"],
+        "summary": "CSRF-защищённые действия HTML-консоли",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }],
+        "requestBody": { "$ref": "#/components/requestBodies/AdminActionBody" },
+        "responses": { "302": { "description": "Redirect на консоль после действия." }, "403": { "$ref": "#/components/responses/TransportError" } }
+      }
+    },
+    "/mock/time": {
+      "get": {
+        "tags": ["Mock control"],
+        "summary": "Получить состояние виртуальных часов",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }],
+        "responses": { "200": { "$ref": "#/components/responses/JsonControl" } }
+      },
+      "post": {
+        "tags": ["Mock control"],
+        "summary": "Сдвинуть виртуальное время; проверить TTL/retry",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }],
+        "requestBody": { "$ref": "#/components/requestBodies/TimeRequestBody" },
+        "responses": { "200": { "$ref": "#/components/responses/JsonControl" }, "400": { "$ref": "#/components/responses/TransportError" } }
+      }
+    },
+    "/mock/scenarios": {
+      "get": {
+        "tags": ["Mock control"],
+        "summary": "Список сценариев текущей песочницы",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }],
+        "responses": { "200": { "$ref": "#/components/responses/JsonControl" } }
+      },
+      "post": {
+        "tags": ["Mock control"],
+        "summary": "Создать scenario rule",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }],
+        "requestBody": { "$ref": "#/components/requestBodies/ScenarioRequestBody" },
+        "responses": { "200": { "$ref": "#/components/responses/JsonControl" }, "400": { "$ref": "#/components/responses/TransportError" } }
+      },
+      "delete": {
+        "tags": ["Mock control"],
+        "summary": "Удалить сценарии текущей песочницы",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }],
+        "responses": { "200": { "$ref": "#/components/responses/JsonControl" } }
+      }
+    },
+    "/mock/state": {
+      "get": {
+        "tags": ["Mock control"],
+        "summary": "Экспортировать состояние текущей песочницы",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }, { "$ref": "#/components/parameters/SandboxQuery" }],
+        "responses": { "200": { "description": "Sandbox state envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StateEnvelope" } } } }, "401": { "$ref": "#/components/responses/TransportError" } }
+      },
+      "post": {
+        "tags": ["Mock control"],
+        "summary": "Импортировать состояние в текущую песочницу",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }],
+        "requestBody": { "$ref": "#/components/requestBodies/StateEnvelopeBody" },
+        "responses": { "200": { "$ref": "#/components/responses/JsonControl" }, "400": { "$ref": "#/components/responses/TransportError" } }
+      },
+      "put": {
+        "tags": ["Mock control"],
+        "summary": "Импортировать состояние в текущую песочницу",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }],
+        "requestBody": { "$ref": "#/components/requestBodies/StateEnvelopeBody" },
+        "responses": { "200": { "$ref": "#/components/responses/JsonControl" }, "400": { "$ref": "#/components/responses/TransportError" } }
+      }
+    },
+    "/mock/reset": {
+      "post": {
+        "tags": ["Mock control"],
+        "summary": "Сбросить состояние целевой песочницы",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }],
+        "requestBody": { "$ref": "#/components/requestBodies/StateEnvelopeBody" },
+        "responses": { "200": { "$ref": "#/components/responses/JsonControl" }, "400": { "$ref": "#/components/responses/TransportError" } }
+      }
+    },
+    "/sandboxes": {
+      "get": {
+        "tags": ["Mock control"],
+        "summary": "Список доступных песочниц",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }],
+        "responses": { "200": { "$ref": "#/components/responses/JsonControl" }, "401": { "$ref": "#/components/responses/TransportError" } }
+      },
+      "post": {
+        "tags": ["Mock control"],
+        "summary": "Создать owned sandbox или переключить namespace",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }],
+        "requestBody": { "$ref": "#/components/requestBodies/StateEnvelopeBody" },
+        "responses": { "201": { "description": "Owned sandbox created.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SandboxResponse" } } } }, "200": { "$ref": "#/components/responses/JsonControl" }, "429": { "$ref": "#/components/responses/TransportError" } }
+      },
+      "delete": {
+        "tags": ["Mock control"],
+        "summary": "Удалить sandbox",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }, { "$ref": "#/components/parameters/SandboxQuery" }],
+        "requestBody": { "$ref": "#/components/requestBodies/StateEnvelopeBody" },
+        "responses": { "200": { "$ref": "#/components/responses/JsonControl" }, "401": { "$ref": "#/components/responses/TransportError" } }
+      }
+    },
+    "/sandboxes/me": {
+      "get": {
+        "tags": ["Mock control"],
+        "summary": "Сведения о sandbox-владельце",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }],
+        "responses": { "200": { "$ref": "#/components/responses/JsonControl" }, "401": { "$ref": "#/components/responses/TransportError" } }
+      },
+      "delete": {
+        "tags": ["Mock control"],
+        "summary": "Удалить свою owned sandbox",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }],
+        "responses": { "200": { "$ref": "#/components/responses/JsonControl" }, "401": { "$ref": "#/components/responses/TransportError" } }
+      }
+    },
+    "/sandboxes/me/reset": {
+      "post": {
+        "tags": ["Mock control"],
+        "summary": "Сбросить свою owned sandbox",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }],
+        "responses": { "200": { "$ref": "#/components/responses/JsonControl" }, "401": { "$ref": "#/components/responses/TransportError" } }
+      }
+    },
+    "/sandboxes/me/reset-creds": {
+      "post": {
+        "tags": ["Mock control"],
+        "summary": "Ротировать synthetic merchant credentials своей sandbox",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }],
+        "responses": { "200": { "$ref": "#/components/responses/JsonControl" }, "401": { "$ref": "#/components/responses/TransportError" } }
+      }
+    },
+    "/mock/sandboxes": {
+      "get": {
+        "tags": ["Mock control"],
+        "summary": "Совместимый alias списка/операций sandbox API",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }],
+        "responses": { "200": { "$ref": "#/components/responses/JsonControl" } }
+      },
+      "post": {
+        "tags": ["Mock control"],
+        "summary": "Совместимый alias sandbox API",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }],
+        "requestBody": { "$ref": "#/components/requestBodies/StateEnvelopeBody" },
+        "responses": { "200": { "$ref": "#/components/responses/JsonControl" }, "201": { "$ref": "#/components/responses/JsonControl" } }
+      },
+      "delete": {
+        "tags": ["Mock control"],
+        "summary": "Совместимый alias sandbox API",
+        "parameters": [{ "$ref": "#/components/parameters/XMockSandbox" }, { "$ref": "#/components/parameters/SandboxQuery" }],
+        "requestBody": { "$ref": "#/components/requestBodies/StateEnvelopeBody" },
+        "responses": { "200": { "$ref": "#/components/responses/JsonControl" } }
+      }
+    }
+  }
+}

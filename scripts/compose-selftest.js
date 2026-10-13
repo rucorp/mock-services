@@ -5,7 +5,7 @@
 /*
  * Black-box selftest против поднятого стенда (docker compose / внешние контейнеры).
  * Проверяет сервисы (tbank-mock на :3100, kassa-mock на :3101, yookassa-mock на :3102,
- * atol-mock на :3103, alfa-mock на :3104) снаружи по HTTP:
+ * atol-mock на :3103, alfa-mock на :3104, sber-mock на :3105) снаружи по HTTP:
  *   1. Healthchecks (/health, /healthz, /health)
  *   2. Т-Банк: Init -> форма оплаты -> Confirm -> Chargeback (DISPUTED -> REPRESENTMENT -> ARBITRATION -> WON) -> виртуальные часы /mock/time -> /admin/journal
  *   3. Ferma (54-ФЗ): getToken -> sell (предоплата с расчётным НДС vat20_120) -> sell (зачёт предоплаты) -> buy (расход) -> маркировка -> очередь ОФД -> печать с ускорением через /mock/time -> /receipts/:uuid
@@ -15,6 +15,8 @@
  *   6. Альфа-Банк REST: register.do -> форма (3DS2 frictionless) -> getOrderStatusExtended (orderStatus=2)
  *      -> registerPreAuth -> холд -> deposit ≤ авторизации -> partial refund -> reverse -> негативы
  *      (креды, дубль orderNumber, дробный amount, неизвестный заказ)
+ *   7. Сбербанк Ecom REST: JSON register -> hosted form -> orderStatus=2, preAuth/ACS -> deposit/refund
+ *      и негативы; transport отличается от Альфа (не form-urlencoded, callback unsigned POST JSON).
  *
  * F-33: прогон выполняется в одноразовой песочнице (X-Mock-Sandbox, в hosted —
  * через POST /sandboxes с owner-token) и убирает её в finally, чтобы повторные
@@ -33,6 +35,7 @@ const KASSA_BASE = (process.env.MOCK_KASSA_URL || 'http://127.0.0.1:3101').repla
 const YOOKASSA_BASE = (process.env.MOCK_YOOKASSA_URL || 'http://127.0.0.1:3102').replace(/\/$/, '');
 const ATOL_BASE = (process.env.MOCK_ATOL_URL || 'http://127.0.0.1:3103').replace(/\/$/, '');
 const ALFA_BASE = (process.env.MOCK_ALFA_URL || 'http://127.0.0.1:3104').replace(/\/$/, '');
+const SBER_BASE = (process.env.MOCK_SBER_URL || 'http://127.0.0.1:3105').replace(/\/$/, '');
 const TERMINAL_KEY = process.env.MOCK_TERMINAL_KEY || 'TBANKMOCKTEST';
 const TERMINAL_PASSWORD = process.env.MOCK_TERMINAL_PASSWORD || 'mockpass123';
 const FERMA_LOGIN = process.env.MOCK_FERMA_LOGIN || 'loviitest';
@@ -48,6 +51,9 @@ const ATOL_GROUP = process.env.MOCK_ATOL_GROUP || process.env.ATOL_GROUP || 'v4-
 // Альфа-Банка выдаёт индивидуально — в конфиге стенда их нет).
 const ALFA_USERNAME = process.env.MOCK_ALFA_USERNAME || process.env.ALFA_USERNAME || 'ALFAMOCKTEST';
 const ALFA_PASSWORD = process.env.MOCK_ALFA_PASSWORD || process.env.ALFA_PASSWORD || 'mockpass123';
+// Синтетические creds sber-mock; hosted owned-sandbox creds переопределяются при provision.
+const SBER_USERNAME = process.env.MOCK_SBER_USERNAME || 'SBERMOCKTEST';
+const SBER_PASSWORD = process.env.MOCK_SBER_PASSWORD || 'mockpass123';
 
 /*
  * F-33 (RFC-001 §8): прогон идёт в одноразовой песочнице, чтобы не накапливать
@@ -65,8 +71,9 @@ const SANDBOX = {
   [YOOKASSA_BASE]: { id: SANDBOX_ID, token: '', creds: null },
   [ATOL_BASE]: { id: SANDBOX_ID, token: '', creds: null },
   [ALFA_BASE]: { id: SANDBOX_ID, token: '', creds: null },
+  [SBER_BASE]: { id: SANDBOX_ID, token: '', creds: null },
 };
-const ALL_BASES = [TBANK_BASE, KASSA_BASE, YOOKASSA_BASE, ATOL_BASE, ALFA_BASE];
+const ALL_BASES = [TBANK_BASE, KASSA_BASE, YOOKASSA_BASE, ATOL_BASE, ALFA_BASE, SBER_BASE];
 
 /** Заголовки песочницы прогона; вызов может переопределить их (например, default). */
 function sandboxHeaders(baseUrl) {
@@ -152,6 +159,20 @@ function alfaApi(method, fields, headers = {}) {
     ...fields,
   });
   return httpReq(ALFA_BASE, 'POST', `/payment/rest/${method}`, params.toString(), headers);
+}
+
+/** POST /ecomm/gw/partner/api/v1/{method} с JSON и sandbox merchant creds. */
+function sberApi(method, fields = {}, headers = {}) {
+  const sbxCreds = SANDBOX[SBER_BASE].creds || {};
+  return httpReq(SBER_BASE, 'POST', `/ecomm/gw/partner/api/v1/${method}`, {
+    userName: sbxCreds.userName || SBER_USERNAME,
+    password: sbxCreds.password || SBER_PASSWORD,
+    ...fields,
+  }, headers);
+}
+
+function sberUrlForm(fields) {
+  return new URLSearchParams(fields).toString();
 }
 
 /** Выделение песочницы прогона: в owned — POST /sandboxes, в namespaces — селектор. */
@@ -538,10 +559,66 @@ async function scenario(runId) {
 
   const alfaBadAmount = (await alfaApi('register.do', { orderNumber: `${runId}-alfa-3`, amount: '100.50', returnUrl: 'https://compose.test/ok' })).json();
   check('alfa amount дробный -> errorCode 5 (копейки — целые)', Boolean(alfaBadAmount && alfaBadAmount.errorCode === 5));
+
+  // 7. Сбербанк Ecom REST: JSON transport (не форма Альфы), hosted payment/ACS,
+  // server-side orderStatus и business amounts.
+  const hSber = await httpReq(SBER_BASE, 'GET', '/health');
+  check('sber-mock /health === 200 ok (JSON REST, callback POST без подписи)',
+    hSber.status === 200 && hSber.json() && hSber.json().ok === true && hSber.json().api === 'rest-json' && hSber.json().callbackMethod === 'POST' && hSber.json().callbackSignature === 'none');
+  const oaSber = (await httpReq(SBER_BASE, 'GET', '/openapi.json')).json();
+  check('sber-mock /openapi.json — OpenAPI 3.1 с Ecom register и status routes',
+    Boolean(oaSber && oaSber.openapi === '3.1.0' && oaSber.paths['/ecomm/gw/partner/api/v1/register.do'] && oaSber.paths['/ecomm/gw/partner/api/v1/getOrderStatusExtended.do']));
+  const sberBadCreds = (await httpReq(SBER_BASE, 'POST', '/ecomm/gw/partner/api/v1/register.do', {
+    userName: 'wrong', password: 'wrong', orderNumber: `${runId}-sber-bad`, amount: 100, currency: 643, returnUrl: 'https://compose.test/sber',
+  })).json();
+  check('sber неверные userName/password -> errorCode 2', Boolean(sberBadCreds && sberBadCreds.errorCode === 2));
+
+  const sberRegRes = await sberApi('register.do', {
+    orderNumber: `${runId}-sber-1`, amount: 15000, currency: 643,
+    returnUrl: 'https://compose.test/sber/ok', dynamicCallbackUrl: '',
+  });
+  const sberReg = sberRegRes.json() || {};
+  check('sber register.do JSON -> errorCode 0 + {orderId, formUrl}',
+    sberRegRes.status === 200 && sberReg.errorCode === 0 && Boolean(sberReg.orderId) && Boolean(sberReg.formUrl));
+  const sberDuplicate = (await sberApi('register.do', {
+    orderNumber: `${runId}-sber-1`, amount: 15000, currency: 643, returnUrl: 'https://compose.test/sber/ok',
+  })).json();
+  check('sber repeated orderNumber -> errorCode 1, не replay', Boolean(sberDuplicate && sberDuplicate.errorCode === 1));
+  const sberFormUrl = new URL(sberReg.formUrl);
+  const sberForm = await httpReq(SBER_BASE, 'GET', sberFormUrl.pathname + sberFormUrl.search);
+  check('sber hosted form exposes masked official card presets, ACS is separate',
+    sberForm.status === 200 && sberForm.text.includes('220220**2424') && sberForm.text.includes('220220**8092') && !sberForm.text.includes('Пароль тестового ACS'));
+  const sberPay = await httpReq(SBER_BASE, 'POST', `/payment/${sberReg.orderId}/pay${sberFormUrl.search}`,
+    sberUrlForm({ pan: '2202205000012424', exp: '0535', cvv: '669' }));
+  check('sber frictionless card -> redirect returnUrl', sberPay.status === 302 && sberPay.headers.location === 'https://compose.test/sber/ok');
+  const sberStatus = (await sberApi('getOrderStatusExtended.do', { orderId: sberReg.orderId })).json() || {};
+  check('sber getOrderStatusExtended: orderStatus=2, amount and masked PAN (not actionCode)',
+    sberStatus.orderStatus === 2 && sberStatus.errorCode === 0 && sberStatus.actionCode === 0 && sberStatus.depositedAmount === 15000 && sberStatus.cardholderPan === '220220**2424');
+
+  const sberPreAuth = (await sberApi('registerPreAuth.do', {
+    orderNumber: `${runId}-sber-pre`, amount: 9000, currency: 643, returnUrl: 'https://compose.test/sber/pre',
+  })).json() || {};
+  check('sber registerPreAuth.do -> {orderId, formUrl}', Boolean(sberPreAuth.errorCode === 0 && sberPreAuth.orderId && sberPreAuth.formUrl));
+  const sberPreUrl = new URL(sberPreAuth.formUrl);
+  const sberChallenge = await httpReq(SBER_BASE, 'POST', `/payment/${sberPreAuth.orderId}/pay${sberPreUrl.search}`,
+    sberUrlForm({ pan: '2202205300068092', exp: '1231', cvv: '583' }));
+  const sberChallengeStatus = (await sberApi('getOrderStatusExtended.do', { orderId: sberPreAuth.orderId })).json() || {};
+  check('sber ACS challenge keeps intermediate orderStatus=5', sberChallenge.status === 200 && sberChallenge.text.includes('111111') && sberChallengeStatus.orderStatus === 5);
+  const sberAcs = await httpReq(SBER_BASE, 'POST', `/payment/${sberPreAuth.orderId}/3ds${sberPreUrl.search}`, sberUrlForm({ password: '111111' }));
+  check('sber ACS test password -> hold (302)', sberAcs.status === 302 && sberAcs.headers.location === 'https://compose.test/sber/pre');
+  const sberTooLargeDeposit = (await sberApi('deposit.do', { orderId: sberPreAuth.orderId, amount: 9001 })).json();
+  check('sber deposit > authorization -> errorCode 5', Boolean(sberTooLargeDeposit && sberTooLargeDeposit.errorCode === 5));
+  const sberDeposit = (await sberApi('deposit.do', { orderId: sberPreAuth.orderId, amount: 6000 })).json();
+  check('sber partial deposit ≤ authorization -> errorCode 0', Boolean(sberDeposit && sberDeposit.errorCode === 0));
+  const sberRefundTooLarge = (await sberApi('refund.do', { orderId: sberPreAuth.orderId, amount: 6001 })).json();
+  check('sber refund > deposited amount -> errorCode 5', Boolean(sberRefundTooLarge && sberRefundTooLarge.errorCode === 5));
+  const sberRefund = (await sberApi('refund.do', { orderId: sberPreAuth.orderId, amount: 2500 })).json();
+  const sberRefundStatus = (await sberApi('getOrderStatusExtended.do', { orderId: sberPreAuth.orderId })).json() || {};
+  check('sber partial refund -> orderStatus=4, refundedAmount=2500', sberRefund && sberRefund.errorCode === 0 && sberRefundStatus.orderStatus === 4 && sberRefundStatus.refundedAmount === 2500);
 }
 
 async function main() {
-  console.log(`\n== compose black-box selftest (${TBANK_BASE} & ${KASSA_BASE} & ${YOOKASSA_BASE} & ${ATOL_BASE} & ${ALFA_BASE}) ==\n`);
+  console.log(`\n== compose black-box selftest (${TBANK_BASE} & ${KASSA_BASE} & ${YOOKASSA_BASE} & ${ATOL_BASE} & ${ALFA_BASE} & ${SBER_BASE}) ==\n`);
   console.log(`  · одноразовая песочница прогона: ${SANDBOX_ID}`);
 
   // Базовая линия default-состояния: прогон не должен её изменить (два запуска
@@ -552,11 +629,13 @@ async function main() {
   const yookassaCounts = (j) => `payments=${j.payments},refunds=${j.refunds}`;
   const atolCounts = (j) => `documents=${j.documents},waiting=${j.waiting},callbacks=${j.callbacks}`;
   const alfaCounts = (j) => `orders=${j.orders},awaiting=${j.awaiting},callbacks=${j.callbacks}`;
+  const sberCounts = (j) => `orders=${j.orders},awaiting=${j.awaiting},callbacks=${j.callbacks}`;
   const beforeBank = (await httpReq(TBANK_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const beforeKassa = (await httpReq(KASSA_BASE, 'GET', '/healthz?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const beforeYookassa = (await httpReq(YOOKASSA_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const beforeAtol = (await httpReq(ATOL_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const beforeAlfa = (await httpReq(ALFA_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
+  const beforeSber = (await httpReq(SBER_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
 
   await provisionSandboxes();
   try {
@@ -570,6 +649,7 @@ async function main() {
   const afterYookassa = (await httpReq(YOOKASSA_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const afterAtol = (await httpReq(ATOL_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   const afterAlfa = (await httpReq(ALFA_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
+  const afterSber = (await httpReq(SBER_BASE, 'GET', '/health?sandbox=default', null, { 'X-Mock-Sandbox': 'default' })).json() || {};
   if (beforeBank.tenancy && beforeBank.tenancy !== 'off') {
     check('tbank: прогон не изменил default-счётчики (F-33)', bankCounts(beforeBank) === bankCounts(afterBank),
       `${bankCounts(beforeBank)} -> ${bankCounts(afterBank)}`);
@@ -589,6 +669,10 @@ async function main() {
   if (beforeAlfa.tenancy && beforeAlfa.tenancy !== 'off') {
     check('alfa: прогон не изменил default-счётчики (F-33)', alfaCounts(beforeAlfa) === alfaCounts(afterAlfa),
       `${alfaCounts(beforeAlfa)} -> ${alfaCounts(afterAlfa)}`);
+  }
+  if (beforeSber.tenancy && beforeSber.tenancy !== 'off') {
+    check('sber: прогон не изменил default-счётчики (F-33)', sberCounts(beforeSber) === sberCounts(afterSber),
+      `${sberCounts(beforeSber)} -> ${sberCounts(afterSber)}`);
   }
 
   console.log(`\nИТОГ compose-selftest: ${passed} passed, ${failed} failed\n`);

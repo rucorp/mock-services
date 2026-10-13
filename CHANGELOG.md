@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### Added
+- **Третий внешний банк-адаптер — Сбербанк Ecom REST v1.1.11.1 (Stage 2, #81).** Новый zero-dependency `services/sber-mock`: JSON `POST /ecomm/gw/partner/api/v1/*.do`, synthetic merchant defaults, `register`/`registerPreAuth` → hosted form + ACS `111111`, серверная сверка `orderStatus 0…6`, deposit/reverse/refund/decline и проверки сумм; TTL 20 минут, максимум три попытки. Ecom callback — unsigned JSON POST (никакого legacy Secure Payments checksum), ACK ровно 200, три попытки × 60 секунд с виртуальными часами; поддержаны callbacks операций, drop/duplicate, terminal SSRF refusal, per-sandbox scenarios/journal/clock, control-plane tokens и RFC-001 runtime.
+  Манифест `protocols/sber-ecom.json`, OpenAPI 3.1, секция `check:drift`, `test:sber` включён в `npm test` и CI, compose/include + healthcheck :3105, Docker smoke, root/service README и гайд `docs/integration/sber.md`. `paymentOrder.do` оставлен вне scope без merchant-разрешения; неполный публичный Ecom errorCode mapping задокументирован как [VERIFY]/[FORK]. Регресс/selftest: `services/sber-mock/selftest.js`.
+
 ### Fixed
 - **PG-01/PG-02 — alfa-mock: фактические креды больше не утекают (#60).**
   Hint ошибки `errorCode=2` (`register.do` и др.) называл фактические

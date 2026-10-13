@@ -11,7 +11,8 @@
  * спецификации OpenAPI 3.1 (`docs/openapi/*.openapi.json`),
  * эталонные выжимки документации (`docs/reference/**`) и фактическую
  * реализацию в `services/tbank-mock/server.js`, `services/kassa-mock/server.js`,
- * `services/atol-mock/server.js` и `services/alfa-mock/server.js`.
+ * `services/atol-mock/server.js`, `services/alfa-mock/server.js` и
+ * `services/sber-mock/server.js`.
  *
  * Запуск:
  *   node scripts/check-protocol-drift.js [--json]
@@ -372,6 +373,152 @@ function main() {
     emptyCallbackOps.length > 0 && emptyCallbackOps.every((c) => c.inServer && !c.inOpenApi),
     `операций в контроле: ${emptyCallbackOps.length}`);
 
+  // 5. Проверка Сбербанк Ecom REST (sber-ecom.json <-> server.js <-> OpenAPI <-> guide).
+  const sberManifest = readJson('protocols/sber-ecom.json');
+  const sberServerCode = readText('services/sber-mock/server.js');
+  const sberOpenApi = readJson('docs/openapi/sber-mock.openapi.json');
+  const sberGuide = readText(sberManifest.guide || 'docs/integration/sber.md');
+  const sberReadme = readText(sberManifest.readme || 'services/sber-mock/README.md');
+
+  for (const docPath of sberManifest.upstreamDocs || []) {
+    const exists = fs.existsSync(path.join(ROOT, docPath));
+    assertCheck('sber:docs', docPath, exists, exists ? 'эталонный Ecom reference найден' : 'эталонный reference отсутствует');
+  }
+
+  const sberRestPrefix = '/ecomm/gw/partner/api/v1/';
+  const sberRouteNeedle = (route) => {
+    if (route.startsWith(sberRestPrefix)) return route.slice(sberRestPrefix.length);
+    if (route === '/payment/{orderId}/pay') return 'const payMatch = p.match';
+    if (route === '/payment/{orderId}/3ds') return 'const acsMatch = p.match';
+    if (route === '/payment/{orderId}') return 'const formMatch = p.match';
+    return route;
+  };
+  const sberRouteDrift = (code, openApi, manifest) => [
+    ...(manifest.routes || []), ...(manifest.formRoutes || []), ...(manifest.mockRoutes || []),
+  ].map((route) => ({
+    route,
+    inServer: code.includes(sberRouteNeedle(route)),
+    inOpenApi: Boolean(openApi.paths && openApi.paths[route]),
+  }));
+  const sberControlRouteDrift = (code, openApi, manifest) => (manifest.mockControlRoutes || [])
+    .map((route) => ({
+      route,
+      inServer: code.includes(route),
+      inOpenApi: Boolean(openApi.paths && openApi.paths[route]),
+    }));
+  const sberCallbackOperations = (code, openApi, manifest) => ((manifest.callback || {}).operations || [])
+    .map((op) => ({
+      op,
+      inServer: code.includes(`'${op}'`),
+      inOpenApi: JSON.stringify((openApi.components || {}).schemas || {}).includes(op),
+    }));
+
+  for (const { route, inServer, inOpenApi } of sberRouteDrift(sberServerCode, sberOpenApi, sberManifest)) {
+    assertCheck('sber:route', route, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+  for (const { route, inServer, inOpenApi } of sberControlRouteDrift(sberServerCode, sberOpenApi, sberManifest)) {
+    assertCheck('sber:control-route', route, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+
+  for (const method of sberManifest.restMethods || []) {
+    const inServer = sberServerCode.includes(`'${method}'`);
+    const inOpenApi = Boolean(sberOpenApi.paths && sberOpenApi.paths[`${sberRestPrefix}${method}`]);
+    assertCheck('sber:rest-method', `${sberRestPrefix}${method}`, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+  for (const status of Object.keys(sberManifest.orderStatuses || {})) {
+    const inServer = sberServerCode.includes(`${status}: '`);
+    const inOpenApi = JSON.stringify((sberOpenApi.components || {}).schemas || {}).includes(`${status} — `);
+    assertCheck('sber:order-status', status, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+  for (const code of sberManifest.errorCodes || []) {
+    const inServer = code === 0
+      ? sberServerCode.includes('errorCode: 0')
+      : sberServerCode.includes(`${code}: {`);
+    const inOpenApi = JSON.stringify((sberOpenApi.components || {}).schemas || {}).includes('errorCode');
+    assertCheck('sber:error-code', String(code), inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+  for (const { op, inServer, inOpenApi } of sberCallbackOperations(sberServerCode, sberOpenApi, sberManifest)) {
+    assertCheck('sber:callback-operation', op, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+  for (const pan of sberManifest.testCards || []) {
+    const inServer = sberServerCode.includes(pan);
+    assertCheck('sber:test-card', pan, inServer, inServer ? 'официальный test fixture поддержан' : 'test card отсутствует в server.js');
+  }
+  for (const actionCode of sberManifest.actionCodes || []) {
+    const inServer = sberServerCode.includes(String(actionCode));
+    assertCheck('sber:action-code', String(actionCode), inServer, inServer ? 'код результата присутствует в адаптере' : 'actionCode отсутствует в server.js');
+  }
+
+  const sberInvariants = [
+    ['sber:invariant', 'Ecom REST — POST JSON по versioned API base', sberServerCode.includes("const REST_BASE = '/ecomm/gw/partner/api/v1/'") && sberServerCode.includes("req.method !== 'POST'") && sberServerCode.includes('application/json')],
+    ['sber:invariant', 'errorCode=0 не считается подтверждением оплаты', sberServerCode.includes('НЕ подтверждение оплаты') && sberServerCode.includes('orderStatus')],
+    ['sber:invariant', 'orderStatus и actionCode разделены', sberServerCode.includes('orderStatus — состояние заказа') && sberServerCode.includes('actionCode — отдельный')],
+    ['sber:invariant', 'callback Ecom — POST JSON без legacy checksum/signature', sberServerCode.includes("method: 'POST'") && sberServerCode.includes('legacy Secure Payments') && sberServerCode.includes("callbackSignature: 'none'") && !sberServerCode.includes('payload.checksum')],
+    ['sber:invariant', 'callback ACK — строго HTTP 200', sberServerCode.includes('response.statusCode === 200')],
+    ['sber:invariant', 'callback operation/status поля формируются в JSON', sberServerCode.includes('mdOrder: order.orderId') && sberServerCode.includes('operation,') && sberServerCode.includes('status,')],
+    ['sber:invariant', 'SSRF_BLOCKED терминален и без retry', sberServerCode.includes('ERR SSRF_BLOCKED') && sberServerCode.includes('терминальный отказ, без повторов')],
+    ['sber:invariant', 'max payment attempts = 3', sberServerCode.includes('const MAX_PAYMENT_ATTEMPTS = 3')],
+    ['sber:invariant', 'virtual clock применяется к order TTL и callback schedule', sberServerCode.includes('clock.now()') && sberServerCode.includes('nextAttemptAt = clock.now() + CALLBACK_RETRY_MS')],
+    ['sber:invariant', 'ACS пароль синтетический и соответствует локальному test reference', sberServerCode.includes('111111')],
+    ['sber:invariant', 'дефолтные merchant-креды помечены synthetic', sberServerCode.includes(sberManifest.testCredentials.userName) && sberServerCode.includes(sberManifest.testCredentials.password) && sberServerCode.includes('СИНТЕТИЧЕСКИЕ')],
+    ['sber:invariant', 'карточные данные остаются в masked форме вне ввода формы', sberServerCode.includes('function maskPan') && sberServerCode.includes('cardMask: null')],
+  ];
+  for (const [category, item, ok] of sberInvariants) {
+    assertCheck(category, item, Boolean(ok), ok ? 'инвариант соблюдён' : 'инвариант нарушен в server.js');
+  }
+
+  for (const [needle, label] of [
+    ['register.do', 'регистрация Ecom'],
+    ['getOrderStatusExtended.do', 'серверная сверка'],
+    ['orderStatus', 'статус заказа'],
+    ['actionCode', 'отдельный actionCode'],
+    ['errorCode=0', 'errorCode semantics'],
+    ['dynamicCallbackUrl', 'callback URL регистрации'],
+    ['HTTP 200', 'callback ACK'],
+    ['111111', 'ACS-пароль'],
+    ['1200', 'order TTL default'],
+    ['SBERMOCKTEST', 'синтетические креды'],
+    ['[VERIFY]/[FORK]', 'оговорка о неполной таблице errorCode'],
+    ['legacy Secure Payments', 'исключение legacy checksum'],
+  ]) {
+    const inGuide = sberGuide.includes(needle);
+    assertCheck('sber:guide-point', `${label} (${needle})`, inGuide, inGuide ? 'есть в docs/integration/sber.md' : 'гайд не содержит обязательную оговорку');
+  }
+
+  const sberLimits = sberManifest.limits || {};
+  assertCheck('sber:limits', `sessionTimeoutSecsDefault=${sberLimits.sessionTimeoutSecsDefault}`,
+    sberServerCode.includes(`DEFAULT_ORDER_TTL_SECS = ${sberLimits.sessionTimeoutSecsDefault}`)
+      && sberGuide.includes(String(sberLimits.sessionTimeoutSecsDefault)),
+    'TTL default совпадает в манифесте, адаптере и guide');
+  assertCheck('sber:limits', `maxPaymentAttempts=${sberLimits.maxPaymentAttempts}`,
+    sberServerCode.includes(`MAX_PAYMENT_ATTEMPTS = ${sberLimits.maxPaymentAttempts}`)
+      && sberGuide.includes(`${sberLimits.maxPaymentAttempts} попытки оплаты`),
+    'лимит попыток совпадает в манифесте, адаптере и guide');
+  assertCheck('sber:limits', `callback retry=${sberLimits.callbackAttemptsDefault}×${sberLimits.callbackRetryMsDefault}ms`,
+    sberServerCode.includes(`MOCK_SBER_CALLBACK_RETRY_MS = '${sberLimits.callbackRetryMsDefault}'`)
+      && sberServerCode.includes(`MOCK_SBER_CALLBACK_MAX_ATTEMPTS = '${sberLimits.callbackAttemptsDefault}'`)
+      && sberGuide.includes(`${sberLimits.callbackAttemptsDefault} попытки с интервалом ${sberLimits.callbackRetryMsDefault / 1000} секунд`),
+    'callback schedule совпадает в manifest, server.js и guide');
+  assertCheck('sber:limits', `currency=${sberLimits.currency}`,
+    sberServerCode.includes(`'${sberLimits.currency}'`) && sberGuide.includes(`currency=643`),
+    'только RUB/643 проверяется в адаптере и guide');
+
+  const emptySberRoutes = sberRouteDrift('', { paths: {} }, sberManifest);
+  assertCheck('sber:negative-control', 'пустой server/openapi красит все business/form/mock routes',
+    emptySberRoutes.length > 0 && emptySberRoutes.every((route) => !route.inServer && !route.inOpenApi),
+    `routes в негативном контроле: ${emptySberRoutes.length}`);
+  const emptySberControlRoutes = sberControlRouteDrift('', { paths: {} }, sberManifest);
+  assertCheck('sber:negative-control', 'пустой server/openapi красит все control routes',
+    emptySberControlRoutes.length > 0 && emptySberControlRoutes.every((route) => !route.inServer && !route.inOpenApi),
+    `control routes в негативном контроле: ${emptySberControlRoutes.length}`);
+  const emptySberCallbackOps = sberCallbackOperations(sberServerCode, { components: {} }, sberManifest);
+  assertCheck('sber:negative-control', 'пустой OpenAPI красит callback operations (server остаётся отдельно зелёным)',
+    emptySberCallbackOps.length > 0 && emptySberCallbackOps.every((entry) => entry.inServer && !entry.inOpenApi),
+    `callback operations в негативном контроле: ${emptySberCallbackOps.length}`);
+  assertCheck('sber:readme', 'сервисный README фиксирует POST JSON, unsigned callback и ограничения',
+    sberReadme.includes('application/json') && sberReadme.includes('без подписи') && sberReadme.includes('paymentOrder.do'),
+    'README должен объяснять транспорт, отсутствие подписи и границы scope');
+
   const summary = {
     ok: driftIssues.length === 0,
     checkedAt: new Date().toISOString(),
@@ -384,7 +531,7 @@ function main() {
   if (jsonOutput) {
     console.log(JSON.stringify(summary, null, 2));
   } else {
-    console.log(`\n== Protocol Drift Check (tbank-eacq + ferma-ofd + atol-online + alfa-eacq) ==`);
+    console.log(`\n== Protocol Drift Check (tbank-eacq + ferma-ofd + atol-online + alfa-eacq + sber-ecom) ==`);
     console.log(`Проверено инвариантов контракта: ${summary.totalChecks}, пройдено: ${summary.passedChecks}, расхождений: ${summary.driftCount}`);
     if (driftIssues.length > 0) {
       console.error('\nОбнаружены расхождения (drift):');
