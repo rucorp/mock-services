@@ -1,0 +1,54 @@
+
+=== P1: Кастомные креды в hint errorCode=2 (сеть) и в стартовом логе ===
+ВЕРДИКТ: не подтвердилось
+password в hint: false; userName в hint: false; креды в стартовом логе: false
+фрагмент ответа: {"errorCode":2,"errorMessage":"Неверный пароль","field":"password","hint":"password не совпадает с паролем стенда. Дефолты мока — синтетические (ALFAMOCKTEST/mockpass123 по образцу TBANKMOCKTEST; действуют, только если не переопределены env); переопределяются MOCK_ALFA_PASSWORD (в owned-песочнице — POST /sandboxes/me/reset-creds).","doc":"https://alfabank.ru/sme/payservice/internet-acquiring/docs/
+
+[P2] песочницы: A=neat-bison-67a0425ccc B=quiet-ibis-5e3282d6d3
+[P2] заказ в B: f4d33b22-ba31-48f7-b28b-c42512f0daf2 (errorCode=0)
+
+=== P2a: PA-50: владелец A читает state песочницы B (GET /mock/state?sandbox=B) ===
+ВЕРДИКТ: не подтвердилось
+status=401, заказ B в ответе: false
+фрагмент: {"errorCode":2,"errorMessage":"Доступ к песочнице «quiet-ibis-5e3282d6d3» ограничен: знание ID не является доступом","field":"X-Sandbox-Token","hint":"Передайте owner-token из ответа POST /sandboxes: Authorization: Beare
+
+=== P2b: PA-50: владелец A сбрасывает песочницу B (POST /mock/reset {sandbox:B}) ===
+ВЕРДИКТ: не подтвердилось
+reset status=401; заказ B после reset у B же: ЕЩЁ ЕСТЬ
+reset ответ: {"errorCode":2,"errorMessage":"Доступ к песочнице «quiet-ibis-5e3282d6d3» ограничен: знание ID не является доступом","field":"X-Sandbox-Token","hint":"Передайте
+
+=== P2c: PA-50: владелец A перезаписывает state песочницы B (POST /mock/state {sandbox:B}) ===
+ВЕРДИКТ: не подтвердилось
+import status=401, ответ={"errorCode":2,"errorMessage":"Доступ к песочнице «quiet-ibis-5e3282d6d3» ограничен: знание ID не является доступом","fi; заказ B2 при этом ещё в B (перезаписан): проверка ниже
+[P2c] B после импорта содержит crafted: false; заказ B2 сохранился: true
+
+=== P3: PA-51: правило сценария A срабатывает на трафике B + история A содержит orderNumber B ===
+ВЕРДИКТ: не подтвердилось
+правило A target=register: 200; register B3 errorCode=0 (6 = правило A сработало); orderNumber B3 в истории A: false
+
+=== P4: PA-01: битый %-энкод формы → 500 вместо 400 ===
+ВЕРДИКТ: ПОДТВЕРЖДЕНО (унаследовано из core)
+status=500, тело: {"errorCode":6,"errorMessage":"Внутренняя ошибка мок-стенда","hint":"Повторите запрос после паузы и сверьте состояние заказа через getOrderStatusExtended.do; ес
+
+=== P5: env-парсинг: MOCK_CALLBACK_RETRY_MS=1h и MOCK_SESSION_TIMEOUT_SECS=0 (тихий fallback) ===
+ВЕРДИКТ: не подтвердилось
+retry=3600000ms (дефект PG-05: '1h' → 1000мс, а не 3600000), session_timeout=1200s ('0' тихо → 1200)
+
+=== P6: SSRF-гард callback в hosted: приватные цели (127.0.0.1 и mapped-IPv6) не доставляются ===
+ВЕРДИКТ: ПОДТВЕРЖДЕНО: PF-01 в альфe НЕ растиражирован (гард включён)
+block_private_webhooks=true; register p6-direct errorCode=0; register p6-mapped errorCode=0; доставок на приватный приёмник: 0 (ожидалось 0)
+
+=== P7: Журнал /admin/journal не содержит password (позитивная проверка ядра) ===
+ВЕРДИКТ: ПОДТВЕРЖДЕНО: редакция работает
+body журнала: {"userName":"[REDACTED]","password":"[REDACTED]","orderNumber":"p7-j","amount":"1000","returnUrl":"https://shop.test/j"}
+
+===== СВОДКА =====
+[-] P1: Кастомные креды в hint errorCode=2 (сеть) и в стартовом логе → не подтвердилось
+[-] P2a: PA-50: владелец A читает state песочницы B (GET /mock/state?sandbox=B) → не подтвердилось
+[-] P2b: PA-50: владелец A сбрасывает песочницу B (POST /mock/reset {sandbox:B}) → не подтвердилось
+[-] P2c: PA-50: владелец A перезаписывает state песочницы B (POST /mock/state {sandbox:B}) → не подтвердилось
+[-] P3: PA-51: правило сценария A срабатывает на трафике B + история A содержит orderNumber B → не подтвердилось
+[+] P4: PA-01: битый %-энкод формы → 500 вместо 400 → ПОДТВЕРЖДЕНО (унаследовано из core)
+[-] P5: env-парсинг: MOCK_CALLBACK_RETRY_MS=1h и MOCK_SESSION_TIMEOUT_SECS=0 (тихий fallback) → не подтвердилось
+[+] P6: SSRF-гард callback в hosted: приватные цели (127.0.0.1 и mapped-IPv6) не доставляются → ПОДТВЕРЖДЕНО: PF-01 в альфe НЕ растиражирован (гард включён)
+[+] P7: Журнал /admin/journal не содержит password (позитивная проверка ядра) → ПОДТВЕРЖДЕНО: редакция работает

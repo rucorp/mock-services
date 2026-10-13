@@ -1,0 +1,13 @@
+[PB-12] песочница A=happy-yak-6eae32b949, лимит MAX_DOCUMENTS=2
+[PB-12] register #1 (pb12-o1): errorCode=0 orderId=d2e28668-e739-4626-9c6a-a30b303d95ff
+[PB-12] register #2 (pb12-o2): errorCode=0 hint={"errorCode":0,"errorMessage":"","orderId":"8d148a1c-bd65-49eb-aba7-fedc6cb40e05","formUrl":"http://localhost:0/payment/8d148a1c-bd65-49eb-a
+
+=== PB-12: MOCK_SANDBOX_MAX_DOCUMENTS=2 -> только 1 успешный register (1 заказ = 2 квот-единицы) ===
+ВЕРДИКТ: не подтвердилось
+register#1 errorCode=0; register#2 errorCode=0 (заблокирован);
+состояние A: orders=2, orderNumbers=2 -> used=4 >= limit=2
+подсказка сервера: {"errorCode":0,"errorMessage":"","orderId":"8d148a1c-bd65-49eb-aba7-fedc6cb40e05","formUrl":"http://localhost:0/payment/8d148a1c-bd65-49eb-aba7-fedc6cb40e05?sandbox=happy-yak-6eae32b949","hint":"error
+
+---- ИТОГ PB-12 ----
+До фикса (#53): один register расходует 2 единицы квоты документов (order + orderNumbers).
+Ожидание после фикса (предрегистрация): MAX_DOCUMENTS=2 допускает 2 успешных register; счётчик считает пользовательские документы, а не внутренние словари.
