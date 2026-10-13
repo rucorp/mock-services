@@ -51,8 +51,8 @@ ENV NODE_ENV=production \
 # Порт по умолчанию — банк; для кассы переопределяется MOCK_PORT=3101,
 # для ЮKassa — MOCK_PORT=3102, для АТОЛ Онлайн — MOCK_PORT=3103,
 # для Альфа-Банка — MOCK_PORT=3104, для Сбер Ecom — MOCK_PORT=3105,
-# для Первого ОФД — MOCK_PORT=3107 (3106 — ВТБ SMB).
-EXPOSE 3100 3101 3102 3103 3104 3105 3107
+# для ВТБ SMB — MOCK_PORT=3106, для Первого ОФД — MOCK_PORT=3107.
+EXPOSE 3100 3101 3102 3103 3104 3105 3106 3107
 
 VOLUME ["/data"]
 
