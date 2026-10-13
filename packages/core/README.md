@@ -32,12 +32,23 @@ Zero dependencies, Node >= 18. Self-test: `npm run test:core`.
   префикс платёжной системы, контрольная сумма Luhn) и на `Basic`/`Bearer`-токены.
 - `classifyKey(key)` → `'secret' | 'pii' | 'safe'` — класс поля по имени;
   `maskPiiValue(key, value)` — частичная маска PII.
-- `createJournal({size, baseUrl, maxEntryChars})` → `{record, list, clear}` —
+- `createJournal({size, baseUrl, maxEntryChars, sandboxScope})` →
+  `{record, list, clear, clearFor, dropScope}` —
   журнал входящих запросов для `/admin/journal`: метод, путь, ключевые поля, код
   ответа, длительность. Запись редактируется до сохранения (F-09): заголовки —
   через allowlist (`Content-Type`, `Content-Length`, `User-Agent`, `X-Mock-*`),
   тело и сырой payload — через `redactSecrets`/`redactRawBody`, длина полей и всей
-  записи ограничена.
+  записи ограничена. С `sandboxScope` (адаптеры передают
+  `() => sandboxRuntime.current()`) записи живут в разделе записи текущей
+  песочницы (PB-13, #52); без него — прежний одиночный журнал.
+- `createScenarioRegistry({clock, size, maxRules, maxRuleBytes, sandboxScope})` —
+  реестр сценариев `X-Mock-Scenario` и правил `POST /mock/scenarios` с историей
+  срабатываний. С `sandboxScope` правила и история изолированы по записи
+  песочницы (PA-51/PG-04, #52); дефолтные лимиты — 200 правил на песочницу и
+  8 KiB на правило (UTF-8 байты сериализованного JSON), превышение бросает
+  ошибку с `code` `rule_cap_exceeded`/`rule_too_large` до мутации. Повторная
+  запись с тем же `id` — update на месте. `clearRulesFor`/`clearHistoryFor`/
+  `dropScope` оперируют разделом конкретной записи песочницы.
 - `postJson(url, payload, timeoutMs, options)` — исходящий POST/GET (http/https по схеме;
   другие схемы отклоняются, редиректы не отслеживаются; для IPv6-литералов скобки
   `[...]` нормализуются перед подключением и сохраняются в заголовке `Host` — PA-25).

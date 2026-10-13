@@ -33,9 +33,6 @@ const {
   parseScenarioSpec, applyRequestChaos, createSandboxRuntime, resolveTenancyMode, parseMsOr,
 } = core;
 const log = core.createLog('yookassa-mock');
-// Журнал /v3-запросов: интегратор видит в /admin/journal, как мок понял
-// запрос и что ответил (curl-сниппеты, секреты отредактированы ядром).
-const journal = core.createJournal({ size: 200 });
 
 const {
   MOCK_HOST = '0.0.0.0',
@@ -149,6 +146,9 @@ function yookassaRetention(snapshot, ts) {
   return pruned;
 }
 
+// Дочернее состояние записи песочницы (#52): сценарии и журнал создаются
+// ниже; runtime зовёт этот hook при удалении/TTL записи, когда они уже готовы.
+let dropSandboxChildState = () => {};
 const sandboxRuntime = createSandboxRuntime({
   state: defaultState,
   persist: store.persist,
@@ -165,11 +165,15 @@ const sandboxRuntime = createSandboxRuntime({
   hostSuffix: SANDBOX_HOST_SUFFIX,
   operatorTokens: [MOCK_ADMIN_TOKEN, OPERATOR_TOKEN],
   createLimit: SANDBOX_CREATE_LIMIT,
+  onSandboxRemoved: (record) => dropSandboxChildState(record),
   log: (msg) => console.error(`[mock] ${msg}`),
 });
 
 const state = sandboxRuntime.state;
 const persist = sandboxRuntime.persist;
+
+// Журнал — per-sandbox раздел записи текущей песочницы (PB-13, #52).
+const journal = core.createJournal({ size: 200, sandboxScope: () => sandboxRuntime.current() });
 
 /* --------------------------------------------------- креды песочницы (F-12) */
 
@@ -190,7 +194,14 @@ const clock = core.createVirtualClock({
   setStateOffset: (v) => { state.clockOffsetMs = v; persist(); },
 });
 
-const scenarios = core.createScenarioRegistry({ clock });
+const scenarios = core.createScenarioRegistry({ clock, sandboxScope: () => sandboxRuntime.current() });
+dropSandboxChildState = (record) => { scenarios.dropScope(record); journal.dropScope(record); };
+const clearSandboxChildState = (record) => {
+  if (!record) return;
+  scenarios.clearRulesFor(record);
+  scenarios.clearHistoryFor(record);
+  journal.clearFor(record);
+};
 
 /* ------------------------------------------------------------ test cards */
 
@@ -1800,9 +1811,7 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
     if (!resetName.ok) {
       return sendSandboxError(res, { ok: false, kind: resetName.error || 'unauthorized', sandbox: resetName.sandbox || target });
     }
-    scenarios.clearRules();
-    scenarios.clearHistory();
-    journal.clear();
+    clearSandboxChildState(sandboxRuntime.find(target));
     return sendJson(res, { ok: true, sandbox: resetName.sandbox || target });
   }
 
@@ -1867,7 +1876,7 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
         const rule = scenarios.addRule(body || {});
         return sendJson(res, { ok: true, rule });
       } catch (e) {
-        return sendJson(res, yerr('invalid_request', { description: e.message, hint: 'Поля: scenario (обязательно), target ("*"), match, times/persistent.' }), 400);
+        return sendJson(res, yerr(e && e.code ? e.code : 'invalid_request', { description: e.message, hint: 'Поля: scenario (обязательно), target ("*"), match, times/persistent.' }), 400);
       }
     }
     if (req.method === 'DELETE') {

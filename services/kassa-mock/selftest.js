@@ -298,6 +298,54 @@ async function main() {
     && chaosHealthAfter.ofdQueueCount === chaosHealthBefore.ofdQueueCount
     && chaosHealthAfter.fnUsed === chaosHealthBefore.fnUsed);
 
+  // #52 PA-51/PB-13/PG-09: сценарии, история и журнал — per-sandbox.
+  {
+    const isoA = { 'X-Mock-Sandbox': 'sc52-a' };
+    const isoB = { 'X-Mock-Sandbox': 'sc52-b' };
+    const tokA = (await request('POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' }, isoA)).json().token;
+    const tokB = (await request('POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' }, isoB)).json().token;
+    await request('POST', '/mock/scenarios', { scenario: 'fail', target: 'sell', persistent: true }, isoA);
+    const seenByB = await request('GET', '/mock/scenarios', null, isoB);
+    check('#52: правила песочницы A не видны B', seenByB.json().rules.length === 0 && seenByB.json().history.length === 0);
+    const sellB = await request('POST', `/possystem/v1/Main/sell?token=${tokB}`, { ...sellBody, external_id: 'sc52-b-1' }, isoB);
+    check('#52: правило A не влияет на документ B (uuid выдан)', sellB.status === 200 && Boolean(sellB.json().uuid), sellB.text.slice(0, 120));
+    const histB0 = await request('GET', '/mock/scenarios', null, isoB);
+    check('#52: срабатывания правила A в истории B нет', histB0.json().history.length === 0);
+    await request('POST', `/possystem/v1/Main/sell?token=${tokB}`, { ...sellBody, external_id: 'sc52-b-hist' }, { ...isoB, 'X-Mock-Scenario': 'webhook-drop' });
+    await request('POST', `/possystem/v1/Main/sell?token=${tokA}`, { ...sellBody, external_id: 'sc52-a-1' }, isoA);
+    const histA = await request('GET', '/mock/scenarios', null, isoA);
+    check('#52: история B (external_id) не видна A', !JSON.stringify(histA.json().history).includes('sc52-b-hist'));
+    const journalA = await request('GET', '/admin/journal', null, isoA);
+    const journalB = await request('GET', '/admin/journal', null, isoB);
+    check('#52 PB-13: журналы A и B не пересекаются', journalA.text.includes('sc52-a-1') && !journalA.text.includes('sc52-b-1')
+      && journalB.text.includes('sc52-b-1') && !journalB.text.includes('sc52-a-1'));
+    await request('POST', '/mock/scenarios', { id: 'sc52-own', scenario: 'webhook-drop', persistent: true }, isoB);
+    await request('POST', '/mock/reset', {}, isoA);
+    const afterResetB = await request('GET', '/mock/scenarios', null, isoB);
+    const journalAfterB = await request('GET', '/admin/journal', null, isoB);
+    check('#52 PG-09/PB-13: reset A не стирает правила и журнал B', afterResetB.json().rules.some((r) => r.id === 'sc52-own')
+      && journalAfterB.text.includes('sc52-b-1'));
+    const tooBig = await request('POST', '/mock/scenarios', { scenario: 'fail', match: { pad: 'x'.repeat(9000) } }, isoA);
+    check('#52: правило >8 KiB -> 400 + code rule_too_large', tooBig.status === 400 && tooBig.json().code === 'rule_too_large', tooBig.text.slice(0, 140));
+    await request('POST', '/mock/scenarios', { id: 'sc52-upd', scenario: 'fail', persistent: true }, isoA);
+    await request('POST', '/mock/scenarios', { id: 'sc52-upd', scenario: 'webhook-drop', persistent: true }, isoA);
+    const updBig = await request('POST', '/mock/scenarios', { id: 'sc52-upd', scenario: 'fail', match: { pad: 'x'.repeat(9000) } }, isoA);
+    const updList = await request('GET', '/mock/scenarios', null, isoA);
+    check('#52: update по id; oversized update -> 400 без затирания старого', updBig.status === 400
+      && updBig.json().code === 'rule_too_large' && updList.json().rules.filter((r) => r.id === 'sc52-upd').length === 1
+      && updList.json().rules.find((r) => r.id === 'sc52-upd').scenario === 'webhook-drop');
+    await request('DELETE', '/mock/scenarios', null, isoA);
+    let capStatus = 0;
+    for (let i = 0; i < 200; i += 1) {
+      capStatus = (await request('POST', '/mock/scenarios', { id: `sc52-cap-${i}`, scenario: 'fail', persistent: true }, isoA)).status;
+    }
+    const capOver = await request('POST', '/mock/scenarios', { id: 'sc52-cap-200', scenario: 'fail' }, isoA);
+    const capList = await request('GET', '/mock/scenarios', null, isoA);
+    check('#52: cap 200; 201-е -> 400 + code rule_cap_exceeded', capStatus === 200 && capOver.status === 400
+      && capOver.json().code === 'rule_cap_exceeded' && capList.json().rules.length === 200);
+    await request('DELETE', '/mock/scenarios', null, isoB);
+  }
+
   // 13. stats кассы
   r = await request('GET', `/possystem/v1/stats/cashboxes/extended?token=${token}`);
   check('stats: Готова к работе', r.json().Status === 'Success' && r.json().Data[0].kktState === 'Готова к работе');

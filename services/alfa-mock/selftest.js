@@ -791,6 +791,56 @@ async function main() {
     const rulesDel = await request(port, 'DELETE', '/mock/scenarios');
     check('DELETE /mock/scenarios очищает правила', rulesDel.statusCode === 200 && rulesDel.json().rules.length === 0);
 
+    // #52 PA-51/PG-04/PB-13/PG-09: сценарии, история и журнал — per-sandbox.
+    {
+      const isoA = { 'X-Mock-Sandbox': 'sc52-a' };
+      const isoB = { 'X-Mock-Sandbox': 'sc52-b' };
+      await request(port, 'POST', '/mock/scenarios', { scenario: 'fail', target: 'register', persistent: true }, isoA);
+      const seenByB = await request(port, 'GET', '/mock/scenarios', undefined, isoB);
+      check('#52: правила песочницы A не видны B', seenByB.json().rules.length === 0 && seenByB.json().history.length === 0);
+      const orderB = nextOrderNumber('sc52b');
+      const regB = await rest(port, 'register.do', { ...CREDS, orderNumber: orderB, amount: '2000', returnUrl: 'https://shop.test/ok' }, isoB);
+      check('#52 PG-04: правило A не срабатывает на register B', (regB.json() || {}).errorCode === 0, regB.body.slice(0, 120));
+      const orderB2 = nextOrderNumber('sc52bh');
+      await rest(port, 'register.do', { ...CREDS, orderNumber: orderB2, amount: '2000', returnUrl: 'https://shop.test/ok' }, { ...isoB, 'X-Mock-Scenario': 'webhook-drop' });
+      const orderA = nextOrderNumber('sc52a');
+      await rest(port, 'register.do', { ...CREDS, orderNumber: orderA, amount: '2000', returnUrl: 'https://shop.test/ok' }, isoA);
+      const histA = await request(port, 'GET', '/mock/scenarios', undefined, isoA);
+      const histB = await request(port, 'GET', '/mock/scenarios', undefined, isoB);
+      check('#52: история B не видна A, своя история у B есть', histB.json().history.length >= 1
+        && !JSON.stringify(histA.json().history).includes(orderB2));
+      const journalA = await request(port, 'GET', '/admin/journal', undefined, isoA);
+      const journalB = await request(port, 'GET', '/admin/journal', undefined, isoB);
+      check('#52 PB-13: журнал A видит только свои записи, B — свои', journalA.body.includes(orderA)
+        && !journalA.body.includes(orderB) && journalB.body.includes(orderB) && !journalB.body.includes(orderA));
+      await request(port, 'POST', '/mock/scenarios', { id: 'sc52-own', scenario: 'webhook-drop', persistent: true }, isoB);
+      await request(port, 'POST', '/mock/reset', {}, isoA);
+      const afterResetA = await request(port, 'GET', '/mock/scenarios', undefined, isoA);
+      const afterResetB = await request(port, 'GET', '/mock/scenarios', undefined, isoB);
+      const journalAfterB = await request(port, 'GET', '/admin/journal', undefined, isoB);
+      check('#52 PG-09/PB-13: reset A очистил только A, правила/история/журнал B целы', afterResetA.json().rules.length === 0
+        && afterResetB.json().rules.some((r) => r.id === 'sc52-own') && journalAfterB.body.includes(orderB));
+      const tooBig = await request(port, 'POST', '/mock/scenarios', { scenario: 'fail', match: { pad: 'x'.repeat(9000) } }, isoA);
+      check('#52: правило >8 KiB -> 400 + code rule_too_large', tooBig.statusCode === 400 && tooBig.json().code === 'rule_too_large', tooBig.body.slice(0, 140));
+      await request(port, 'POST', '/mock/scenarios', { id: 'sc52-upd', scenario: 'fail', persistent: true }, isoA);
+      await request(port, 'POST', '/mock/scenarios', { id: 'sc52-upd', scenario: 'webhook-drop', persistent: true }, isoA);
+      const updBig = await request(port, 'POST', '/mock/scenarios', { id: 'sc52-upd', scenario: 'fail', match: { pad: 'x'.repeat(9000) } }, isoA);
+      const updList = await request(port, 'GET', '/mock/scenarios', undefined, isoA);
+      check('#52: update правила по id; oversized update -> 400 без затирания старого', updBig.statusCode === 400
+        && updBig.json().code === 'rule_too_large' && updList.json().rules.filter((r) => r.id === 'sc52-upd').length === 1
+        && updList.json().rules.find((r) => r.id === 'sc52-upd').scenario === 'webhook-drop');
+      await request(port, 'DELETE', '/mock/scenarios', undefined, isoA);
+      let capStatus = 0;
+      for (let i = 0; i < 200; i += 1) {
+        capStatus = (await request(port, 'POST', '/mock/scenarios', { id: `sc52-cap-${i}`, scenario: 'fail', persistent: true }, isoA)).statusCode;
+      }
+      const capOver = await request(port, 'POST', '/mock/scenarios', { id: 'sc52-cap-200', scenario: 'fail' }, isoA);
+      const capList = await request(port, 'GET', '/mock/scenarios', undefined, isoA);
+      check('#52: cap 200 правил на песочницу; 201-е -> 400 + code rule_cap_exceeded', capStatus === 200
+        && capOver.statusCode === 400 && capOver.json().code === 'rule_cap_exceeded' && capList.json().rules.length === 200);
+      await request(port, 'DELETE', '/mock/scenarios', undefined, isoB);
+    }
+
     /* --------------------------------------- журнал, редакция, PAN (F-09/10) */
     console.log('— журнал /payment/rest: curl form-urlencoded, креды редактированы, PAN не хранится');
     const journalRes = await request(port, 'GET', '/admin/journal');

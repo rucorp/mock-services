@@ -170,6 +170,8 @@ DX-слой мока (не часть протокола ЮKassa): каждое 
 Правила без заголовка — `POST /mock/scenarios {scenario, target, match, times}`.
 История триггеров — `GET /mock/scenarios`.
 
+Правила, история срабатываний и журнал `/admin/journal` принадлежат текущей песочнице (#52): другие песочницы их не видят и не очищают, `POST /mock/reset` действует только на целевую песочницу. Лимиты: до 200 правил на песочницу и до 8 KiB на правило (превышение — HTTP 400 с `code` `rule_cap_exceeded`/`rule_too_large`).
+
 ## Виртуальные часы и TTL
 
 - холд `waiting_for_capture`: 7 дней (`MOCK_CAPTURE_TTL_MS`, как в докам для

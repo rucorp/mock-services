@@ -762,6 +762,62 @@ process.env.MOCK_RETRY_MS = '1000';
   }
 
   // 28. Покрытие /e2c/v2/* и /av/v1/* (рекомендация аудита A-22)
+  // 27d. #52 PA-51/PB-13/PG-09: сценарии, история и журнал — per-sandbox.
+  {
+    const J = (r) => JSON.parse(r.body);
+    const isoA = { 'X-Mock-Sandbox': 'sc52-a' };
+    const isoB = { 'X-Mock-Sandbox': 'sc52-b' };
+    await request(mockPort, 'POST', '/mock/scenarios', { scenario: 'webhook-drop', target: 'init', persistent: true }, isoA);
+    const seenByB = J(await request(mockPort, 'GET', '/mock/scenarios', undefined, isoB));
+    assert.deepStrictEqual(seenByB.rules, [], '#52: правила песочницы A не видны B');
+    assert.deepStrictEqual(seenByB.history, [], '#52: история песочницы A не видна B');
+    const initB = J(await apiWithHeaders(mockPort, 'Init', { Amount: '10000', OrderId: 'sc52-b-order', CreateDealWithType: 'NN', PayType: 'O' }, isoB));
+    assert.strictEqual(initB.Success, true, '#52: трафик B проходит без правила A');
+    const histB0 = J(await request(mockPort, 'GET', '/mock/scenarios', undefined, isoB));
+    assert.deepStrictEqual(histB0.history, [], '#52: правило A не сработало на Init B (история B пуста)');
+    const initB2 = J(await apiWithHeaders(mockPort, 'Init', { Amount: '10000', OrderId: 'sc52-b-hist', CreateDealWithType: 'NN', PayType: 'O' }, { ...isoB, 'X-Mock-Scenario': 'webhook-drop' }));
+    assert.strictEqual(initB2.Success, true);
+    const initA = J(await apiWithHeaders(mockPort, 'Init', { Amount: '10000', OrderId: 'sc52-a-order', CreateDealWithType: 'NN', PayType: 'O' }, isoA));
+    assert.strictEqual(initA.Success, true);
+    const histA = J(await request(mockPort, 'GET', '/mock/scenarios', undefined, isoA));
+    assert.ok(!JSON.stringify(histA.history).includes('sc52-b-hist'), '#52: история B (orderId) не видна A');
+    const journalA = await request(mockPort, 'GET', '/admin/journal', undefined, isoA);
+    const journalB = await request(mockPort, 'GET', '/admin/journal', undefined, isoB);
+    assert.ok(journalA.body.includes('sc52-a-order') && !journalA.body.includes('sc52-b-order'), '#52 PB-13: журнал A — только свои записи');
+    assert.ok(journalB.body.includes('sc52-b-order') && !journalB.body.includes('sc52-a-order'), '#52 PB-13: журнал B — только свои записи');
+    await request(mockPort, 'POST', '/mock/scenarios', { id: 'sc52-own', scenario: 'webhook-drop', persistent: true }, isoB);
+    await request(mockPort, 'POST', '/mock/reset', {}, isoA);
+    const afterResetA = J(await request(mockPort, 'GET', '/mock/scenarios', undefined, isoA));
+    const afterResetB = J(await request(mockPort, 'GET', '/mock/scenarios', undefined, isoB));
+    const journalAfterB = await request(mockPort, 'GET', '/admin/journal', undefined, isoB);
+    assert.deepStrictEqual(afterResetA.rules, [], '#52 PG-09: reset A очистил свои правила');
+    assert.ok(afterResetB.rules.some((r) => r.id === 'sc52-own'), '#52 PG-09: reset A не стёр правила B');
+    assert.ok(journalAfterB.body.includes('sc52-b-order'), '#52 PB-13: reset A не стёр журнал B');
+    const tooBig = await request(mockPort, 'POST', '/mock/scenarios', { scenario: 'fail', match: { pad: 'x'.repeat(9000) } }, isoA);
+    assert.strictEqual(tooBig.statusCode, 400, '#52: правило >8 KiB -> 400');
+    assert.strictEqual(J(tooBig).code, 'rule_too_large', '#52: code rule_too_large в теле ошибки');
+    await request(mockPort, 'POST', '/mock/scenarios', { id: 'sc52-upd', scenario: 'fail', persistent: true }, isoA);
+    await request(mockPort, 'POST', '/mock/scenarios', { id: 'sc52-upd', scenario: 'webhook-drop', persistent: true }, isoA);
+    const updBig = await request(mockPort, 'POST', '/mock/scenarios', { id: 'sc52-upd', scenario: 'fail', match: { pad: 'x'.repeat(9000) } }, isoA);
+    const updList = J(await request(mockPort, 'GET', '/mock/scenarios', undefined, isoA));
+    assert.strictEqual(updBig.statusCode, 400, '#52: oversized update -> 400');
+    assert.strictEqual(J(updBig).code, 'rule_too_large');
+    assert.strictEqual(updList.rules.filter((r) => r.id === 'sc52-upd').length, 1, '#52: update по id не плодит дублей');
+    assert.strictEqual(updList.rules.find((r) => r.id === 'sc52-upd').scenario, 'webhook-drop', '#52: старое правило цело после oversized update');
+    await request(mockPort, 'DELETE', '/mock/scenarios', undefined, isoA);
+    let capStatus = 0;
+    for (let i = 0; i < 200; i += 1) {
+      capStatus = (await request(mockPort, 'POST', '/mock/scenarios', { id: `sc52-cap-${i}`, scenario: 'fail', persistent: true }, isoA)).statusCode;
+    }
+    const capOver = await request(mockPort, 'POST', '/mock/scenarios', { id: 'sc52-cap-200', scenario: 'fail' }, isoA);
+    const capList = J(await request(mockPort, 'GET', '/mock/scenarios', undefined, isoA));
+    assert.strictEqual(capStatus, 200, '#52: 200 правил проходят');
+    assert.strictEqual(capOver.statusCode, 400, '#52: 201-е правило -> 400');
+    assert.strictEqual(J(capOver).code, 'rule_cap_exceeded', '#52: code rule_cap_exceeded в теле ошибки');
+    assert.strictEqual(capList.rules.length, 200, '#52: после отказа по cap осталось 200 правил');
+    await request(mockPort, 'DELETE', '/mock/scenarios', undefined, isoB);
+  }
+
   {
     // Выплата идёт по сделке с балансом (F-17): заводим и пополняем её
     const covDealId = await fundedDeal(mockPort, 60000, 'order-e2c-fund');

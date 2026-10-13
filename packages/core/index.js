@@ -659,6 +659,35 @@ function fitJournalEntry(entry, maxChars) {
 }
 
 /**
+ * Разделы дочернего состояния по записи песочницы (PA-51/PB-13, #52):
+ * ключ WeakMap — сам объект записи песочницы из `createSandboxRuntime`
+ * (`sandboxRuntime.current()`), а НЕ её id. Поэтому удаление/TTL записи
+ * уносит раздел вместе с записью, а пересоздание песочницы с тем же id
+ * получает новый объект записи и пустой раздел — наследования между
+ * арендаторами нет. Без scope (standalone/lone-sandbox) — один fallback-
+ * раздел: поведение прежнее. На диск разделы не пишутся.
+ */
+function createScopedPartitions(factory) {
+  const partitions = new WeakMap();
+  const fallback = factory();
+  const isScope = (scope) => Boolean(scope) && (typeof scope === 'object' || typeof scope === 'function');
+  function partition(scopeOrResolver) {
+    const scope = typeof scopeOrResolver === 'function' ? scopeOrResolver() : scopeOrResolver;
+    if (!isScope(scope)) return fallback;
+    let part = partitions.get(scope);
+    if (!part) {
+      part = factory();
+      partitions.set(scope, part);
+    }
+    return part;
+  }
+  function drop(scope) {
+    if (isScope(scope)) partitions.delete(scope);
+  }
+  return { partition, drop };
+}
+
+/**
  * Журнал входящих запросов (спека §2: «журнал запросов»): последние N
  * обращений к API с методом, путём, ключевыми полями, кодом ответа,
  * длительностью и готовой командой curl для воспроизведения.
@@ -667,11 +696,21 @@ function fitJournalEntry(entry, maxChars) {
  * сырой payload через `redactSecrets`, значения и вся запись ограничены по
  * длине. Журнал живёт в памяти процесса, но показывается в /admin (JSON и
  * HTML) и попадает в баг-репорты, поэтому секретов в нём быть не должно.
+ * PB-13 (#52): при заданном `sandboxScope` записи разделены по песочницам.
  */
-function createJournal({ size = 200, baseUrl = '', maxEntryChars = JOURNAL_LIMITS.entry } = {}) {
-  const entries = [];
+function createJournal({ size = 200, baseUrl = '', maxEntryChars = JOURNAL_LIMITS.entry, sandboxScope = null } = {}) {
+  const scoped = createScopedPartitions(() => ({ entries: [] }));
   const KNOWN_ENTRY_KEYS = new Set(['at', 'method', 'path', 'status', 'ms', 'body', 'headers', 'rawBody', 'baseUrl', 'curl']);
   function record(entry = {}) {
+    // Запись оформляется в момент ответа; если песочница истекла/удалена во
+    // время await (PG-10), её журнал уже унесён вместе с записью — запись
+    // пропускаем, а не роняем ответ 410 и не пишем в чужой/default раздел.
+    try {
+      scoped.partition(sandboxScope);
+    } catch (e) {
+      if (e && e.code === 'SANDBOX_EXPIRED') return;
+      throw e;
+    }
     const safePath = redactQuerySecrets(truncateText(redactSecretsInText(entry.path || '/'), JOURNAL_LIMITS.path));
     const safeBaseUrl = entry.baseUrl ? redactQuerySecrets(truncateText(entry.baseUrl, JOURNAL_LIMITS.path)) : '';
     const safeHeaders = filterJournalHeaders(entry.headers, { maxValueLength: JOURNAL_LIMITS.headerValue });
@@ -707,10 +746,19 @@ function createJournal({ size = 200, baseUrl = '', maxEntryChars = JOURNAL_LIMIT
     }
     safeEntry.curl = safeCurl;
 
+    const { entries } = scoped.partition(sandboxScope);
     entries.push(fitJournalEntry(safeEntry, maxEntryChars));
     if (entries.length > size) entries.splice(0, entries.length - size);
   }
-  return { record, list: () => entries.slice(), clear: () => { entries.length = 0; } };
+  return {
+    record,
+    list: () => scoped.partition(sandboxScope).entries.slice(),
+    clear: () => { scoped.partition(sandboxScope).entries.length = 0; },
+    // Очистка/удаление раздела конкретной записи песочницы (reset целевого
+    // арендатора и жизненный цикл записи), а не текущей из контекста.
+    clearFor: (scope) => { scoped.partition(scope).entries.length = 0; },
+    dropScope: (scope) => scoped.drop(scope),
+  };
 }
 
 /**
@@ -1691,33 +1739,82 @@ function parseScenarioSpec(raw) {
  * программируемых правил (`POST /mock/scenarios`), плюс ведёт журнал
  * срабатываний для отладки в CI.
  */
-function createScenarioRegistry({ clock, size = 200 } = {}) {
+const SCENARIO_RULE_LIMITS = { maxRules: 200, maxRuleBytes: 8192 };
+
+function createScenarioRegistry({
+  clock,
+  size = 200,
+  maxRules = SCENARIO_RULE_LIMITS.maxRules,
+  maxRuleBytes = SCENARIO_RULE_LIMITS.maxRuleBytes,
+  sandboxScope = null,
+} = {}) {
   const nowIsoFn = () => (clock && typeof clock.iso === 'function' ? clock.iso() : new Date().toISOString());
-  const rules = [];
-  const history = [];
-  let seq = 1;
+  const ruleCap = Number.isFinite(Number(maxRules)) ? Math.max(0, Math.floor(Number(maxRules))) : SCENARIO_RULE_LIMITS.maxRules;
+  const ruleByteCap = Number.isFinite(Number(maxRuleBytes)) ? Math.max(0, Math.floor(Number(maxRuleBytes))) : SCENARIO_RULE_LIMITS.maxRuleBytes;
+  // PA-51/PG-04 (#52): правила и история живут в разделе записи текущей
+  // песочницы; без sandboxScope — прежний одиночный раздел (lone-sandbox).
+  const scoped = createScopedPartitions(() => ({ rules: [], history: [], seq: 1 }));
+  const currentPartition = () => scoped.partition(sandboxScope);
+
+  function limitError(code, message, limit, actual) {
+    const error = new Error(message);
+    error.code = code;
+    error.limit = limit;
+    error.actual = actual;
+    return error;
+  }
 
   function addRule(rule = {}) {
-    const scenario = String(rule.scenario || '').trim();
+    const input = rule && typeof rule === 'object' ? rule : {};
+    const scenario = String(input.scenario || '').trim();
     if (!scenario) throw new Error('Поле scenario обязательно (например, "chargeback-after:7d", "webhook-drop", "fail")');
+    // Лимит размера: сериализованный JSON правила в UTF-8 байтах; проверка
+    // ДО мутации и на create, и на update (повторный POST с тем же id).
+    let serialized;
+    try {
+      serialized = JSON.stringify(input);
+    } catch {
+      throw new Error('Правило сценариев должно сериализоваться в JSON');
+    }
+    const ruleBytes = Buffer.byteLength(serialized || '', 'utf8');
+    if (ruleBytes > ruleByteCap) {
+      throw limitError(
+        'rule_too_large',
+        `Правило сценариев превышает лимит размера: лимит ${ruleByteCap} байт, получено ${ruleBytes} байт`,
+        ruleByteCap,
+        ruleBytes,
+      );
+    }
+    const part = currentPartition();
+    const requestedId = input.id ? String(input.id) : null;
+    const existingIndex = requestedId ? part.rules.findIndex((r) => r.id === requestedId) : -1;
+    if (existingIndex < 0 && part.rules.length >= ruleCap) {
+      throw limitError(
+        'rule_cap_exceeded',
+        `Превышен лимит правил сценариев на песочницу: лимит ${ruleCap}, сейчас ${part.rules.length}`,
+        ruleCap,
+        part.rules.length,
+      );
+    }
     const entry = {
-      id: rule.id ? String(rule.id) : `sc-${seq++}`,
-      target: rule.target ? String(rule.target).toLowerCase() : '*',
-      match: rule.match && typeof rule.match === 'object' ? { ...rule.match } : null,
+      id: requestedId || `sc-${part.seq++}`,
+      target: input.target ? String(input.target).toLowerCase() : '*',
+      match: input.match && typeof input.match === 'object' ? { ...input.match } : null,
       scenario,
-      times: rule.times === null || rule.times === undefined || rule.times === -1
-        ? (rule.persistent ? null : 1)
-        : Math.max(1, parseInt(rule.times, 10) || 1),
-      createdAt: nowIsoFn(),
+      times: input.times === null || input.times === undefined || input.times === -1
+        ? (input.persistent ? null : 1)
+        : Math.max(1, parseInt(input.times, 10) || 1),
+      createdAt: existingIndex >= 0 ? part.rules[existingIndex].createdAt : nowIsoFn(),
     };
-    rules.push(entry);
+    if (existingIndex >= 0) part.rules[existingIndex] = entry;
+    else part.rules.push(entry);
     return entry;
   }
 
-  function matchRule(target, context = {}) {
+  function matchRuleIn(part, target, context = {}) {
     const normTarget = String(target || '*').toLowerCase();
-    for (let i = 0; i < rules.length; i += 1) {
-      const r = rules[i];
+    for (let i = 0; i < part.rules.length; i += 1) {
+      const r = part.rules[i];
       if (r.target !== '*' && r.target !== normTarget) continue;
       if (r.match) {
         let ok = true;
@@ -1731,21 +1828,30 @@ function createScenarioRegistry({ clock, size = 200 } = {}) {
       }
       if (typeof r.times === 'number') {
         r.times -= 1;
-        if (r.times <= 0) rules.splice(i, 1);
+        if (r.times <= 0) part.rules.splice(i, 1);
       }
       return r;
     }
     return null;
   }
 
-  function recordTrigger(event = {}) {
+  function matchRule(target, context = {}) {
+    return matchRuleIn(currentPartition(), target, context);
+  }
+
+  function recordTriggerIn(part, event = {}) {
     const entry = { at: nowIsoFn(), ...event };
-    history.push(entry);
-    if (history.length > size) history.splice(0, history.length - size);
+    part.history.push(entry);
+    if (part.history.length > size) part.history.splice(0, part.history.length - size);
     return entry;
   }
 
+  function recordTrigger(event = {}) {
+    return recordTriggerIn(currentPartition(), event);
+  }
+
   function resolve({ header = '', bodyScenario = '', target = '*', context = {} } = {}) {
+    const part = currentPartition();
     const parts = [];
     let source = null;
     if (header && String(header).trim()) {
@@ -1756,14 +1862,14 @@ function createScenarioRegistry({ clock, size = 200 } = {}) {
       parts.push(String(bodyScenario).trim());
       source = source ? `${source}+body` : 'body';
     }
-    const matchedRule = matchRule(target, context);
+    const matchedRule = matchRuleIn(part, target, context);
     if (matchedRule) {
       parts.push(matchedRule.scenario);
       source = source ? `${source}+rule:${matchedRule.id}` : `rule:${matchedRule.id}`;
     }
     const spec = parseScenarioSpec(parts.join(','));
     if (spec.items.length) {
-      recordTrigger({
+      recordTriggerIn(part, {
         scenario: spec.raw,
         source,
         target,
@@ -1776,11 +1882,11 @@ function createScenarioRegistry({ clock, size = 200 } = {}) {
   }
 
   function clearRules() {
-    rules.length = 0;
+    currentPartition().rules.length = 0;
   }
 
   function clearHistory() {
-    history.length = 0;
+    currentPartition().history.length = 0;
   }
 
   return {
@@ -1788,10 +1894,16 @@ function createScenarioRegistry({ clock, size = 200 } = {}) {
     matchRule,
     resolve,
     recordTrigger,
-    listRules: () => rules.slice(),
-    listHistory: () => history.slice(),
+    listRules: () => currentPartition().rules.slice(),
+    listHistory: () => currentPartition().history.slice(),
     clearRules,
     clearHistory,
+    // Операции над разделом конкретной записи песочницы (reset целевого
+    // арендатора и жизненный цикл записи), а не текущей из контекста.
+    clearRulesFor: (scope) => { scoped.partition(scope).rules.length = 0; },
+    clearHistoryFor: (scope) => { scoped.partition(scope).history.length = 0; },
+    dropScope: (scope) => scoped.drop(scope),
+    limits: { maxRules: ruleCap, maxRuleBytes: ruleByteCap, historySize: size },
     parseScenarioSpec,
   };
 }
@@ -2187,6 +2299,7 @@ function createSandboxRuntime({
   log = () => {},
   now = () => Date.now(),
   saveDelayMs = 150,
+  onSandboxRemoved = null,
 } = {}) {
   if (!isPlainObject(state)) throw new Error('createSandboxRuntime: state должен быть JSON-объектом');
   const tenancy = ['off', 'namespaces', 'owned'].includes(mode) ? mode : 'namespaces';
@@ -2257,12 +2370,24 @@ function createSandboxRuntime({
     return result;
   }
 
+  // Дочернее per-sandbox состояние (сценарии/журнал, #52) привязано к записи:
+  // удаление записи обязано уносить её разделы, без сирот в памяти процесса.
+  function notifySandboxRemoved(rec) {
+    if (typeof onSandboxRemoved !== 'function' || !rec) return;
+    try {
+      onSandboxRemoved(rec);
+    } catch (e) {
+      log(`sandbox child-state cleanup failed (${rec.id}): ${e.message}`);
+    }
+  }
+
   function removeRecord(id) {
     const rec = sandboxes.get(sanitizeSandboxId(id));
     if (!rec || rec.isDefault) return { ok: false, error: rec && rec.isDefault ? 'default-sandbox' : 'not-found', removed: null };
     sandboxes.delete(rec.id);
     if (activeId === rec.id) activeId = 'default';
     flushRegistry();
+    notifySandboxRemoved(rec);
     return { ok: true, removed: rec.id };
   }
 
@@ -2903,6 +3028,7 @@ function createSandboxRuntime({
       if (rec.expiresAt && rec.expiresAt <= ts) {
         sandboxes.delete(rec.id);
         if (activeId === rec.id) activeId = 'default';
+        notifySandboxRemoved(rec);
         log(`sandbox ${rec.id} expired (TTL) and removed`);
         expired += 1;
         continue;
@@ -3226,6 +3352,7 @@ module.exports = {
   parseMsOr,
   parseScenarioSpec,
   createScenarioRegistry,
+  SCENARIO_RULE_LIMITS,
   checkAdminAuth,
   checkControlAccess,
   createCsrfToken,
