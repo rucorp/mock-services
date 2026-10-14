@@ -25,6 +25,16 @@ mock-services — **тестовый стенд**. Он эмулирует ба�
 | Публичный демо-стенд | `MOCK_HOSTED=1` (fail-closed управляющей поверхности и SSRF-политика по умолчанию), операторский и админский токены, изоляция песочниц (см. `docs/rfc/RFC-001-multi-tenant-sandboxes.md`), rate limit, TTL состояния, egress-фильтр, мониторинг |
 | CI-прогоны | Отдельный инстанс на job, `MOCK_STATE_FILE` во временной директории |
 
+**Контейнерный харденинг (MS-04).** Все три compose-файла запускают сервисы с
+`init: true`, `read_only: true`, `tmpfs: ["/tmp"]`, `cap_drop: ["ALL"]`,
+`security_opt: ["no-new-privileges:true"]` и `pids_limit: 256`: запись возможна
+только в volume `/data` (состояние) и tmpfs `/tmp`, capabilities не нужны
+(порты 3100+ непривилегированные, runtime-пользователь UID 10001). Запуская
+образ своими командами `docker run`, повторяйте те же флаги. По SIGTERM/SIGINT
+(в том числе `docker stop`) сервис сбрасывает отложенные записи состояния и
+выходит с кодом 0 — см. раздел «Контейнерный харденинг и graceful shutdown» в
+[`README.md`](README.md).
+
 Доступ к управляющей поверхности (F-07):
 
 - `/mock/*` (`sandboxes`, `reset`, `state`, `time`, `scenarios`, `verify-merchant`),

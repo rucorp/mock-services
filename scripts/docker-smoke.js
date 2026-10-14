@@ -17,7 +17,12 @@
  *   2. процессы идут от непривилегированного UID 10001 — F-36;
  *   3. persist/restore переживает --read-only rootfs с volume /data: Init
  *      до рестарта виден после рестарта — F-36;
- *   4. healthcheck продолжает работать при --read-only rootfs — F-35/F-36.
+ *   4. healthcheck продолжает работать при --read-only rootfs — F-35/F-36;
+ *   5. MS-04: контейнер с полным набором харденинг-флагов compose
+ *      (--init --read-only --tmpfs /tmp --cap-drop ALL --security-opt
+ *      no-new-privileges --pids-limit 256) здоров, по SIGTERM (`docker stop`)
+ *      выходит сам с кодом 0 не дольше 2 с, а отложенная (debounced) запись
+ *      состояния песочницы переживает рестарт того же контейнера.
  *
  * Zero dependencies. Нужен docker CLI и демон. Код возврата 0 — всё зелёное.
  */
@@ -35,6 +40,7 @@ const NAME_VTB = `${PREFIX}-vtb`;
 const NAME_FIRST_OFD = `${PREFIX}-first-ofd`;
 const NAME_KONTUR_OFD = `${PREFIX}-kontur-ofd`;
 const NAME_RO = `${PREFIX}-ro`;
+const NAME_HARDENED = `${PREFIX}-hardened`;
 const VOLUME = `${PREFIX}-data`;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -43,7 +49,7 @@ function docker(args) {
   return execFileSync('docker', args, { encoding: 'utf8' }).trim();
 }
 
-function request(port, method, p, body) {
+function request(port, method, p, body, headers = {}) {
   return new Promise((resolve, reject) => {
     const data = body === undefined ? null : JSON.stringify(body);
     const req = http.request({
@@ -51,7 +57,10 @@ function request(port, method, p, body) {
       port,
       path: p,
       method,
-      headers: data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {},
+      headers: {
+        ...(data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}),
+        ...headers,
+      },
     }, (res) => {
       let out = '';
       res.on('data', (c) => { out += c; });
@@ -62,6 +71,32 @@ function request(port, method, p, body) {
     if (data) req.write(data);
     req.end();
   });
+}
+
+/**
+ * Host-порт опубликованного порта контейнера. У эфемерного маппинга
+ * (`-p 127.0.0.1::3100`) порт выделяется при КАЖДОМ старте контейнера, поэтому
+ * после `docker start`/`docker restart` его обязательно читать заново: старый
+ * порт после рестарта отдаёт ECONNREFUSED (реальный отказ CI-прогона MS-04).
+ */
+function hostPort(name, containerPort) {
+  const format = `{{(index (index .NetworkSettings.Ports "${containerPort}/tcp") 0).HostPort}}`;
+  const raw = docker(['inspect', '--format', format, name]);
+  if (!/^\d+$/.test(raw)) throw new Error(`контейнер ${name}: порт ${containerPort}/tcp не опубликован (${raw})`);
+  return Number(raw);
+}
+
+/** HTTP-запрос с повторами: контейнер уже healthy, но маппинг порта может «доехать». */
+async function requestRetry(port, method, p, body, headers = {}, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      return await request(port, method, p, body, headers);
+    } catch (e) {
+      if (Date.now() >= deadline) throw e;
+      await sleep(500);
+    }
+  }
 }
 
 async function waitForHealth(name, timeoutMs = 45000) {
@@ -92,7 +127,7 @@ function assertEqual(actual, expected, message) {
 }
 
 function cleanup() {
-  for (const name of [NAME_TBANK, NAME_KASSA, NAME_SBER, NAME_VTB, NAME_FIRST_OFD, NAME_KONTUR_OFD, NAME_RO]) {
+  for (const name of [NAME_TBANK, NAME_KASSA, NAME_SBER, NAME_VTB, NAME_FIRST_OFD, NAME_KONTUR_OFD, NAME_RO, NAME_HARDENED]) {
     try { docker(['rm', '-f', name]); } catch { /* не создан */ }
   }
   try { docker(['volume', 'rm', '-f', VOLUME]); } catch { /* не создан */ }
@@ -153,7 +188,7 @@ async function main() {
   if (!Object.hasOwn(exposed, '3108/tcp')) throw new Error('Dockerfile не публикует EXPOSE 3108');
   docker(['run', '-d', '--name', NAME_KONTUR_OFD, '-p', '127.0.0.1::3108', IMAGE, 'node', 'services/kontur-ofd-mock/server.js']);
   await waitForHealth(NAME_KONTUR_OFD);
-  const konturPort = Number(docker(['inspect', '--format', '{{(index (index .NetworkSettings.Ports "3108/tcp") 0).HostPort}}', NAME_KONTUR_OFD]));
+  const konturPort = hostPort(NAME_KONTUR_OFD, 3108);
   assertEqual((await request(konturPort, 'GET', '/health')).statusCode, 200, 'kontur-ofd-mock /health');
   const konturApi = await request(konturPort, 'GET', '/openapi.json');
   assertEqual(JSON.parse(konturApi.body).openapi, '3.1.0', 'kontur-ofd-mock OpenAPI в image');
@@ -200,6 +235,61 @@ async function main() {
     throw new Error(`состояние не пережило рестарт (persist/restore): ${snapshot.body.slice(0, 500)}`);
   }
   console.log('[smoke] read-only rootfs: persist/restore ✅');
+
+  // 5. MS-04: харденинг compose + graceful shutdown.
+  //    Тот же образ, но все флаги, которые compose ставит сервисам:
+  //    init (tini как PID 1), read-only rootfs, tmpfs /tmp, снятые capabilities,
+  //    no-new-privileges и лимит PID. Сервис обязан остаться рабочим, а SIGTERM
+  //    от `docker stop` — дать самостоятельный exit 0 ≤ 2 с и не потерять
+  //    отложенную (debounced, окно 150 мс) запись состояния песочницы.
+  console.log('[smoke] MS-04: харденинг (init/read_only/tmpfs/cap_drop/no-new-privileges/pids_limit) + SIGTERM');
+  docker([
+    'run', '-d', '--name', NAME_HARDENED,
+    '--init', '--read-only', '--tmpfs', '/tmp',
+    '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true', '--pids-limit', '256',
+    '-v', `${VOLUME}:/data`,
+    // Эфемерный host-порт: фиксированные 390x на разделяемом раннере могут
+    // быть заняты (PC-12) — порт читаем из inspect, как у kontur-ofd выше.
+    '-p', '127.0.0.1::3100',
+    // Свой state-файл: не пересекаемся с read-only контейнером выше (у него
+    // /data/state.json), рестарт проверяет именно отложенную запись песочницы.
+    '-e', 'MOCK_STATE_FILE=/data/hardened-state.json',
+    '-e', 'MOCK_STRICT_TOKEN=false',
+    IMAGE,
+  ]);
+  await waitForHealth(NAME_HARDENED);
+  let hardenedPort = hostPort(NAME_HARDENED, 3100);
+  // Запись в именованную песочницу: её реестр сбрасывается debounce'ом, поэтому
+  // SIGTERM отправляется сразу после ответа Init — до истечения окна 150 мс.
+  const hardenedInit = await requestRetry(hardenedPort, 'POST', '/v2/Init',
+    { TerminalKey: 'TBANKMOCKTEST', Amount: '1000', OrderId: 'smoke-sigterm-1' },
+    { 'X-Mock-Sandbox': 'smoke-sigterm' });
+  const hardenedInitJson = JSON.parse(hardenedInit.body);
+  if (hardenedInitJson.Success !== true) {
+    throw new Error(`MS-04: Init в харденированном контейнере не прошёл: ${hardenedInit.body}`);
+  }
+  const stopStarted = Date.now();
+  docker(['stop', '--timeout', '3', NAME_HARDENED]);
+  const stopMs = Date.now() - stopStarted;
+  const hardenedExit = Number(docker(['inspect', '--format', '{{.State.ExitCode}}', NAME_HARDENED]));
+  assertEqual(hardenedExit, 0, 'MS-04: docker stop (SIGTERM) -> exit code 0');
+  if (stopMs > 2000) {
+    throw new Error(`MS-04: контейнер остановился за ${stopMs} мс (> 2000): SIGTERM обрабатывается не сразу`);
+  }
+  console.log(`[smoke] MS-04: docker stop -> exit 0 за ${stopMs} мс ✅`);
+  // Рестарт того же контейнера с тем же volume: отложенная запись на месте.
+  docker(['start', NAME_HARDENED]);
+  await waitForHealth(NAME_HARDENED);
+  // Эфемерный host-порт выделяется при каждом старте: после рестарта он другой,
+  // поэтому читаем его заново, а не переиспользуем до-reстартный (CI MS-04).
+  hardenedPort = hostPort(NAME_HARDENED, 3100);
+  const hardenedState = JSON.parse((await requestRetry(hardenedPort, 'GET', '/mock/state?sandbox=smoke-sigterm')).body);
+  const hardenedInner = (hardenedState.state && hardenedState.state.state) || hardenedState.state || {};
+  const restored = Object.values(hardenedInner.payments || {}).some((p) => p.orderId === 'smoke-sigterm-1');
+  if (!restored) {
+    throw new Error(`MS-04: отложенная запись не пережила SIGTERM+рестарт: ${JSON.stringify(hardenedState).slice(0, 400)}`);
+  }
+  console.log('[smoke] MS-04: отложенная запись пережила SIGTERM/рестарт ✅');
 
   console.log(`\nIMAGE SMOKE PASSED ✅ (${IMAGE})`);
 }

@@ -26,6 +26,11 @@
 #      переменными контура. Переменные окружения потребителя (`TBANK_*`, `FERMA_*`,
 #      `YOOKASSA_*`, `ATOL_*`, `ALFA_*`) сознательно НЕ подхватываются (MS-02):
 #      исключены коллизии с env реальных интеграций потребителя.
+#   6. MS-04: контейнеры харденированы (init, read_only, tmpfs /tmp, cap_drop ALL,
+#      security_opt no-new-privileges, pids_limit 256). Единственное записываемое
+#      место — volume /data (MOCK_STATE_FILE, реестр песочниц), лог — stdout;
+#      SIGTERM/SIGINT обрабатывает общий graceful shutdown ядра, отложенные
+#      (debounced) записи состояния сбрасываются на диск до выхода.
 #
 # Подключение в docker-compose.staging-extras.yml / docker-compose.dev.yml:
 #   include:
@@ -79,6 +84,14 @@ services:
     labels:
       caddy: "${MOCK_TBANK_CADDY_DOMAIN:-}"
       caddy.reverse_proxy: "{{upstreams 3100}}"
+    # MS-04: контейнерный харденинг. Root filesystem только для чтения,
+    # единственная запись — volume /data (state/receipts), /tmp — tmpfs.
+    init: true
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
     mem_limit: "${MOCK_MEM_LIMIT:-128m}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3100,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
@@ -131,6 +144,14 @@ services:
     labels:
       caddy: "${MOCK_KASSA_CADDY_DOMAIN:-}"
       caddy.reverse_proxy: "{{upstreams 3101}}"
+    # MS-04: контейнерный харденинг. Root filesystem только для чтения,
+    # единственная запись — volume /data (state/receipts), /tmp — tmpfs.
+    init: true
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
     mem_limit: "${MOCK_MEM_LIMIT:-128m}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3101,path:'/healthz'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
@@ -181,6 +202,14 @@ services:
     labels:
       caddy: "${MOCK_YOOKASSA_CADDY_DOMAIN:-}"
       caddy.reverse_proxy: "{{upstreams 3102}}"
+    # MS-04: контейнерный харденинг. Root filesystem только для чтения,
+    # единственная запись — volume /data (state/receipts), /tmp — tmpfs.
+    init: true
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
     mem_limit: "${MOCK_MEM_LIMIT:-128m}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3102,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
@@ -234,6 +263,14 @@ services:
     labels:
       caddy: "${MOCK_ATOL_CADDY_DOMAIN:-}"
       caddy.reverse_proxy: "{{upstreams 3103}}"
+    # MS-04: контейнерный харденинг. Root filesystem только для чтения,
+    # единственная запись — volume /data (state/receipts), /tmp — tmpfs.
+    init: true
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
     mem_limit: "${MOCK_MEM_LIMIT:-128m}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3103,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
@@ -294,6 +331,14 @@ services:
     labels:
       caddy: "${MOCK_ALFA_CADDY_DOMAIN:-}"
       caddy.reverse_proxy: "{{upstreams 3104}}"
+    # MS-04: контейнерный харденинг. Root filesystem только для чтения,
+    # единственная запись — volume /data (state/receipts), /tmp — tmpfs.
+    init: true
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
     mem_limit: "${MOCK_MEM_LIMIT:-128m}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3104,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
@@ -347,6 +392,14 @@ services:
     labels:
       caddy: "${MOCK_SBER_CADDY_DOMAIN:-}"
       caddy.reverse_proxy: "{{upstreams 3105}}"
+    # MS-04: контейнерный харденинг. Root filesystem только для чтения,
+    # единственная запись — volume /data (state/receipts), /tmp — tmpfs.
+    init: true
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
     mem_limit: "${MOCK_MEM_LIMIT:-128m}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3105,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
@@ -401,6 +454,14 @@ services:
     labels:
       caddy: "${MOCK_VTB_CADDY_DOMAIN:-}"
       caddy.reverse_proxy: "{{upstreams 3106}}"
+    # MS-04: контейнерный харденинг. Root filesystem только для чтения,
+    # единственная запись — volume /data (state/receipts), /tmp — tmpfs.
+    init: true
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
     mem_limit: "${MOCK_MEM_LIMIT:-128m}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3106,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
@@ -457,6 +518,14 @@ services:
     labels:
       caddy: "${MOCK_FIRST_OFD_CADDY_DOMAIN:-}"
       caddy.reverse_proxy: "{{upstreams 3107}}"
+    # MS-04: контейнерный харденинг. Root filesystem только для чтения,
+    # единственная запись — volume /data (state/receipts), /tmp — tmpfs.
+    init: true
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
     mem_limit: "${MOCK_MEM_LIMIT:-128m}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3107,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
@@ -505,6 +574,14 @@ services:
     labels:
       caddy: "${MOCK_KONTUR_OFD_CADDY_DOMAIN:-}"
       caddy.reverse_proxy: "{{upstreams 3108}}"
+    # MS-04: контейнерный харденинг. Root filesystem только для чтения,
+    # единственная запись — volume /data (state/receipts), /tmp — tmpfs.
+    init: true
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
     mem_limit: "${MOCK_MEM_LIMIT:-128m}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3108,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]

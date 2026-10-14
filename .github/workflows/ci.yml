@@ -110,6 +110,31 @@ jobs:
           jq -e 'any(.services["tbank-mock"].ports[]; .host_ip == "127.0.0.1" and .target == 3100) and any(.services["kassa-mock"].ports[]; .host_ip == "127.0.0.1" and .target == 3101)' /tmp/mock-compose-default.json
           MOCK_TBANK_BIND_IP=0.0.0.0 MOCK_KASSA_BIND_IP=0.0.0.0 docker compose config --format json > /tmp/mock-compose-network.json
           jq -e 'any(.services["tbank-mock"].ports[]; .host_ip == "0.0.0.0" and .target == 3100) and any(.services["kassa-mock"].ports[]; .host_ip == "0.0.0.0" and .target == 3101)' /tmp/mock-compose-network.json
+      - name: Проверка контейнерного харденинга (MS-04) во всех трёх compose
+        run: |
+          # MS-04: каждый сервис любого compose обязан иметь полный набор
+          # (init/read_only/tmpfs /tmp/cap_drop ALL/no-new-privileges/pids_limit);
+          # отсутствие любого ключа — красный шаг.
+          assert_hardening() {
+            if jq -e 'all(.services[];
+              (.init == true)
+              and (.read_only == true)
+              and (((.tmpfs // []) | tostring | contains("/tmp")))
+              and ((.cap_drop // []) | index("ALL"))
+              and ((.security_opt // []) | index("no-new-privileges:true"))
+              and (.pids_limit == 256))' "$1" > /dev/null; then
+              echo "$2: харденинг OK"
+            else
+              echo "ОШИБКА: $2 — не у всех сервисов init/read_only/tmpfs/cap_drop/no-new-privileges/pids_limit"
+              exit 1
+            fi
+          }
+          docker compose config --format json > /tmp/mock-compose-hardening.json
+          assert_hardening /tmp/mock-compose-hardening.json docker-compose.yml
+          docker compose -f docker-compose.include.yml --profile mock config --format json > /tmp/mock-compose-include-hardening.json
+          assert_hardening /tmp/mock-compose-include-hardening.json docker-compose.include.yml
+          docker compose -f docker-compose.staging.yml config --format json > /tmp/mock-compose-staging-hardening.json
+          assert_hardening /tmp/mock-compose-staging-hardening.json docker-compose.staging.yml
       - name: Сборка образа
         run: docker build -t mock-services:local .
       - name: "Image smoke (F-35/F-36): непривилегированный запуск, healthcheck tbank+kassa, persist/restore при --read-only"

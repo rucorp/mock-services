@@ -381,14 +381,10 @@ const sweep = setInterval(() => sandboxRuntime.sweep(), core.parseMsOr(env.MOCK_
 sweep.unref();
 server.on('close', () => { clearInterval(sweep); sandboxRuntime.flush(); });
 if (require.main === module) {
-  const shutdown = () => {
-    sandboxRuntime.flush(); // Сохранить отложенные namespace/owned записи до SIGTERM.
-    server.close(() => process.exit(0));
-    server.closeAllConnections?.();
-    setTimeout(() => process.exit(0), 1000).unref();
-  };
-  process.once('SIGTERM', shutdown);
-  process.once('SIGINT', shutdown);
+  // MS-04: локальный SIGTERM/SIGINT-блок заменён общим хелпером ядра
+  // (flush → server.close → closeAllConnections → exit 0, fallback 1 с);
+  // поведение прежнее, но обработчик теперь один на все сервисы.
+  core.installGracefulShutdown({ server, flush: () => sandboxRuntime.flush(), log: console.log });
   server.listen(PORT, env.MOCK_HOST || '0.0.0.0', () => {
     console.log(`kontur-ofd-mock listening on :${server.address().port}; credentials only via env/owned sandbox (hidden)`);
   });

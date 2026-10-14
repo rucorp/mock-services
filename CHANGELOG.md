@@ -10,6 +10,23 @@ SPDX-License-Identifier: Apache-2.0
 ## [Unreleased]
 
 ### Added
+- **MS-04, #110: graceful shutdown всех девяти сервисов + контейнерный харденинг.**
+  Ядро: `installGracefulShutdown({server, flush, log})` — по SIGTERM/SIGINT
+  синхронно сбрасываются отложенные (debounced) записи (`sandboxRuntime.flush()`
+  и состояние сервиса), закрываются listener и соединения, процесс выходит 0;
+  страховочный таймер — 1 с, повторный сигнал ничего не перезапускает. Все девять
+  адаптеров переведены на общий хелпер (kontur-ofd — вместо локального блока,
+  поведение прежнее). Во всех трёх compose (`docker-compose.yml`,
+  `docker-compose.include.yml`, `docker-compose.staging.yml`) каждый сервис
+  получил `init: true`, `read_only: true`, `tmpfs: ["/tmp"]`,
+  `cap_drop: ["ALL"]`, `security_opt: ["no-new-privileges:true"]`,
+  `pids_limit: 256` — запись остаётся только в volume `/data`, лог — stdout.
+  Регрессы: в selftest'ах tbank-mock (SIGTERM) и kassa-mock (SIGINT) —
+  «отложенная запись → сигнал → рестарт с тем же state-файлом → данные на месте»;
+  в `scripts/docker-smoke.js` — контейнер с полным набором compose-флагов:
+  `docker stop` даёт exit 0 не дольше 2 с, отложенная запись переживает рестарт.
+  CI: шаг проверки харденинга всех сервисов трёх compose через
+  `docker compose config`.
 - **PD-02, #74:** env `MOCK_SANDBOX_MAX_STATE_BYTES` во всех 9 адаптерах
   (пусто сохраняет прежний per-sandbox дефолт) и глобальный JSON-бюджет
   `globalMaxStateBytes` / `MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES`: 64 МиБ по

@@ -22,6 +22,10 @@
 # (см. «Обновление базового образа» в CONTRIBUTING.md); пустой MOCK_STAGING_IMAGE_DIGEST=
 # снимает pin. Токены администратора/оператора задаются ПЕРЕД первым запуском
 # на общем хосте — после старта состояние уже записано в volume.
+#
+# MS-04: контейнеры харденированы (init, read_only, tmpfs /tmp, cap_drop ALL,
+# no-new-privileges, pids_limit 256): запись — только в volume /data, лог — stdout;
+# SIGTERM/SIGINT (docker compose stop/restart) не теряют отложенное состояние.
 
 services:
   tbank-mock:
@@ -59,6 +63,14 @@ services:
     labels:
       caddy: "${MOCK_TBANK_CADDY_DOMAIN:-}"
       caddy.reverse_proxy: "{{upstreams 3100}}"
+    # MS-04: контейнерный харденинг. Root filesystem только для чтения,
+    # единственная запись — volume /data (state/receipts), /tmp — tmpfs.
+    init: true
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
     mem_limit: "${MOCK_MEM_LIMIT:-128m}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3100,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
@@ -104,6 +116,14 @@ services:
     labels:
       caddy: "${MOCK_KASSA_CADDY_DOMAIN:-}"
       caddy.reverse_proxy: "{{upstreams 3101}}"
+    # MS-04: контейнерный харденинг. Root filesystem только для чтения,
+    # единственная запись — volume /data (state/receipts), /tmp — tmpfs.
+    init: true
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
     mem_limit: "${MOCK_MEM_LIMIT:-128m}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3101,path:'/healthz'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
