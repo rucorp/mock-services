@@ -61,7 +61,7 @@
   "files": [
     "packages",
     "services",
-    "scripts",
+    "scripts/docker-healthcheck.js",
     "protocols",
     "docker-compose.include.yml",
     "docs/integration",
