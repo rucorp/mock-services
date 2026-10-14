@@ -1,0 +1,103 @@
+SZ wave-#97 проба kontur-ofd-mock (Контур.ОФД read-only) — предрегистрация SZ + сигнал 6165122182. server.js: /tmp/w97-tree/services/kontur-ofd-mock/server.js
+server.js exists: true
+
+=== K1: auth — два уровня доступа (Sid + API key) ===
+  PASS K1a правильные креды: 200 + {Sid} — status=200 sidLen=48
+  PASS K1b неверный пароль: 401 errorCodeId=401002 — status=401 code=401002
+  PASS K1b неверный login: 401 401002 — status=401
+  PASS K1c без Sid и ключа: 401 401002 (получить новую сессию) — status=401 code=401002
+  PASS K1c только ApiKey без Sid: 401 401002 — status=401
+  PASS K1d только Sid без ключа: 401 401003 — status=401 code=401003
+  PASS K1d неверный ключ: 401 401003 (не путать с 401002) — status=401 hint=Передайте выданный X-Kontur-Ofd-ApiKey; 
+  PASS K1e Sid + ApiKey: 200 — status=200
+  PASS K1e коды ошибок несут errorCodeId (ориентир, не errorCode) — keys=errorCodeId,message,field,hint,doc
+
+=== K3: organizations ===
+  PASS K3a только доступные организации (org-restricted скрыт из списка) — len=1 first=org-demo
+  PASS K3a поля id/inn/kpp/name, без служебного accessible — keys=id,inn,kpp,name
+
+=== K4: cashboxes (+403/404) ===
+  PASS K4a org-demo: 1 доступная касса regNumber=...0001 — len=1 reg=0000000000000001
+  PASS K4a поля кассы: модель/ФН/адреса/период доступа — keys=regNumber,model,fiscalDriveNumber,address,addresses,accessPeriod
+  PASS K4b организация без согласия: 403 (знание ID ≠ доступ) — status=403 code=403
+  PASS K4b неизвестная организация: 404 — status=404
+  PASS K4c касса без согласия: 403 — status=403
+  PASS K4c неизвестная касса: 404 — status=404
+
+=== K5: documents за дату (+types, пустой день) ===
+  PASS K5a демо-каталог за 2026-10-11: 12 ФД — len=12
+  PASS K5b все 10 типов из среза присутствуют — types=10
+  PASS K5c types=receipt: 3 чека (один возврат) — len=3 returns=1
+  PASS K5c types списком через запятую: 4 — len=4
+  PASS K5d неизвестный type: 400 field=types — status=400 field=types
+  PASS K5e пустой день: 200 + пустой список (не ошибка) — len=0
+  PASS K5f невозможная дата (2026-02-30): 400 — status=400
+
+=== K6: by-period — пагинация (≤1000, paging.nextOffset, [FORK] offset) ===
+  PASS K6a страница 1: 5 ФД + paging.nextOffset=5 — len=5 next=5
+  PASS K6a страница 2: 5 ФД + next=10 — len=5 next=10
+  PASS K6a страница 3: 2 ФД + next=null (терминальный курсор) — len=2 next=null
+  PASS K6b обход страницами: без пересечений и потерь (12 уникальных) — unique=12/12
+  PASS K6b ASC-порядок по date сохранён — date0=2026-10-11T12:00:00Z dateLast=2026-10-11T12:09:00Z
+  PASS K6c без offset/limit: 12 ФД + next=null (дефолт 1000) — len=12
+  PASS K6c limit=1000 (максимум): 12 + null — len=12
+  PASS K6d limit=0 и limit=1001: 400 — status=400/400
+  PASS K6e [FORK] currentOffset: 400 с подсказкой про offset — status=400 msg=[FORK] Используйте offset, не currentOffset
+  PASS K6f пустой период: 200 {documents:[], nextOffset:null} (не ошибка) — len=0
+  PASS K6g dateFrom>dateTo: 400 — status=400
+  PASS K6g нечитаемая дата: 400 — status=400
+  PASS K6h фильтр types в периоде: openShift+closeShift = 2 — len=2
+
+=== K7: документ по ID ===
+  PASS K7a receipt по ID: 200, id/fiscalDocumentNumber/fiscalSign/operationType — status=200 fdn=51 op=1
+  PASS K7b возврат прихода: operationType=2 — status=200 op=2
+  PASS K7c неизвестный documentId: 404 — status=404
+
+=== K8: суммы в целых копейках ===
+  PASS K8a totalSum/cashSum/electronicSum — целые копейки — total=12345 cash=0 ecash=12345
+  PASS K8b items[].price/sum — копейки (контраст с банками-рублями) — item0={"name":"Тестовый товар","price":12345,"quantity":1,"sum":12345}
+
+=== K2: Sid TTL на виртуальных часах (30 дней) ===
+  PASS K2a Sid жив до сдвига: 200 — status=200
+  PASS K2b сдвиг +31d принят — now=1794652253142
+  PASS K2c Sid истёк: 401 errorCodeId=401002 («получить новую сессию») — status=401 code=401002
+  PASS K2d повторный authenticate-by-pass: новый Sid — sid2!==sid1: true
+  PASS K2e новый Sid рабочий: 200 — status=200
+
+=== K9: write-путь не моделируется (405/404) ===
+  PASS K9a POST на read-маршрут: 405 (метод не поддерживается) — status=405
+  PASS K9b POST документа (фискализация): 405 — создание чека не моделируется — status=405
+  PASS K9c несуществующий write-маршрут: 404 «write API не моделируется» — status=404 msg=Маршрут не найден; write API не моделируется
+
+=== K10: сценарии (duplicate до пагинации / fail / http-504) ===
+  PASS K10a duplicate: страница сохраняет лимит 5 (повтор до пагинации) — len=5
+  PASS K10b duplicate без лимита: 13 строк (12+повтор первой) — len=13 dup=true
+  PASS K10c сценарий fail: 500 — status=500
+  PASS K10d сценарий http-504: 504 — status=504
+
+=== K11: журнал без секретов ===
+  PASS K11a журнал читаем (entries без admin-token в namespaces) — entries=42
+  PASS K11b журнал не содержит пароль/Sid/API-key — секретов нет
+  PASS K11c записи — at/method/path/status/ms, body/headers пустые, curl без секретов и без query-login — entry0={"at":"2026-10-14T10:30:53.110Z","method":"POST","path":"/auth/authenticate-by-pass","status":200,"ms":2,"body":{},"headers":{},"curl":"curl
+
+=== K12: изоляция песочниц / «знание ID ≠ доступ» ===
+  PASS K12a sandbox B: Sid выдан — status=200
+  PASS K12b Sid песочницы B на дефолтной: 401 401002 (сессии изолированы) — status=401 code=401002
+  PASS K12c владелец внутри B читает свои данные: 200 — status=200
+  PASS K12d знание documentId не даёт доступа при отсутствии прав: 403/404 на чужих объектах — doc=200 (org-demo доступен владельцу; org-restricted — 403, K4b)
+
+=== legB: owned-режим (MOCK_HOSTED=1) ===
+  PASS B1 POST /sandboxes: 201 + ownerToken + сгенерированные креды — status=201 keys=id,ownerToken,creds,expiresAt,url
+  PASS B2 creds песочницы: auth (с owner-заголовками) → Sid — status=200 sidLen=48
+  PASS B3 владелец: auth.sid + ApiKey + X-Mock-Sandbox + X-Sandbox-Token → 200 — status=200 len=1
+  PASS B4 без X-Sandbox-Token (только знание sandbox id): 401 — status=401 msg=Sandbox: unauthorized; знание ID не является доступом
+  PASS B5 битый X-Sandbox-Token: 401 (знание ID ≠ доступ) — status=401
+  PASS B6 без Sid (owner-token сам по себе не авторизация данных): 401 401002 — status=401 code=401002
+  PASS B7 /sandboxes/me не раскрывает креды — status=200 keys=id,active,default,owned,createdAt,updatedAt,expiresAt,documents
+  PASS B8 экспорт state не раскрывает Sid — status=200
+  PASS B9 rotation кредов отзывает Sid (после — старый Sid 401) — status=200
+  PASS B9b старый Sid после rotation: 401 401002 — status=401
+
+================ ИТОГ ================
+PASSED: 71
+FAILED: 0
