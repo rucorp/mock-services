@@ -7,9 +7,18 @@ SPDX-License-Identifier: Apache-2.0
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версии — [SemVer](https://semver.org/lang/ru/).
 
-## [Unreleased]
+## [0.7.0] — 2026-10-14
 
 ### Added
+- **Самодостаточный стейджинг-стенд «банк + касса», #107.** Новый
+  `docker-compose.staging.yml`: tbank-mock (:3100, `/health`) +
+  kassa-mock/Ferma (:3101, `/healthz`) из опубликованного образа GHCR,
+  закреплённого дайджестом, — без клонирования репозитория и сборки
+  (`curl` файла + `docker compose up -d`). Только `MOCK_*`-переменные
+  с синтетическими дефолтами (без fallback на env потребителя), bind
+  127.0.0.1 по умолчанию, volume, healthcheck, mem_limit, опциональные
+  caddy-лейблы. Файл добавлен в `files` npm-артефакта; README — секция
+  «стенд одной командой».
 - **Контур.ОФД — read/reconciliation, Stage 2, #97.** Девятый сервис
   `kontur-ofd-mock` на :3108: plaintext auth → Sid + API key, организации,
   кассы, фискальные документы за дату/период и по ID; копейки, пагинация
@@ -56,6 +65,13 @@ SPDX-License-Identifier: Apache-2.0
   `services/first-ofd-mock/selftest.js` (94 проверки).
 
 ### Changed
+- **Runtime-образ без dev-скриптов, #106.** В Dockerfile из `scripts/`
+  копируется только `docker-healthcheck.js` (нужен `HEALTHCHECK`);
+  `check-protocol-drift`, `check-docs-links`, `compose-selftest`,
+  `docker-smoke`, `sync-upstream` — CI-утилиты и в образ не попадают
+  (синхронно `files` в package.json). Selftest'ы, `protocols/`,
+  `docs/integration`, `docs/openapi` остаются: их гоняет CI внутри
+  образа и читают потребители.
 - **CI: джоб `docker` переведён на self-hosted раннер (`vars.CI_RUNNER`, лейбл
   `rucorp-ci`) с порт-ремапом 3910–3917 (#103).** На разделяемом self-hosted хосте
   (CHUWI) фиксированные порты 3100/3101 заняты dev-стендом lovii-core, из-за чего
