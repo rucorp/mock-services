@@ -119,7 +119,7 @@ FERMA_CALLBACK_SECRET=<секрет>
 | `MOCK_VALIDATE_RECEIPTS` | `true` | проверять инварианты чека |
 | `MOCK_GROUPS` | — (любая) | список разрешённых групп кассы, напр. `Main,Shop-1` |
 | `MOCK_CALLBACK_RETRY_MS` / `MOCK_CALLBACK_MAX_ATTEMPTS` | `10000` / `24` | политика доставки callback'ов |
-| `MOCK_PUBLIC_BASE_URL` | `http://localhost:3101` | база для `ofd_receipt_url` (виден покупателю!) |
+| `MOCK_PUBLIC_BASE_URL` | `http://localhost:${MOCK_KASSA_HOST_PORT:-3101}` | база для `ofd_receipt_url` (виден покупателю!) |
 | `MOCK_AGENT_LINE` / `MOCK_AGENT_INN` | «ТЕСТОВАЯ КАССА (МОК)» / `7800000000` | шапка ленты чека (без бренда владельца стенда) |
 | `MOCK_BLOCK_PRIVATE_WEBHOOKS` | `false` (в `MOCK_HOSTED=1` — `true`) | не отправлять callback'и на приватные адреса и имена, которые в них резолвятся (`1`/`true`; `0`/`false` выключает явно) |
 | `MOCK_OPERATOR_TOKEN` | — | токен управляющей поверхности: `/mock/*`, смены ККТ, `/fn/state`, `/ofd/*` (fallback — `MOCK_ADMIN_TOKEN`) |

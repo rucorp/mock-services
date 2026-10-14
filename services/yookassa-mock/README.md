@@ -187,7 +187,7 @@ DX-слой мока (не часть протокола ЮKassa): каждое 
 |---|---|---|
 | `MOCK_PORT` | `3102` | порт |
 | `MOCK_SHOP_ID` / `MOCK_SECRET_KEY` | `YOOKASSAMOCKTEST` / `mockpass123` | Basic-креды (алиасы `YOOKASSA_SHOP_ID`, `YOOKASSA_SECRET_KEY`) |
-| `MOCK_PUBLIC_BASE_URL` | `http://localhost:3102` | база `confirmation_url` |
+| `MOCK_PUBLIC_BASE_URL` | `http://localhost:${MOCK_YOOKASSA_HOST_PORT:-3102}` | база `confirmation_url` |
 | `MOCK_DEFAULT_WEBHOOK_URL` | — | приёмник вебхуков магазина |
 | `MOCK_RETRY_MS` / `MOCK_MAX_ATTEMPTS` | `60000` / `24` | ретраи вебхуков (в selftest — 1000) |
 | `MOCK_CAPTURE_TTL_MS` | 7 дней | удержание `waiting_for_capture` |

@@ -87,7 +87,7 @@ TBANK_NOTIFICATION_URL=https://<домен ядра>/api/v1/payments/tbank/webho
 |---|---|---|
 | `MOCK_PORT` / `MOCK_HOST` | `3100` / `0.0.0.0` | прослушивание |
 | `MOCK_TERMINAL_KEY` / `MOCK_TERMINAL_PASSWORD` | `TBANK_TERMINAL_*` из env ядра, иначе `TBANKMOCKTEST`/`mockpass123` | ключи терминала мока |
-| `MOCK_PUBLIC_BASE_URL` | `http://localhost:3100` | база для `PaymentURL` (виден покупателю!) |
+| `MOCK_PUBLIC_BASE_URL` | `http://localhost:${MOCK_TBANK_HOST_PORT:-3100}` | база для `PaymentURL` (виден покупателю!) |
 | `MOCK_DEFAULT_NOTIFICATION_URL` | — | куда слать нотификации, если Init без `NotificationURL` |
 | `MOCK_RETRY_MS` / `MOCK_MAX_ATTEMPTS` | `60000` / `24` | политика ретраев нотификаций |
 | `MOCK_STRICT_TOKEN` | `true` | отклонять запросы без валидного Token |

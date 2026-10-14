@@ -20,7 +20,9 @@ services:
       # Персистентность между рестартами: состояние на volume ниже.
       MOCK_STATE_FILE: /data/tbank-state.json
       # Публичный адрес стенда глазами покупателя (меняйте на свой домен).
-      MOCK_PUBLIC_BASE_URL: "http://localhost:3100"
+      # MS-22: публичный URL следует за хостовым портом (иначе при ремапе
+      # MOCK_TBANK_HOST_PORT confirmation_url указывает на старый порт).
+      MOCK_PUBLIC_BASE_URL: "${MOCK_TBANK_PUBLIC_BASE_URL:-http://localhost:${MOCK_TBANK_HOST_PORT:-3100}}"
       # Для публичного размещения включите защиту исходящих вебхуков от SSRF:
       # MOCK_BLOCK_PRIVATE_WEBHOOKS: "1"
     volumes: ["mock-data:/data"]
@@ -46,7 +48,7 @@ services:
       MOCK_HEALTH_PATH: /healthz
       MOCK_STATE_FILE: /data/kassa-state.json
       # Публичный адрес кассы глазами покупателя — от него зависит ofd_receipt_url.
-      MOCK_PUBLIC_BASE_URL: "http://localhost:3101"
+      MOCK_PUBLIC_BASE_URL: "${MOCK_KASSA_PUBLIC_BASE_URL:-http://localhost:${MOCK_KASSA_HOST_PORT:-3101}}"
       MOCK_GROUPS: "Main"
       # MOCK_BLOCK_PRIVATE_WEBHOOKS: "1"
     volumes: ["mock-data:/data"]
@@ -72,7 +74,7 @@ services:
       # Персистентность между рестартами: состояние на volume ниже.
       MOCK_STATE_FILE: /data/yookassa-state.json
       # Публичный адрес стенда глазами покупателя (confirmation_url, return-редиректы).
-      MOCK_PUBLIC_BASE_URL: "http://localhost:3102"
+      MOCK_PUBLIC_BASE_URL: "${MOCK_YOOKASSA_PUBLIC_BASE_URL:-http://localhost:${MOCK_YOOKASSA_HOST_PORT:-3102}}"
       # Адрес приёмника вебхуков магазина (ACK по протоколу — ровно 200).
       MOCK_DEFAULT_WEBHOOK_URL: "${MOCK_DEFAULT_WEBHOOK_URL:-}"
       # Для публичного размещения включите защиту исходящих вебхуков от SSRF:
@@ -100,7 +102,7 @@ services:
       # Персистентность между рестартами: состояние на volume ниже.
       MOCK_STATE_FILE: /data/atol-state.json
       # Публичный адрес стенда — от него строится ofd_receipt_url в payload.
-      MOCK_PUBLIC_BASE_URL: "http://localhost:3103"
+      MOCK_PUBLIC_BASE_URL: "${MOCK_ATOL_PUBLIC_BASE_URL:-http://localhost:${MOCK_ATOL_HOST_PORT:-3103}}"
       # Дефолты — публичные тестовые реквизиты v4 (login v4-online-atol-ru,
       # группа v4-online-atol-ru_4179); свои — через эти переменные.
       # MOCK_ATOL_LOGIN / MOCK_ATOL_PASSWORD / MOCK_ATOL_GROUP / MOCK_GROUPS
@@ -131,7 +133,7 @@ services:
       # Персистентность между рестартами: состояние на volume ниже.
       MOCK_STATE_FILE: /data/alfa-state.json
       # Публичный адрес стенда — от него строится formUrl платёжной страницы.
-      MOCK_PUBLIC_BASE_URL: "http://localhost:3104"
+      MOCK_PUBLIC_BASE_URL: "${MOCK_ALFA_PUBLIC_BASE_URL:-http://localhost:${MOCK_ALFA_HOST_PORT:-3104}}"
       # Дефолты — СИНТЕТИЧЕСКИЕ креды мока (ALFAMOCKTEST/mockpass123, по образцу
       # TBANKMOCKTEST); реальные тестовые креды банк выдаёт индивидуально.
       # MOCK_ALFA_USERNAME / MOCK_ALFA_PASSWORD / MOCK_ALFA_CALLBACK_SECRET
@@ -165,7 +167,7 @@ services:
       # Дефолты синтетические, реальные банковские тестовые креды выдаются merchant отдельно.
       MOCK_SBER_USERNAME: "${MOCK_SBER_USERNAME:-SBERMOCKTEST}"
       MOCK_SBER_PASSWORD: "${MOCK_SBER_PASSWORD:-mockpass123}"
-      MOCK_SBER_PUBLIC_BASE_URL: "${MOCK_SBER_PUBLIC_BASE_URL:-http://localhost:3105}"
+      MOCK_SBER_PUBLIC_BASE_URL: "${MOCK_SBER_PUBLIC_BASE_URL:-http://localhost:${MOCK_SBER_HOST_PORT:-3105}}"
       MOCK_SBER_CALLBACK_URL: "${MOCK_SBER_CALLBACK_URL:-}"
       MOCK_SBER_CALLBACK_RETRY_MS: "${MOCK_SBER_CALLBACK_RETRY_MS:-60000}"
       MOCK_SBER_CALLBACK_MAX_ATTEMPTS: "${MOCK_SBER_CALLBACK_MAX_ATTEMPTS:-3}"
@@ -215,7 +217,7 @@ services:
       MOCK_VTB_CLIENT_ID: "${MOCK_VTB_CLIENT_ID:-vtbmocktest}"
       MOCK_VTB_CLIENT_SECRET: "${MOCK_VTB_CLIENT_SECRET:-mockpass123}"
       MOCK_VTB_TOKEN_TTL_SECS: "${MOCK_VTB_TOKEN_TTL_SECS:-170}"
-      MOCK_VTB_PUBLIC_BASE_URL: "${MOCK_VTB_PUBLIC_BASE_URL:-http://localhost:3106}"
+      MOCK_VTB_PUBLIC_BASE_URL: "${MOCK_VTB_PUBLIC_BASE_URL:-http://localhost:${MOCK_VTB_HOST_PORT:-3106}}"
       MOCK_VTB_CALLBACK_URL: "${MOCK_VTB_CALLBACK_URL:-}"
       MOCK_VTB_CALLBACK_RETRY_MS: "${MOCK_VTB_CALLBACK_RETRY_MS:-60000}"
       MOCK_VTB_CALLBACK_MAX_ATTEMPTS: "${MOCK_VTB_CALLBACK_MAX_ATTEMPTS:-3}"
@@ -267,7 +269,7 @@ services:
       MOCK_FIRST_OFD_TOKEN_TTL_SECS: "${MOCK_FIRST_OFD_TOKEN_TTL_SECS:-86400}"
       MOCK_FIRST_OFD_TOKEN_SINGLE: "${MOCK_FIRST_OFD_TOKEN_SINGLE:-false}"
       MOCK_FIRST_OFD_PROCESS_MS: "${MOCK_FIRST_OFD_PROCESS_MS:-2000}"
-      MOCK_FIRST_OFD_PUBLIC_BASE_URL: "${MOCK_FIRST_OFD_PUBLIC_BASE_URL:-http://localhost:3107}"
+      MOCK_FIRST_OFD_PUBLIC_BASE_URL: "${MOCK_FIRST_OFD_PUBLIC_BASE_URL:-http://localhost:${MOCK_FIRST_OFD_HOST_PORT:-3107}}"
       MOCK_FIRST_OFD_CALLBACK_URL: "${MOCK_FIRST_OFD_CALLBACK_URL:-}"
       MOCK_FIRST_OFD_CALLBACK_RETRY_MS: "${MOCK_FIRST_OFD_CALLBACK_RETRY_MS:-60000}"
       MOCK_FIRST_OFD_CALLBACK_MAX_ATTEMPTS: "${MOCK_FIRST_OFD_CALLBACK_MAX_ATTEMPTS:-3}"

@@ -127,7 +127,7 @@ SSRF-проверка исходящих callback включена по умол
 | `MOCK_VTB_CLIENT_ID` | `vtbmocktest` | синтетический client_id (в `X-IBM-Client-Id` — lowercase, без `@ext.vtb.ru`) |
 | `MOCK_VTB_CLIENT_SECRET` | `mockpass123` | синтетический client_secret |
 | `MOCK_VTB_TOKEN_TTL_SECS` | `170` | срок access_token в секундах; поддерживает длительность (`2m`); TTL живёт на виртуальных часах |
-| `MOCK_VTB_PUBLIC_BASE_URL` | `http://localhost:3106` | внешний base URL, используемый в `payUrl` |
+| `MOCK_VTB_PUBLIC_BASE_URL` | `http://localhost:${MOCK_VTB_HOST_PORT:-3106}` | внешний base URL, используемый в `payUrl` |
 | `MOCK_VTB_CALLBACK_URL` | пусто | callback URL ресурса (один на ресурс); без него очередь не создаётся |
 | `MOCK_VTB_CALLBACK_RETRY_MS` | `60000` (`60s`) | интервал retry; число в миллисекундах либо длительность (`60s`, `1m`) |
 | `MOCK_VTB_CALLBACK_MAX_ATTEMPTS` | `3` | максимум доставок; значение меньше 1 нормализуется в 1 |

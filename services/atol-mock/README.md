@@ -187,7 +187,7 @@ ACK, подписи и расписания повторов (`docs/reference/at
 | `MOCK_CALLBACK_RETRY_MS` / `MOCK_CALLBACK_MAX_ATTEMPTS` | `10000` / `24` | ретраи callback |
 | `MOCK_VALIDATE_RECEIPTS` | `true` | валидация реквизитов ФФД (`false` — принимать как есть) |
 | `MOCK_DEFAULT_CALLBACK_URL` | — | **mock-расширение**: приёмник по умолчанию, если в запросе нет `service.callback_url` |
-| `MOCK_PUBLIC_BASE_URL` | `http://localhost:3103` | база `ofd_receipt_url` |
+| `MOCK_PUBLIC_BASE_URL` | `http://localhost:${MOCK_ATOL_HOST_PORT:-3103}` | база `ofd_receipt_url` |
 | `MOCK_FN_NUMBER` / `MOCK_ECR_RN` / `MOCK_OFD_INN` / `MOCK_FNS_SITE` | тестовые | реквизиты ФН/ККТ/ОФД в `payload` |
 | `MOCK_AGENT_LINE` / `MOCK_AGENT_INN` | «ТЕСТОВАЯ КАССА АТОЛ (МОК)» / `5544332219` | шапка ленты чека |
 | `MOCK_STATE_FILE` | — | файл состояния (compose: `/data/atol-state.json`) |

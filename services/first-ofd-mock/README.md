@@ -156,7 +156,7 @@ callback включена по умолчанию.
 | `MOCK_FIRST_OFD_TOKEN_TTL_SECS` | `86400` | срок токена в секундах (24 ч); поддерживает длительность (`24h`); TTL живёт на виртуальных часах |
 | `MOCK_FIRST_OFD_TOKEN_SINGLE` | `false` | `true` — повторный `getToken` аннулирует прежние токены (`[VERIFY]`-режим среза) |
 | `MOCK_FIRST_OFD_PROCESS_MS` | `2000` | задержка обработки заявки в очереди на виртуальных часах; поддерживает длительность (`1h`), `0` разрешён |
-| `MOCK_FIRST_OFD_PUBLIC_BASE_URL` | `http://localhost:3107` | внешний base URL стенда (журнал, sandbox URL) |
+| `MOCK_FIRST_OFD_PUBLIC_BASE_URL` | `http://localhost:${MOCK_FIRST_OFD_HOST_PORT:-3107}` | внешний base URL стенда (журнал, sandbox URL) |
 | `MOCK_FIRST_OFD_CALLBACK_URL` | пусто | fallback callback URL, когда заявка не передала `requestMetadata.callbackUrl` (`[FORK]` мока) |
 | `MOCK_FIRST_OFD_CALLBACK_RETRY_MS` | `60000` (`60s`) | интервал retry; число в миллисекундах либо длительность (`60s`, `1m`) |
 | `MOCK_FIRST_OFD_CALLBACK_MAX_ATTEMPTS` | `3` | максимум доставок; значение меньше 1 нормализуется в 1 |
