@@ -438,5 +438,50 @@ services:
       start_period: 3s
     restart: unless-stopped
 
+  kontur-ofd-mock:
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.6.0}${MOCK_IMAGE_DIGEST-@sha256:8d0314fd5bf5f73edf1937553d069240cdf835026940e6ac3b6c5746b9df7987}
+    profiles: ["mock"]
+    working_dir: /app
+    command: ["node", "services/kontur-ofd-mock/server.js"]
+    ports:
+      - "${MOCK_KONTUR_OFD_BIND_IP:-127.0.0.1}:${MOCK_KONTUR_OFD_HOST_PORT:-3108}:3108"
+    environment:
+      MOCK_HOST: "0.0.0.0"
+      MOCK_PORT: "3108"
+      MOCK_HEALTH_PATH: "/health"
+      # [FORK] Нет статических кредов: задайте env; owned-песочницы генерируют свои.
+      MOCK_KONTUR_OFD_LOGIN: "${MOCK_KONTUR_OFD_LOGIN:-}"
+      MOCK_KONTUR_OFD_PASSWORD: "${MOCK_KONTUR_OFD_PASSWORD:-}"
+      MOCK_KONTUR_OFD_API_KEY: "${MOCK_KONTUR_OFD_API_KEY:-}"
+      MOCK_KONTUR_OFD_SID_TTL_SECS: "${MOCK_KONTUR_OFD_SID_TTL_SECS:-2592000}"
+      MOCK_KONTUR_OFD_PUBLIC_BASE_URL: "${MOCK_KONTUR_OFD_PUBLIC_BASE_URL:-http://localhost:3108}"
+      MOCK_SANDBOX_SWEEP_MS: "${MOCK_SANDBOX_SWEEP_MS:-60000}"
+      MOCK_VIRTUAL_CLOCK: "${MOCK_VIRTUAL_CLOCK:-}"
+      MOCK_ADMIN_TOKEN: "${MOCK_ADMIN_TOKEN:-}"
+      MOCK_OPERATOR_TOKEN: "${MOCK_OPERATOR_TOKEN:-}"
+      MOCK_HOSTED: "${MOCK_HOSTED:-false}"
+      MOCK_TENANCY: "${MOCK_TENANCY:-}"
+      MOCK_SANDBOX_TOKEN: "${MOCK_SANDBOX_TOKEN:-}"
+      MOCK_SANDBOX_TTL_MS: "${MOCK_SANDBOX_TTL_MS:-}"
+      MOCK_SANDBOX_MAX: "${MOCK_SANDBOX_MAX:-}"
+      MOCK_SANDBOX_MAX_DOCUMENTS: "${MOCK_SANDBOX_MAX_DOCUMENTS:-}"
+      MOCK_SANDBOX_HOST_SUFFIX: "${MOCK_SANDBOX_HOST_SUFFIX:-}"
+      MOCK_SANDBOX_CREATE_LIMIT: "${MOCK_SANDBOX_CREATE_LIMIT:-}"
+      MOCK_STATE_FILE: "/data/kontur-ofd-state.json"
+      MOCK_SANDBOX_FILE: "/data/kontur-ofd-sandboxes.json"
+    volumes:
+      - mock-services-data:/data
+    labels:
+      caddy: "${MOCK_KONTUR_OFD_CADDY_DOMAIN:-}"
+      caddy.reverse_proxy: "{{upstreams 3108}}"
+    mem_limit: "${MOCK_MEM_LIMIT:-128m}"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3108,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    restart: unless-stopped
+
 volumes:
   mock-services-data:

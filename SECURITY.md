@@ -1,5 +1,6 @@
 © 2026 ООО «Аксиома» ИНН:7842223709 · https://github.com/rucorp/mock-services · все права защищены
 Документ проекта mock-services (оригинал: rucorp/mock-services).
+SPDX-License-Identifier: Apache-2.0
 
 # Безопасность
 
@@ -93,6 +94,29 @@ JSON `POST` без checksum (target из `dynamicCallbackUrl` или
 статус через `getOrderStatusExtended.do` (Сбер) / `GET /orders/{orderId}` (ВТБ) /
 `GET /api/external/queue/v1/status/{requestId}` (Первый ОФД, приёмник callback
 обязан быть идемпотентным).
+
+## Контур.ОФД: read-only данные и два секрета (#97)
+
+`kontur-ofd-mock` (:3108) не имеет write API или callback: только чтение
+фискальных fixtures. `MOCK_KONTUR_OFD_LOGIN`, `MOCK_KONTUR_OFD_PASSWORD`,
+`MOCK_KONTUR_OFD_API_KEY` задаются через env **без статических дефолтов**;
+в owned-песочнице генерируются случайные mock-only креды. Не передавайте
+реальные провайдерские реквизиты, ФД и ПДн в мок. Пароль передаётся текстом
+UTF-8: снаружи используйте TLS. Sid и API key независимы; их нельзя считать
+взаимозаменяемыми или использовать как owner-token.
+
+Sid живёт `MOCK_KONTUR_OFD_SID_TTL_SECS` (по умолчанию 2592000) на виртуальных
+часах. Reset/state import/rotation отзывают сессии. В hosted к двум заголовкам
+провайдера добавляются `X-Mock-Sandbox` и `X-Sandbox-Token`; чужие owner-token
+и Sid не дают доступа. Control fail-closed по общей политике ядра. Без hosted
+control открыт локально: не публикуйте порт без access-control.
+
+Журнал не записывает auth body, query login и исходные headers; экспорт
+`/mock/state` исключает Sid, `/sandboxes/me` не раскрывает креды повторно.
+Persist files всё равно содержат mock-сессии и креды: защищайте volume/backup.
+`MOCK_KONTUR_OFD_PUBLIC_BASE_URL` задаёт только provisioning URL, не callback;
+входящих API записи и исходящих webhook-запросов у сервиса нет.
+[Контракт, env и ограничения](docs/integration/kontur-ofd.md).
 
 ## Что стенд хранит и показывает (F-09, F-10)
 

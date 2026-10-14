@@ -45,6 +45,8 @@ jobs:
         run: npm run test:vtb
       - name: selftest мока Первого ОФД (облачная касса OKassa)
         run: npm run test:first-ofd
+      - name: selftest мока Контур.ОФД (read/reconciliation)
+        run: npm run test:kontur-ofd
       - name: офлайн selftest синхронизатора upstream snapshot
         run: npm run test:upstream
       - name: проверка относительных ссылок документации

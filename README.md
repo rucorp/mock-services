@@ -1,5 +1,6 @@
 © 2026 ООО «Аксиома» ИНН:7842223709 · https://github.com/rucorp/mock-services · все права защищены
 Документ проекта mock-services (оригинал: rucorp/mock-services).
+SPDX-License-Identifier: Apache-2.0
 
 # mock-services — тестовые моки банков и касс по официальным протоколам
 
@@ -39,10 +40,16 @@
 > → `requestId`, статусы `IN_PROGRESS → COMPLETED|ERROR` с раздельными слоями ошибок API/ККТ,
 > операции `INCOME`/`INCOME_RETURN`/`EXPENCE`/`EXPENCE_RETURN` — написание как в схеме,
 > `/receipts` за период, callback без подписи, сверка через `status/{requestId}`),
+> **Контур.ОФД** (`kontur-ofd-mock` :3108: read/reconciliation, Sid + API key,
+> организации/кассы/ФД, суммы в копейках; без создания чека и callback),
 > а также мульти-песочницы (`X-Mock-Sandbox`), активный экзаменатор вебхуков (`/mock/verify-merchant`), OpenAPI 3.1 (`/openapi.json`), детектор дрейфа протоколов (`npm run check:drift`) и report-only сверка ссылок первоисточников (`npm run check:upstream`).
 > Каждый адаптер следует клиентскому контракту своего провайдера, но это не делает стенд
 > совместимым с production автоматически: перед переключением проверьте
 > конфигурацию, безопасность и условия интеграции; одной смены URL недостаточно.
+
+Для нового read-only адаптера Контур.ОФД: [рецепт интеграции](docs/integration/kontur-ofd.md)
+и [README сервиса](services/kontur-ofd-mock/README.md). Внешний include регистрирует
+его в профиле `mock`; pinned GHCR-релиз ещё требует отдельной публикации владельцем.
 
 ## Зачем
 
@@ -76,6 +83,8 @@ npm run start:alfa           # http://localhost:3104
 npm run start:sber           # http://localhost:3105
 npm run start:vtb            # http://localhost:3106
 npm run start:first-ofd      # http://localhost:3107
+# Новый Контур.ОФД (креды только env; compose — через include):
+npm run start:kontur-ofd     # http://localhost:3108
 
 # 3. Проверить сам стенд
 npm test                     # selftest ядра + всех адаптеров
@@ -160,7 +169,7 @@ docker-compose.include.yml — внешний compose-модуль (профил
 ## Тестирование
 
 ```bash
-npm test              # всё (core + tbank + kassa + yookassa + atol + alfa + sber + vtb + first-ofd + offline upstream selftest + check:links + check:drift)
+npm test              # всё (core + tbank + kassa + yookassa + atol + alfa + sber + vtb + first-ofd + kontur-ofd + offline upstream selftest + check:links + check:drift)
 npm run test:core     # ядро (42 проверки): restore/очередь (POST и GET-доставка)/каталог ошибок/часы/сценарии/песочницы RFC-001/экзаменатор/access-control/SSRF/tenancy/CSRF
 npm run test:tbank    # 48 сценариев контракта Т-Банка (вкл. E2C TerminalKey, CSRF, чарджбэки, СБП, рекурренты, изоляцию песочниц)
 npm run test:kassa    # 141 проверка Ferma/54-ФЗ (вкл. tenancy, CSRF, owner-token admin, ОФД/ФН, изоляцию песочниц)
@@ -169,6 +178,7 @@ npm run test:atol     # 202 проверки АТОЛ Онлайн v4 (вкл. �
 npm run test:alfa     # 287 проверок Альфа-Банк REST (вкл. register/preAuth/deposit/reverse/refund, карты 3DS1/3DS2 и отказы -2011/116/71015, GET-callback + HMAC-SHA256 + ACK ровно 200, sessionTimeoutSecs, песочницы owned, рестарт, control-plane)
 npm run test:sber     # selftest Сбер Ecom REST (register/preAuth, карты/ACS 101/116, операции, TTL, JSON callbacks/retry/SSRF, песочницы, control-plane)
 npm run test:vtb      # selftest ВТБ SMB E-commerce (OAuth client_credentials + Bearer/X-IBM-Client-Id, orders/preauth/complete/cancel/refunds, decimal-рубли, идемпотентный orderId, payUrl/карты, callback {type,object} без нормализации Status/status, песочницы, control-plane)
+npm run test:kontur-ofd # Контур.ОФД read/reconciliation: Sid/API key, документы, пагинация, ошибки, песочницы
 npm run test:first-ofd # selftest Первого ОФД/OKassa (getToken + TTL 24 ч на виртуальных часах, очередь transaction/{type} IN_PROGRESS → COMPLETED|ERROR, строгие схемы по типу, операции с написанием EXPENCE, смены StateCommandRequest, statuses/receipts, callback без подписи + сверка, песочницы, control-plane)
 npm run check:links   # относительные ссылки markdown-документации разрешаются (docs/providers упразднён — канон docs/reference)
 npm run check:drift   # 644 инварианта: protocols/*.json <-> server.js <-> OpenAPI 3.1 <-> docs/reference/guide

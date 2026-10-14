@@ -33,6 +33,7 @@ const NAME_KASSA = `${PREFIX}-kassa`;
 const NAME_SBER = `${PREFIX}-sber`;
 const NAME_VTB = `${PREFIX}-vtb`;
 const NAME_FIRST_OFD = `${PREFIX}-first-ofd`;
+const NAME_KONTUR_OFD = `${PREFIX}-kontur-ofd`;
 const NAME_RO = `${PREFIX}-ro`;
 const VOLUME = `${PREFIX}-data`;
 
@@ -91,7 +92,7 @@ function assertEqual(actual, expected, message) {
 }
 
 function cleanup() {
-  for (const name of [NAME_TBANK, NAME_KASSA, NAME_SBER, NAME_VTB, NAME_FIRST_OFD, NAME_RO]) {
+  for (const name of [NAME_TBANK, NAME_KASSA, NAME_SBER, NAME_VTB, NAME_FIRST_OFD, NAME_KONTUR_OFD, NAME_RO]) {
     try { docker(['rm', '-f', name]); } catch { /* не создан */ }
   }
   try { docker(['volume', 'rm', '-f', VOLUME]); } catch { /* не создан */ }
@@ -146,6 +147,19 @@ async function main() {
   if (JSON.parse(firstOfdOpenApi.body).openapi !== '3.1.0') throw new Error('first-ofd-mock /openapi.json недоступен в image');
   console.log('[smoke] first-ofd-mock: healthy + OpenAPI ✅');
 
+  // 2e. Контур.ОФД: generic healthcheck без MOCK_PORT, эфемерный host port.
+  console.log('[smoke] kontur-ofd-mock: :3108, generic health + OpenAPI + HTTP selftest');
+  const exposed = JSON.parse(docker(['image', 'inspect', '--format', '{{json .Config.ExposedPorts}}', IMAGE]));
+  if (!Object.hasOwn(exposed, '3108/tcp')) throw new Error('Dockerfile не публикует EXPOSE 3108');
+  docker(['run', '-d', '--name', NAME_KONTUR_OFD, '-p', '127.0.0.1::3108', IMAGE, 'node', 'services/kontur-ofd-mock/server.js']);
+  await waitForHealth(NAME_KONTUR_OFD);
+  const konturPort = Number(docker(['inspect', '--format', '{{(index (index .NetworkSettings.Ports "3108/tcp") 0).HostPort}}', NAME_KONTUR_OFD]));
+  assertEqual((await request(konturPort, 'GET', '/health')).statusCode, 200, 'kontur-ofd-mock /health');
+  const konturApi = await request(konturPort, 'GET', '/openapi.json');
+  assertEqual(JSON.parse(konturApi.body).openapi, '3.1.0', 'kontur-ofd-mock OpenAPI в image');
+  console.log(docker(['exec', NAME_KONTUR_OFD, 'node', 'services/kontur-ofd-mock/selftest.js']));
+  console.log('[smoke] kontur-ofd-mock: healthy + OpenAPI + selftest ✅');
+
   // 3. Непривилегированный runtime-пользователь (F-36).
 
   const user = docker(['inspect', '--format', '{{.Config.User}}', NAME_TBANK]);
@@ -155,6 +169,7 @@ async function main() {
   assertEqual(docker(['exec', NAME_SBER, 'id', '-u']), '10001', 'UID runtime-пользователя (sber)');
   assertEqual(docker(['exec', NAME_VTB, 'id', '-u']), '10001', 'UID runtime-пользователя (vtb)');
   assertEqual(docker(['exec', NAME_FIRST_OFD, 'id', '-u']), '10001', 'UID runtime-пользователя (first-ofd)');
+  assertEqual(docker(['exec', NAME_KONTUR_OFD, 'id', '-u']), '10001', 'UID runtime-пользователя (kontur-ofd)');
   console.log('[smoke] непривилегированный пользователь mock (10001) ✅');
 
   // 4. persist/restore при --read-only rootfs (F-36): Init до рестарта виден

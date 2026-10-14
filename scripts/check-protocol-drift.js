@@ -958,6 +958,74 @@ function main() {
       && firstOfdReadme.includes('[VERIFY]') && firstOfdReadme.includes('[FORK]') && firstOfdReadme.includes('3107'),
     'README должен объяснять авторизацию, асинхронность и известные пробелы среза');
 
+  // Контур.ОФД read-only: independently inspect dispatch table and OpenAPI operations.
+  const konturManifest = readJson('protocols/kontur-ofd.json');
+  const konturServer = readText('services/kontur-ofd-mock/server.js');
+  const konturOpenApi = readJson(konturManifest.openapi);
+  const konturGuide = readText(konturManifest.guide);
+  const konturReadme = readText(konturManifest.readme);
+  const { verifyRoutes: konturRoutes } = require('../services/kontur-ofd-mock/drift');
+  for (const route of konturRoutes(konturServer, konturOpenApi, konturManifest)) {
+    assertCheck('kontur-ofd:route', `${route.method} ${route.path}`, route.inServer && route.inOpenApi,
+      `server=${route.inServer}, openapi=${route.inOpenApi}`);
+  }
+  for (const doc of konturManifest.upstreamDocs) {
+    assertCheck('kontur-ofd:reference', doc, fs.existsSync(path.join(ROOT, doc)), 'public slice exists');
+  }
+  assertCheck('kontur-ofd:openapi', 'OpenAPI 3.1', konturOpenApi.openapi === '3.1.0');
+  for (const type of konturManifest.documentTypes) {
+    const inServer = konturServer.includes(`'${type}'`);
+    const inOpenApi = konturOpenApi.components.schemas.Document.properties.type.enum.includes(type);
+    assertCheck('kontur-ofd:type', type, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+  const periodPath = '/v2/organizations/{organizationId}/cashboxes/{kktRegId}/documents/by-period';
+  const periodParams = konturOpenApi.paths[periodPath].get.parameters;
+  const cursorParam = periodParams.find((p) => p.name === konturManifest.pagination.requestCursor);
+  const limitParam = periodParams.find((p) => p.name === 'limit');
+  assertCheck('kontur-ofd:pagination', 'canonical offset; currentOffset rejected with explicit hint',
+    cursorParam?.name === 'offset' && !periodParams.some((p) => p.name === 'currentOffset')
+      && konturServer.includes("q.has('currentOffset')") && konturGuide.includes('[FORK]') && konturGuide.includes('currentOffset'));
+  assertCheck('kontur-ofd:pagination', '1000 page cap/default independent server/OpenAPI',
+    konturServer.includes(`PAGE_LIMIT_MAX = ${konturManifest.pagination.maximumLimit}`)
+      && limitParam?.schema.maximum === konturManifest.pagination.maximumLimit
+      && limitParam?.schema.default === konturManifest.pagination.defaultLimit);
+  assertCheck('kontur-ofd:pagination', 'nextOffset includes null on exhaustion',
+    konturOpenApi.components.schemas.DocumentPage.properties.paging.properties.nextOffset.type.includes('null')
+      && konturServer.includes('nextOffset:') && konturGuide.includes('nextOffset'));
+  assertCheck('kontur-ofd:auth', '30-day Sid on virtual clock',
+    konturServer.includes(`SID_TTL_DEFAULT_SECS = ${konturManifest.auth.sidTtlSecsDefault}`)
+      && konturServer.includes('session.expiresAt <= clock.now()') && konturGuide.includes('2592000'));
+  assertCheck('kontur-ofd:auth', 'two independent authentication headers',
+    konturOpenApi.components.securitySchemes.Sid.name === 'Authorization'
+      && konturOpenApi.components.securitySchemes.ApiKey.name === konturManifest.auth.apiKeyHeader
+      && konturServer.includes('x-kontur-ofd-apikey') && konturServer.includes('auth\\.sid'));
+  for (const code of konturManifest.authErrorCodeIds) {
+    assertCheck('kontur-ofd:error', String(code), konturServer.includes(String(code)) && konturGuide.includes(String(code)));
+  }
+  for (const route of konturManifest.routes.filter((r) => r.path.startsWith('/v2/'))) {
+    const op = konturOpenApi.paths[route.path]?.[route.method.toLowerCase()];
+    assertCheck('kontur-ofd:security', route.path, op?.security.some((s) => 'Sid' in s && 'ApiKey' in s));
+    for (const code of konturManifest.errors) assertCheck('kontur-ofd:response', `${route.path}: ${code}`, Boolean(op?.responses[code]));
+  }
+  for (const field of ['totalSum', 'cashSum', 'electronicSum']) {
+    assertCheck('kontur-ofd:amounts', `${field}: integer kopeks`,
+      konturOpenApi.components.schemas.Document.properties[field].type === 'integer' && konturGuide.includes('копейках'));
+  }
+  for (const credential of konturManifest.auth.credentialsEnv) {
+    assertCheck('kontur-ofd:credentials', credential, konturServer.includes(credential) && konturGuide.includes(credential));
+  }
+  assertCheck('kontur-ofd:scope', 'read-only routes (no creation/callback)',
+    konturManifest.routes.filter((r) => r.path.startsWith('/v2/')).every((r) => r.method === 'GET')
+      && konturGuide.includes('не моделируется') && konturReadme.includes('read/reconciliation'));
+  assertCheck('kontur-ofd:negative-control', 'missing server fails independently of OpenAPI',
+    konturRoutes('', konturOpenApi, konturManifest).every((r) => !r.inServer && r.inOpenApi));
+  assertCheck('kontur-ofd:negative-control', 'missing OpenAPI fails independently of server',
+    konturRoutes(konturServer, { paths: {} }, konturManifest).every((r) => r.inServer && !r.inOpenApi));
+  assertCheck('kontur-ofd:registration', 'port 3108 exposed, compose profile mock and test script',
+    /^EXPOSE .*\b3108\b/m.test(readText('Dockerfile'))
+      && readText('docker-compose.include.yml').includes('services/kontur-ofd-mock/server.js')
+      && readJson('package.json').scripts.test.includes('test:kontur-ofd'));
+
   const summary = {
     ok: driftIssues.length === 0,
     checkedAt: new Date().toISOString(),
@@ -970,7 +1038,7 @@ function main() {
   if (jsonOutput) {
     console.log(JSON.stringify(summary, null, 2));
   } else {
-    console.log(`\n== Protocol Drift Check (tbank-eacq + ferma-ofd + atol-online + alfa-eacq + sber-ecom + vtb-smb + first-ofd-okassa) ==`);
+    console.log(`\n== Protocol Drift Check (tbank-eacq + ferma-ofd + atol-online + alfa-eacq + sber-ecom + vtb-smb + first-ofd-okassa + kontur-ofd) ==`);
     console.log(`Проверено инвариантов контракта: ${summary.totalChecks}, пройдено: ${summary.passedChecks}, расхождений: ${summary.driftCount}`);
     if (driftIssues.length > 0) {
       console.error('\nОбнаружены расхождения (drift):');

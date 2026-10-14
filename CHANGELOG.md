@@ -1,5 +1,6 @@
 © 2026 ООО «Аксиома» ИНН:7842223709 · https://github.com/rucorp/mock-services · все права защищены
 Документ проекта mock-services (оригинал: rucorp/mock-services).
+SPDX-License-Identifier: Apache-2.0
 
 # Changelog
 
@@ -9,6 +10,14 @@
 ## [Unreleased]
 
 ### Added
+- **Контур.ОФД — read/reconciliation, Stage 2, #97.** Девятый сервис
+  `kontur-ofd-mock` на :3108: plaintext auth → Sid + API key, организации,
+  кассы, фискальные документы за дату/период и по ID; копейки, пагинация
+  до 1000, виртуальный TTL, fail/hang/duplicate, изолированные песочницы.
+  Креды только env/owned sandbox; write/callback печати не моделируется.
+  [FORK] каноничный `offset` вместо противоречивого `currentOffset`;
+  локальные OpenAPI/selftest, без утверждения о проверке у провайдера.
+  Регистрация в include compose, Docker EXPOSE, `test:kontur-ofd`, drift и CI.
 - **Второй внешний касса-адаптер — Первый ОФД (облачная касса OKassa API), Stage 2, #92.**
   Новый zero-dependency `services/first-ofd-mock` на :3107: `POST /getToken`
   (`application/json; charset=utf-8`, `{login, pass}` → `{token}`, TTL **24 ч на
