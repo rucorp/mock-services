@@ -1,0 +1,387 @@
+{
+  "x-copyright": "© 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0; SPDX-License-Identifier: Apache-2.0",
+  "openapi": "3.1.0",
+  "info": {
+    "title": "taxcom-mock — Такском, read-only кабинет/ОФД (API v2)",
+    "version": "0.7.0",
+    "description": "Public slice 2026-10-11 (API Help v2.17, техническое описание от 30.12.2025). Read-only: чтение уже принятых ОФД фискальных документов. Создание/фискализация чека, возврат и callback печати в публичном срезе не найдены и НЕ моделируются (405/404 с подсказкой). [VERIFY] Тело Login_Request: официальная схема приложения к API Help публично не раскрыта, поэтому зафиксирована консервативная форма {login, password}; пересверить при выдаче доступа к кабинету. [FORK] Имена полей ответов, суммы в целых копейках, включённая нижняя граница окна 10 суток, конверт ошибок {errorCodeId, message, field, hint, doc} и соответствие 3106 → HTTP 403, 2203 → HTTP 400 — локальная форма мока, не утверждение о закрытой схеме провайдера. [FORK] Повторный Login выдаёт новый marker, прежний живёт до своего TTL (срез формулирует иначе). Session-Token TTL 300 с, sliding, на виртуальных часах стенда."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3109",
+      "description": "Локальный мок (auth + данные в одном сервисе); публичная база — MOCK_TAXCOM_PUBLIC_BASE_URL"
+    }
+  ],
+  "tags": [
+    { "name": "taxcom-api", "description": "Методы публичного среза Такском API v2 (read-only)" },
+    { "name": "mock-control", "description": "Управляющая поверхность мока: часы, fixtures, сценарии, песочницы. Не является API провайдера." }
+  ],
+  "security": [{ "SessionToken": [] }],
+  "paths": {
+    "/API/v2/Login": {
+      "post": {
+        "tags": ["taxcom-api"],
+        "operationId": "login",
+        "summary": "Авторизация: Integrator-ID + Login_Request → временный marker",
+        "description": "Заголовок Integrator-ID обязателен. Тело — [VERIFY] консервативная форма {login, password}; неизвестные ключи отклоняются 400. Ответ несёт marker в поле token; далее он передаётся в заголовке Session-Token. [FORK] каждый Login выдаёт новый marker, прежние действуют до своего TTL. Mock-only заголовки ответа: X-Mock-Token-Expires-At, X-Mock-Token-Ttl-Secs.",
+        "security": [{ "IntegratorId": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/LoginRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Временный marker выдан",
+            "headers": {
+              "X-Mock-Token-Expires-At": { "description": "Mock-only: момент истечения marker (ISO, виртуальные часы)", "schema": { "type": "string" } },
+              "X-Mock-Token-Ttl-Secs": { "description": "Mock-only: TTL в секундах (MOCK_TAXCOM_SESSION_TTL_SECS, дефолт 300)", "schema": { "type": "string" } }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/LoginResponse" }
+              }
+            }
+          },
+          "400": { "description": "Некорректный JSON, не объект, отсутствующие поля или неизвестные ключи Login_Request [VERIFY]", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "401": { "description": "Отсутствует/неизвестный Integrator-ID либо неверные реквизиты", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "405": { "description": "Метод не поддерживается (например, GET Login)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "413": { "description": "Тело больше 1 МиБ", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "429": { "description": "Лимит живых сессий песочницы", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "500": { "description": "Сценарий fail или внутренняя ошибка мока", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/API/v2/AccountList": {
+      "get": {
+        "tags": ["taxcom-api"],
+        "operationId": "accountList",
+        "summary": "Договоры/личные кабинеты, доступные пользователю, и его права",
+        "security": [{ "SessionToken": [] }],
+        "responses": {
+          "200": {
+            "description": "Список доступных договоров; договоры без согласия в список не попадают",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Account" } }
+              }
+            }
+          },
+          "401": { "description": "Session-Token отсутствует, неизвестен или истёк (TTL 300 с, sliding)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "405": { "description": "Метод не поддерживается", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "500": { "description": "Сценарий fail или внутренняя ошибка мока", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/API/v2/NewDocuments": {
+      "get": {
+        "tags": ["taxcom-api"],
+        "operationId": "newDocuments",
+        "summary": "Поток новых фискальных документов: 10 суток, ≤ 10 000 за вызов, курсор по id",
+        "description": "Возвращает документы, принятые за последние 10 СУТОК (включая нижнюю границу [FORK]), не более 10 000 за вызов, с сортировкой по времени приёма Такскомом (receivedAt), а не по фискальному dateTime. Первый вызов — без id; далее передавайте id последнего полученного документа. Хвост достигнут → пустой массив, HTTP 200. Рекомендация провайдера опрашивать «не чаще раза в минуту» — совет документации, мок её не навязывает.",
+        "security": [{ "SessionToken": [] }],
+        "parameters": [
+          {
+            "name": "an",
+            "in": "query",
+            "required": false,
+            "description": "Необязательный номер договора из AccountList. Неизвестный/недоступный договор → 404; договор без доступной ККТ → 3106.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "id",
+            "in": "query",
+            "required": false,
+            "description": "Курсор: id последнего полученного документа. Некорректный (в том числе вне окна 10 суток) → ошибка 2203.",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Массив документов по времени приёма; пустой массив означает достигнутый хвост",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Document" } }
+              }
+            }
+          },
+          "400": { "description": "Ошибка 2203 — некорректный курсор", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "401": { "description": "Session-Token отсутствует, неизвестен или истёк", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "403": { "description": "Ошибка 3106 — нет доступной ККТ", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "404": { "description": "Договор не найден или недоступен", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "405": { "description": "Метод не поддерживается: write API не моделируется", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "500": { "description": "Сценарий fail или внутренняя ошибка мока", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": ["mock-control"],
+        "operationId": "health",
+        "summary": "Healthcheck (публичный)",
+        "responses": {
+          "200": { "description": "Сервис жив", "content": { "application/json": { "schema": { "type": "object", "properties": { "ok": { "type": "boolean" }, "service": { "type": "string" }, "tenancy": { "type": "string" } }, "required": ["ok", "service", "tenancy"] } } } }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": ["mock-control"],
+        "operationId": "openapi",
+        "summary": "Эта спецификация OpenAPI 3.1",
+        "responses": { "200": { "description": "Спецификация" } }
+      }
+    },
+    "/admin": {
+      "get": {
+        "tags": ["mock-control"],
+        "operationId": "adminConsole",
+        "summary": "Read-only консоль (HTML)",
+        "responses": {
+          "200": { "description": "HTML-консоль; значения экранируются" },
+          "401": { "description": "В hosted без MOCK_ADMIN_TOKEN — fail-closed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/admin/journal": {
+      "get": {
+        "tags": ["mock-control"],
+        "operationId": "adminJournal",
+        "summary": "Журнал запросов без тела Login, Session-Token и Integrator-ID",
+        "responses": {
+          "200": { "description": "Журнал текущей песочницы" },
+          "401": { "description": "В hosted без admin-токена — fail-closed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/mock/time": {
+      "get": {
+        "tags": ["mock-control"],
+        "operationId": "getTime",
+        "summary": "Снимок виртуальных часов",
+        "responses": { "200": { "description": "Текущее виртуальное время и сдвиг" }, "401": { "description": "Control access fail-closed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } }
+      },
+      "post": {
+        "tags": ["mock-control"],
+        "operationId": "setTime",
+        "summary": "Установить/сдвинуть виртуальные часы (TTL Session-Token и окно 10 суток)",
+        "responses": { "200": { "description": "Новый снимок часов" }, "400": { "description": "Некорректный сдвиг", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }, "401": { "description": "Control access fail-closed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } }
+      }
+    },
+    "/mock/state": {
+      "get": {
+        "tags": ["mock-control"],
+        "operationId": "exportState",
+        "summary": "Экспорт fixtures песочницы (без Session-Token)",
+        "responses": { "200": { "description": "Snapshot {accounts, kkt, documents, clockOffsetMs}" }, "401": { "description": "Control access fail-closed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } }
+      },
+      "put": {
+        "tags": ["mock-control"],
+        "operationId": "importState",
+        "summary": "Импорт fixtures; сессии отзываются. Только mock-control, не write API провайдера.",
+        "responses": { "200": { "description": "Состояние заменено" }, "400": { "description": "Недопустимый fixture или превышение байтовой квоты", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }, "401": { "description": "Control access fail-closed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } }
+      }
+    },
+    "/mock/reset": {
+      "post": {
+        "tags": ["mock-control"],
+        "operationId": "resetSandbox",
+        "summary": "Сброс песочницы: fixtures, сессии, сценарии, журнал",
+        "responses": { "200": { "description": "Песочница сброшена" }, "401": { "description": "Чужая песочница или control access fail-closed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } }
+      }
+    },
+    "/mock/scenarios": {
+      "get": {
+        "tags": ["mock-control"],
+        "operationId": "listScenarios",
+        "summary": "Правила и история сценариев текущей песочницы",
+        "responses": { "200": { "description": "{rules, history}" }, "401": { "description": "Control access fail-closed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } }
+      },
+      "post": {
+        "tags": ["mock-control"],
+        "operationId": "addScenario",
+        "summary": "Добавить правило (target auth|read|*, times, persistent, match)",
+        "responses": { "200": { "description": "Правило добавлено" }, "400": { "description": "Некорректное правило", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }, "401": { "description": "Control access fail-closed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } }
+      },
+      "delete": {
+        "tags": ["mock-control"],
+        "operationId": "clearScenarios",
+        "summary": "Очистить правила и историю",
+        "responses": { "200": { "description": "Очищено" }, "401": { "description": "Control access fail-closed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } }
+      }
+    },
+    "/mock/sandboxes": {
+      "get": {
+        "tags": ["mock-control"],
+        "operationId": "listSandboxes",
+        "summary": "Operator alias: список песочниц",
+        "responses": { "200": { "description": "{mode, sandboxes}" }, "401": { "description": "Требуется owner/operator-токен", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } }
+      },
+      "post": {
+        "tags": ["mock-control"],
+        "operationId": "createSandbox",
+        "summary": "Создать owned-песочницу (в namespaces — переключить активную)",
+        "responses": { "201": { "description": "Песочница создана: ownerToken и mock-креды" }, "400": { "description": "Некорректный id", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }, "409": { "description": "Песочница существует", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }, "429": { "description": "Квота песочниц", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } }
+      },
+      "delete": {
+        "tags": ["mock-control"],
+        "operationId": "deleteSandboxByOperator",
+        "summary": "Удалить песочницу",
+        "responses": { "200": { "description": "Удалена" }, "401": { "description": "Нет доступа", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }, "404": { "description": "Не найдена", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } }
+      }
+    },
+    "/sandboxes": {
+      "get": {
+        "tags": ["mock-control"],
+        "operationId": "listSandboxesPublic",
+        "summary": "Список песочниц (в owned — только своя без operator-токена)",
+        "responses": { "200": { "description": "{mode, sandboxes}" }, "401": { "description": "Требуется owner-token", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } }
+      },
+      "post": {
+        "tags": ["mock-control"],
+        "operationId": "createSandboxPublic",
+        "summary": "Создать owned-песочницу (публичный маршрут provisioning)",
+        "responses": { "201": { "description": "Песочница создана" }, "409": { "description": "Существует", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }, "429": { "description": "Квота", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } }
+      },
+      "delete": {
+        "tags": ["mock-control"],
+        "operationId": "deleteSandboxPublic",
+        "summary": "Удалить песочницу",
+        "responses": { "200": { "description": "Удалена" }, "401": { "description": "Нет доступа", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } }
+      }
+    },
+    "/sandboxes/me": {
+      "get": {
+        "tags": ["mock-control"],
+        "operationId": "describeMySandbox",
+        "summary": "Метаданные своей песочницы (без повторного раскрытия кредов)",
+        "responses": { "200": { "description": "{sandbox}" }, "401": { "description": "Требуется X-Sandbox-Token", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } }
+      },
+      "delete": {
+        "tags": ["mock-control"],
+        "operationId": "deleteMySandbox",
+        "summary": "Удалить свою песочницу",
+        "responses": { "200": { "description": "Удалена" }, "401": { "description": "Требуется X-Sandbox-Token", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } }
+      }
+    },
+    "/sandboxes/me/reset": {
+      "post": {
+        "tags": ["mock-control"],
+        "operationId": "resetMySandbox",
+        "summary": "Восстановить fixtures, отозвать Session-Token, очистить сценарии/журнал",
+        "responses": { "200": { "description": "Сброшено" }, "401": { "description": "Требуется X-Sandbox-Token", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } }
+      }
+    },
+    "/sandboxes/me/reset-creds": {
+      "post": {
+        "tags": ["mock-control"],
+        "operationId": "rotateMyCredentials",
+        "summary": "Ротация login/password/Integrator-ID песочницы; сессии отзываются, owner-token сохраняется",
+        "responses": { "200": { "description": "{ok, creds, ownerTokenChanged:false}" }, "401": { "description": "Требуется X-Sandbox-Token", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "SessionToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Session-Token",
+        "description": "Временный marker из POST /API/v2/Login. TTL 300 с, sliding от последнего использования, на виртуальных часах; просроченный → HTTP 401."
+      },
+      "IntegratorId": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Integrator-ID",
+        "description": "ID интегратора, выдаётся провайдером; в моке — синтетический MOCK_TAXCOM_INTEGRATOR_ID либо creds.integratorId owned-песочницы."
+      }
+    },
+    "schemas": {
+      "LoginRequest": {
+        "type": "object",
+        "description": "[VERIFY] Консервативная форма Login_Request: официальная схема приложения к API Help публично не раскрыта. Неизвестные ключи отклоняются 400.",
+        "additionalProperties": false,
+        "required": ["login", "password"],
+        "properties": {
+          "login": { "type": "string", "minLength": 1, "description": "Логин пользователя кабинета (в моке — MOCK_TAXCOM_LOGIN, синтетический дефолт taxcommocktest)" },
+          "password": { "type": "string", "minLength": 1, "description": "Пароль (в моке — MOCK_TAXCOM_PASSWORD); в журнал не пишется" }
+        }
+      },
+      "LoginResponse": {
+        "type": "object",
+        "required": ["token"],
+        "properties": {
+          "token": { "type": "string", "description": "Временный marker; передаётся в заголовке Session-Token" }
+        }
+      },
+      "Account": {
+        "type": "object",
+        "description": "Договор/личный кабинет. Состав полей — [FORK]: срез подтверждает «договоры/личные кабинеты и права», но не раскрывает схему.",
+        "required": ["an", "inn", "kpp", "name", "rights"],
+        "properties": {
+          "an": { "type": "string", "description": "Номер договора (параметр an в NewDocuments)" },
+          "inn": { "type": "string", "description": "ИНН (синтетический)" },
+          "kpp": { "type": "string", "description": "КПП (синтетический)" },
+          "name": { "type": "string" },
+          "rights": {
+            "type": "array",
+            "description": "Права пользователя [FORK]: перечень прав срезом не раскрыт",
+            "items": { "type": "string" }
+          }
+        }
+      },
+      "Document": {
+        "type": "object",
+        "description": "Фискальный документ, принятый ОФД. Имена полей — [FORK]; суммы в целых копейках (конвенция ФФД, срез Такском единицы не закрепляет).",
+        "required": ["id", "an", "kktRegNumber", "type", "receivedAt", "dateTime", "fiscalDocumentNumber", "fiscalSign", "shiftNumber"],
+        "properties": {
+          "id": { "type": "string", "description": "ID документа — курсор NewDocuments" },
+          "an": { "type": "string", "description": "Номер договора" },
+          "kktRegNumber": { "type": "string", "description": "Регистрационный номер ККТ" },
+          "type": {
+            "type": "string",
+            "description": "Тип документа из публичного среза",
+            "enum": ["openShift", "closeShift", "currentStateReport", "receipt", "receiptCorrection", "bso", "bsoCorrection"]
+          },
+          "receivedAt": { "type": "string", "format": "date-time", "description": "Время приёма Такскомом: ключ сортировки и окна 10 суток" },
+          "dateTime": { "type": "string", "format": "date-time", "description": "Фискальное время документа; НЕ ключ сортировки" },
+          "fiscalDocumentNumber": { "type": "integer", "minimum": 1, "description": "ФД" },
+          "fiscalSign": { "type": "string", "description": "ФП" },
+          "shiftNumber": { "type": "integer", "minimum": 0 },
+          "operationType": { "type": "integer", "minimum": 1, "maximum": 4, "description": "1 приход / 2 возврат прихода / 3 расход / 4 возврат расхода (конвенция ФФД) [FORK]" },
+          "totalSum": { "type": "integer", "minimum": 0, "description": "Итог в целых копейках" },
+          "cashSum": { "type": "integer", "minimum": 0, "description": "Наличными, копейки" },
+          "electronicSum": { "type": "integer", "minimum": 0, "description": "Безналичными, копейки" },
+          "correctionCause": { "type": "integer", "minimum": 0, "description": "Признак коррекции (для receiptCorrection/bsoCorrection)" },
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/Item" } }
+        }
+      },
+      "Item": {
+        "type": "object",
+        "required": ["name", "price", "quantity", "sum"],
+        "properties": {
+          "name": { "type": "string" },
+          "price": { "type": "integer", "minimum": 0, "description": "Цена за единицу, копейки" },
+          "quantity": { "type": "number", "exclusiveMinimum": 0 },
+          "sum": { "type": "integer", "minimum": 0, "description": "Позиция целиком, копейки" }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "description": "Конверт ошибки [FORK]. errorCodeId = 3106 (нет доступной ККТ, HTTP 403) и 2203 (некорректный курсор, HTTP 400) закреплены срезом; для остальных случаев errorCodeId равен HTTP-статусу, тексты и DX-поля — локальные.",
+        "required": ["errorCodeId", "message", "field", "hint", "doc"],
+        "properties": {
+          "errorCodeId": { "type": "integer", "description": "3106, 2203 либо HTTP-статус", "examples": [3106, 2203, 400, 401, 403, 404, 405, 429, 500] },
+          "message": { "type": "string" },
+          "field": { "type": "string", "description": "Поле/заголовок запроса, к которому относится ошибка" },
+          "hint": { "type": "string", "description": "Что исправить" },
+          "doc": { "type": "string", "description": "Ссылка на первоисточник" },
+          "verify": { "type": "string", "description": "Пометка [VERIFY] для мест, не раскрытых публичным срезом" }
+        }
+      }
+    }
+  }
+}

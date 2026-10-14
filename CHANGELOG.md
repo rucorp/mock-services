@@ -10,6 +10,36 @@ SPDX-License-Identifier: Apache-2.0
 ## [Unreleased]
 
 ### Added
+- **Такском — read-only кабинет/ОФД (API v2), Stage 2, #112.** Десятый сервис
+  `taxcom-mock` на :3109 (zero-dep, Node ≥18): `POST /API/v2/Login` с заголовком
+  `Integrator-ID` выдаёт временный marker (`Session-Token`) с TTL **300 с sliding**
+  на виртуальных часах (просроченный → `401`, сессия удаляется); `GET /API/v2/AccountList`
+  (договоры/личные кабинеты и права) и `GET /API/v2/NewDocuments` — документы за
+  последние **10 суток**, не более **10 000** за вызов, сортировка по времени приёма
+  Такскомом, курсор по `id` последнего полученного документа, хвост → пустой ответ,
+  ошибки **3106** (нет доступной ККТ → HTTP 403) и **2203** (некорректный курсор →
+  HTTP 400). Типы: открытие/закрытие смены, состояние расчётов, чек, чек коррекции,
+  БСО, БСО коррекции. Write API не моделируется (известный маршрут с другим методом
+  → `405`, неизвестный `/API/...` → `404`, обе с подсказкой); исходящих запросов нет
+  (в публичном срезе нет callback/webhook), поэтому очередь доставки ядра и
+  SSRF-политика к адаптеру не подключаются. Синтетические дефолты
+  (`taxcommocktest`/`mockpass123`/`TAXCOMMOCKTEST`) печатаются в стартовом логе с
+  пометкой «не реквизиты Такском», production-креды не публикуются. Новые env:
+  `MOCK_TAXCOM_LOGIN`, `MOCK_TAXCOM_PASSWORD`, `MOCK_TAXCOM_INTEGRATOR_ID`,
+  `MOCK_TAXCOM_SESSION_TTL_SECS`, `MOCK_TAXCOM_PUBLIC_BASE_URL` (+ compose-only
+  `MOCK_TAXCOM_BIND_IP`, `MOCK_TAXCOM_HOST_PORT`, `MOCK_TAXCOM_CADDY_DOMAIN`) —
+  в root и include compose, README сервиса и SECURITY. Регистрация: `EXPOSE 3109`
+  и healthcheck `3109/health` в образе, healthcheck :3109 в обоих compose,
+  `test:taxcom`/`start:taxcom` в `package.json`, `protocols/taxcom-ofd.json` + 96
+  инвариантов `check:drift` (всего 828), OpenAPI 3.1 `docs/openapi/taxcom-mock.openapi.json`,
+  гайд «за 10 минут» `docs/integration/taxcom.md`, строка дорожной карты, секция
+  SECURITY, шаг CI. **[VERIFY]**: схемы `Login_Request` и `NewDocuments_Response`
+  (приложения API Help v2.17) публично не раскрыты — реализована консервативная
+  форма `{login, password}` (неизвестные ключи → `400`), имена полей ответов,
+  суммы в целых копейках, включённая нижняя граница окна и HTTP-статусы 3106/2203
+  локальные; ставки НДС 22%/22-122 в агрегатах смены не моделируются. **[FORK]**:
+  повторный `Login` выдаёт новый marker, прежний живёт до своего TTL (срез
+  формулирует иначе) — решение владельца, зафиксировано в гайде и манифесте.
 - **MS-04, #110: graceful shutdown всех девяти сервисов + контейнерный харденинг.**
   Ядро: `installGracefulShutdown({server, flush, log})` — по SIGTERM/SIGINT
   синхронно сбрасываются отложенные (debounced) записи (`sandboxRuntime.flush()`

@@ -53,6 +53,8 @@ jobs:
         run: npm run test:first-ofd
       - name: selftest мока Контур.ОФД (read/reconciliation)
         run: npm run test:kontur-ofd
+      - name: selftest мока Такском (read-only кабинет/ОФД, API v2)
+        run: npm run test:taxcom
       - name: офлайн selftest синхронизатора upstream snapshot
         run: npm run test:upstream
       - name: проверка относительных ссылок документации
@@ -66,6 +68,7 @@ jobs:
       # Порт-ремап в свободный диапазон: на разделяемом self-hosted хосте
       # 3100–3107 заняты dev-стендом lovii-core. Публичные URL следуют за
       # host-портом (MS-22), MOCK_*_URL — black-box test:compose снаружи.
+      # taxcom-mock (#112) получает 3918: 3910–3917 уже заняты восемью сервисами.
       MOCK_TBANK_HOST_PORT: '3910'
       MOCK_KASSA_HOST_PORT: '3911'
       MOCK_YOOKASSA_HOST_PORT: '3912'
@@ -74,6 +77,7 @@ jobs:
       MOCK_SBER_HOST_PORT: '3915'
       MOCK_VTB_HOST_PORT: '3916'
       MOCK_FIRST_OFD_HOST_PORT: '3917'
+      MOCK_TAXCOM_HOST_PORT: '3918'
       MOCK_TBANK_URL: 'http://127.0.0.1:3910'
       MOCK_KASSA_URL: 'http://127.0.0.1:3911'
       MOCK_YOOKASSA_URL: 'http://127.0.0.1:3912'
@@ -82,6 +86,8 @@ jobs:
       MOCK_SBER_URL: 'http://127.0.0.1:3915'
       MOCK_VTB_URL: 'http://127.0.0.1:3916'
       MOCK_FIRST_OFD_URL: 'http://127.0.0.1:3917'
+      # MOCK_TAXCOM_URL не задаётся: black-box test:compose такском не покрывает
+      # (как и kontur-ofd); образ проверяется в image smoke (health/OpenAPI/selftest).
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -104,6 +110,8 @@ jobs:
           echo "$SERVICES_MOCK" | grep -q "sber-mock"
           echo "$SERVICES_MOCK" | grep -q "vtb-mock"
           echo "$SERVICES_MOCK" | grep -q "first-ofd-mock"
+          echo "$SERVICES_MOCK" | grep -q "kontur-ofd-mock"
+          echo "$SERVICES_MOCK" | grep -q "taxcom-mock"
       - name: Проверка безопасного bind root compose и явного сетевого override
         run: |
           docker compose config --format json > /tmp/mock-compose-default.json
@@ -143,13 +151,13 @@ jobs:
         run: |
           docker compose up -d
           for i in $(seq 1 30); do
-            if curl -fsS http://localhost:3910/health >/dev/null && curl -fsS http://localhost:3911/healthz >/dev/null && curl -fsS http://localhost:3912/health >/dev/null && curl -fsS http://localhost:3913/health >/dev/null && curl -fsS http://localhost:3914/health >/dev/null && curl -fsS http://localhost:3915/health >/dev/null && curl -fsS http://localhost:3916/health >/dev/null && curl -fsS http://localhost:3917/health >/dev/null; then
+            if curl -fsS http://localhost:3910/health >/dev/null && curl -fsS http://localhost:3911/healthz >/dev/null && curl -fsS http://localhost:3912/health >/dev/null && curl -fsS http://localhost:3913/health >/dev/null && curl -fsS http://localhost:3914/health >/dev/null && curl -fsS http://localhost:3915/health >/dev/null && curl -fsS http://localhost:3916/health >/dev/null && curl -fsS http://localhost:3917/health >/dev/null && curl -fsS http://localhost:3918/health >/dev/null; then
               echo "стенд поднялся"; exit 0
             fi
             sleep 1
           done
           echo "стенд не поднялся за 30 с"; docker compose logs; exit 1
-      - name: Black-box selftest против контейнеров compose (:3910–:3917)
+      - name: Black-box selftest против контейнеров compose (:3910–:3918)
         run: npm run test:compose
       - name: Прогон selftest-наборов внутри собранного образа
         run: |
@@ -162,6 +170,10 @@ jobs:
           docker compose exec -T sber-mock node services/sber-mock/selftest.js
           docker compose exec -T vtb-mock node services/vtb-mock/selftest.js
           docker compose exec -T first-ofd-mock node services/first-ofd-mock/selftest.js
+          # taxcom-mock и kontur-ofd-mock внутри образа не прогоняются: их selftest'ы
+          # проверяют лимиты страницы (10 000 / 1000 документов) на фикстурах, пиковый
+          # RSS которых выше mem_limit 128m контейнера (замер: ~137 МБ у taxcom).
+          # Оба набора гоняются в job `test` на раннере без cgroup-лимита.
       - name: Логи и остановка
         if: always()
         run: docker compose down -v

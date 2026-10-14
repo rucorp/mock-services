@@ -1,0 +1,121 @@
+{
+  "$comment": "© 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0; SPDX-License-Identifier: Apache-2.0",
+  "id": "taxcom-ofd",
+  "title": "Такском — read-only кабинет/ОФД (API v2)",
+  "version": "2026.10",
+  "upstreamDocs": [
+    "docs/reference/taxcom/01-api-auth-and-discovery.md",
+    "docs/reference/taxcom/02-documents-and-test-limits.md"
+  ],
+  "guide": "docs/integration/taxcom.md",
+  "readme": "services/taxcom-mock/README.md",
+  "openapi": "docs/openapi/taxcom-mock.openapi.json",
+  "baseUrls": {
+    "production": "https://api-lk-ofd.taxcom.ru",
+    "test": "https://api-tlk-ofd.taxcom.ru",
+    "mock": "http://localhost:3109"
+  },
+  "routes": [
+    { "method": "POST", "path": "/API/v2/Login", "errors": [400, 401, 405, 413, 429, 500] },
+    { "method": "GET", "path": "/API/v2/AccountList", "errors": [401, 405, 500] },
+    { "method": "GET", "path": "/API/v2/NewDocuments", "errors": [400, 401, 403, 404, 405, 500] }
+  ],
+  "mockRoutes": [
+    { "method": "GET", "path": "/health" },
+    { "method": "GET", "path": "/openapi.json" },
+    { "method": "GET", "path": "/admin" },
+    { "method": "GET", "path": "/admin/journal" },
+    { "method": "GET", "path": "/mock/time" },
+    { "method": "POST", "path": "/mock/time" },
+    { "method": "GET", "path": "/mock/state" },
+    { "method": "PUT", "path": "/mock/state" },
+    { "method": "POST", "path": "/mock/reset" },
+    { "method": "GET", "path": "/mock/scenarios" },
+    { "method": "POST", "path": "/mock/scenarios" },
+    { "method": "DELETE", "path": "/mock/scenarios" },
+    { "method": "GET", "path": "/mock/sandboxes" },
+    { "method": "POST", "path": "/mock/sandboxes" },
+    { "method": "DELETE", "path": "/mock/sandboxes" },
+    { "method": "GET", "path": "/sandboxes" },
+    { "method": "POST", "path": "/sandboxes" },
+    { "method": "DELETE", "path": "/sandboxes" },
+    { "method": "GET", "path": "/sandboxes/me" },
+    { "method": "DELETE", "path": "/sandboxes/me" },
+    { "method": "POST", "path": "/sandboxes/me/reset" },
+    { "method": "POST", "path": "/sandboxes/me/reset-creds" }
+  ],
+  "auth": {
+    "loginRoute": "/API/v2/Login",
+    "integratorHeader": "Integrator-ID",
+    "sessionHeader": "Session-Token",
+    "markerField": "token",
+    "sessionTtlSecsDefault": 300,
+    "sliding": true,
+    "clock": "virtual",
+    "expiredStatus": 401,
+    "credentialsEnv": [
+      "MOCK_TAXCOM_LOGIN",
+      "MOCK_TAXCOM_PASSWORD",
+      "MOCK_TAXCOM_INTEGRATOR_ID"
+    ]
+  },
+  "testCredentials": {
+    "login": "taxcommocktest",
+    "password": "mockpass123",
+    "integratorId": "TAXCOMMOCKTEST",
+    "note": "СИНТЕТИЧЕСКИЕ креды мока: публичных тестовых login/password/Integrator-ID Такском не публикует, их выдаёт техподдержка/кабинет. Production-реквизиты в коде и compose не публикуются."
+  },
+  "documentTypes": [
+    "openShift",
+    "closeShift",
+    "currentStateReport",
+    "receipt",
+    "receiptCorrection",
+    "bso",
+    "bsoCorrection"
+  ],
+  "amountUnits": "integer kopeks",
+  "pagination": {
+    "requestCursor": "id",
+    "windowDays": 10,
+    "maximumPerCall": 10000,
+    "sortBy": "receivedAt",
+    "terminalCursor": []
+  },
+  "limits": {
+    "sessionTtlSecsDefault": 300,
+    "windowDays": 10,
+    "pageMaxPerCall": 10000,
+    "pollingRecommendation": "не чаще раза в минуту (рекомендация документации, не правило мока)"
+  },
+  "errors": [400, 401, 403, 404, 405, 500],
+  "apiErrorCodes": {
+    "3106": { "httpStatus": 403, "meaning": "Нет доступной ККТ" },
+    "2203": { "httpStatus": 400, "meaning": "Некорректный курсор" }
+  },
+  "verify": [
+    "[VERIFY] Тело Login_Request: официальная схема приложения к API Help публично не раскрыта — реализована консервативная форма {login, password} (оба поля обязательны, неизвестные ключи → 400). Решение владельца до кода; пересверить при выдаче доступа к кабинету.",
+    "[VERIFY] Имена полей Login-ответа и состава NewDocuments_Response (Приложение №12) не отображаются в HTML-части API Help — используется локальная форма.",
+    "[VERIFY] Ставки НДС 22%/22-122 в агрегатах смены (новое в v2.17) упомянуты срезом, но имена полей не раскрыты — не моделируются.",
+    "[VERIFY] Публичные тестовые login/password/Integrator-ID и демо-ККТ отсутствуют; синтетические дефолты мока не являются реквизитами провайдера.",
+    "[VERIFY] HTTP-статусы для 3106/2203 срезом не закреплены: выбраны 403 и 400."
+  ],
+  "forks": [
+    "[FORK] Повторный Login выдаёт НОВЫЙ marker, прежний действует до своего TTL. Срез формулирует иначе («Повторный Login не выдаёт новый marker, пока предыдущий действителен»); решение владельца зафиксировано как документированный форк.",
+    "[FORK] Имена полей ответов (token, an, inn, kpp, name, rights, id, type, receivedAt, dateTime, fiscalDocumentNumber, fiscalSign, shiftNumber, operationType, totalSum/cashSum/electronicSum, items) — локальная форма; суммы в целых копейках по конвенции ФФД.",
+    "[FORK] Окно 10 суток включает нижнюю границу; сортировка по receivedAt (время приёма), tie-break по id; курсор ищется по первому вхождению id.",
+    "[FORK] Конверт ошибок {errorCodeId, message, field, hint, doc}; errorCodeId = HTTP-статус, кроме 3106/2203.",
+    "[FORK] mock-local сценарии fail/hang/duplicate: duplicate повторяет первую строку с тем же id/ФД/ФП до курсорной нарезки, лимит 10 000 сохраняется.",
+    "[FORK] Синтетический каталог: договор 1000001 (ККТ с согласием и без), 1000002 (нет доступной ККТ → 3106), 1000003 (нет согласия, скрыт из AccountList).",
+    "[FORK] Демо-документы задаются смещением от базы стенда (MOCK_VIRTUAL_CLOCK либо wall-clock), чтобы окно 10 суток не устаревало вместе со стендом.",
+    "[FORK] Write API не моделируется: известный маршрут с другим методом → 405, неизвестный /API/... → 404, обе с подсказкой."
+  ],
+  "outOfScope": [
+    "write API: создание/фискализация чека, возврат, чек коррекции на запись",
+    "callback/печать и асинхронные уведомления (в публичном срезе не найдены)",
+    "production host и реальные креды",
+    "расписания ретраев, не зафиксированные публично",
+    "метод чтения одного ФД по ID (публичный URL не подтверждён)",
+    "имитация Ferma/АТОЛ/OKassa под именем Такском"
+  ]
+}
