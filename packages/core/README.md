@@ -19,6 +19,13 @@ Zero dependencies, Node >= 18. Self-test: `npm run test:core`.
   приводила к тому, что после рестарта очередь вебхуков смотрела в пустой объект
   и молча теряла недоставленные уведомления (дефект A-2 аудита 2026-10-08).
 
+- `installGracefulShutdown({server, flush, log, signals, timeoutMs, exit})` —
+  общий обработчик SIGTERM/SIGINT для адаптеров (MS-04): синхронный `flush()`
+  отложенных записей → `server.close()` → `closeAllConnections()` → `exit(0)`;
+  страховочный таймер `timeoutMs` (по умолчанию 1 с, unref), повторный сигнал
+  идемпотентен. Возвращает функцию `shutdown(signal)` с `dispose()` (снятие
+  обработчиков — для selftest'ов). Сервисы зовут хелпер в
+  `require.main === module`-блоке, передавая `flush: () => sandboxRuntime.flush()`.
 - `createLog(tag)` — журналирование с таймстампом.
 - `readBody(req, maxBytes)` / `parseBody(raw, contentType)` — входящие тела
   (JSON и form-urlencoded).

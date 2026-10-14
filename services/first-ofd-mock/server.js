@@ -2087,6 +2087,9 @@ restore();
 sandboxRuntime.refreshStateQuota();
 
 if (require.main === module) {
+  // MS-04: SIGTERM/SIGINT (docker stop/restart) — синхронно сбросить отложенный
+  // реестр песочниц и выйти 0; fallback-таймер 1 с — в packages/core.
+  core.installGracefulShutdown({ server, flush: () => sandboxRuntime.flush(), log });
   const port = Number(MOCK_PORT);
   server.listen(Number.isFinite(port) && port >= 0 ? port : 3107, MOCK_HOST, () => {
     const actualPort = server.address().port;
