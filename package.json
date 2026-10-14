@@ -1,10 +1,11 @@
 {
+  "$comment": "© 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0; SPDX-License-Identifier: Apache-2.0",
   "name": "mock-services",
   "version": "0.6.0",
   "private": true,
   "description": "Mock bank & fiscal (OFD) services for testing payment integrations against official provider protocols",
   "scripts": {
-    "test": "npm run test:core && npm run test:tbank && npm run test:kassa && npm run test:yookassa && npm run test:atol && npm run test:alfa && npm run test:sber && npm run test:vtb && npm run test:first-ofd && npm run test:upstream && npm run check:links && npm run check:drift",
+    "test": "npm run test:core && npm run test:tbank && npm run test:kassa && npm run test:yookassa && npm run test:atol && npm run test:alfa && npm run test:sber && npm run test:vtb && npm run test:first-ofd && npm run test:kontur-ofd && npm run test:upstream && npm run check:links && npm run check:drift",
     "test:core": "node packages/core/selftest.js",
     "test:upstream": "node scripts/sync-upstream-selftest.js",
     "test:docker": "node scripts/docker-smoke.js",
@@ -28,7 +29,9 @@
     "start:sber": "node services/sber-mock/server.js",
     "start:vtb": "node services/vtb-mock/server.js",
     "start:first-ofd": "node services/first-ofd-mock/server.js",
-    "smoke": "node -e \"const h=require('http');for(const [name,url] of [['tbank','http://127.0.0.1:3100/health'],['kassa','http://127.0.0.1:3101/healthz'],['yookassa','http://127.0.0.1:3102/health'],['atol','http://127.0.0.1:3103/health'],['alfa','http://127.0.0.1:3104/health'],['sber','http://127.0.0.1:3105/health'],['vtb','http://127.0.0.1:3106/health'],['first-ofd','http://127.0.0.1:3107/health']]){h.get(url,(r)=>console.log(name,r.statusCode)).on('error',(e)=>console.log(name,'нет ответа:',e.message))}\""
+    "smoke": "node -e \"const h=require('http');for(const [name,url] of [['tbank','http://127.0.0.1:3100/health'],['kassa','http://127.0.0.1:3101/healthz'],['yookassa','http://127.0.0.1:3102/health'],['atol','http://127.0.0.1:3103/health'],['alfa','http://127.0.0.1:3104/health'],['sber','http://127.0.0.1:3105/health'],['vtb','http://127.0.0.1:3106/health'],['first-ofd','http://127.0.0.1:3107/health'],['kontur-ofd','http://127.0.0.1:3108/health']]){h.get(url,(r)=>console.log(name,r.statusCode)).on('error',(e)=>console.log(name,'нет ответа:',e.message))}\"",
+    "test:kontur-ofd": "node services/kontur-ofd-mock/selftest.js",
+    "start:kontur-ofd": "node services/kontur-ofd-mock/server.js"
   },
   "engines": {
     "node": ">=18"

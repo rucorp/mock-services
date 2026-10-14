@@ -1,4 +1,6 @@
-# Образ для моков (tbank-mock, kassa-mock, yookassa-mock, atol-mock, alfa-mock, sber-mock, vtb-mock, first-ofd-mock): выбор командой.
+# © 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
+# Образ для моков (tbank-mock, kassa-mock, yookassa-mock, atol-mock, alfa-mock, sber-mock, vtb-mock, first-ofd-mock, kontur-ofd-mock): выбор командой.
 # Сборка:  docker build -t mock-services .
 # Банк:    docker run -p 3100:3100 -e MOCK_PORT=3100 -e MOCK_HEALTH_PATH=/health \
 #            mock-services node services/tbank-mock/server.js
@@ -18,7 +20,7 @@
 # F-35: HEALTHCHECK опрашивает MOCK_PORT по MOCK_HEALTH_PATH (у кассы — /healthz).
 #   Без переменных скрипт healthcheck сам перебирает известные пары сервисов
 #   (3100/health, 3101/healthz, 3102/health, 3103/health, 3104/health, 3105/health,
-#   3106/health, 3107/health); переменные —
+#   3106/health, 3107/health, 3108/health); переменные —
 #   когда сервис поднят на своём порту/пути явно (как в compose).
 # F-36: сервисы работают от непривилегированного пользователя mock (UID/GID 10001);
 #   состояние пишется в /data — при --read-only примонтируйте сюда volume/tmpfs.
@@ -51,8 +53,9 @@ ENV NODE_ENV=production \
 # Порт по умолчанию — банк; для кассы переопределяется MOCK_PORT=3101,
 # для ЮKassa — MOCK_PORT=3102, для АТОЛ Онлайн — MOCK_PORT=3103,
 # для Альфа-Банка — MOCK_PORT=3104, для Сбер Ecom — MOCK_PORT=3105,
-# для ВТБ SMB — MOCK_PORT=3106, для Первого ОФД — MOCK_PORT=3107.
-EXPOSE 3100 3101 3102 3103 3104 3105 3106 3107
+# для ВТБ SMB — MOCK_PORT=3106, для Первого ОФД — MOCK_PORT=3107,
+# для Контур.ОФД — MOCK_PORT=3108.
+EXPOSE 3100 3101 3102 3103 3104 3105 3106 3107 3108
 
 VOLUME ["/data"]
 

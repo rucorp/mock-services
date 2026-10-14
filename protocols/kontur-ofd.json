@@ -1,0 +1,191 @@
+{
+  "$comment": "© 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0; SPDX-License-Identifier: Apache-2.0",
+  "id": "kontur-ofd",
+  "title": "Контур.ОФД — read/reconciliation",
+  "version": "2026.10",
+  "upstreamDocs": [
+    "docs/reference/kontur-ofd/01-auth-and-access.md",
+    "docs/reference/kontur-ofd/02-document-retrieval.md"
+  ],
+  "guide": "docs/integration/kontur-ofd.md",
+  "readme": "services/kontur-ofd-mock/README.md",
+  "openapi": "docs/openapi/kontur-ofd-mock.openapi.json",
+  "baseUrls": {
+    "auth": "https://api.kontur.ru",
+    "production": "https://ofd-api.kontur.ru",
+    "test": "https://ofd-project.kontur.ru:11002",
+    "mock": "http://localhost:3108"
+  },
+  "routes": [
+    {
+      "method": "POST",
+      "path": "/auth/authenticate-by-pass"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/organizations"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/organizations/{organizationId}/cashboxes"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/organizations/{organizationId}/cashboxes/{kktRegId}/documents"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/organizations/{organizationId}/cashboxes/{kktRegId}/documents/by-period"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/organizations/{organizationId}/cashboxes/{kktRegId}/documents/{documentId}"
+    }
+  ],
+  "mockRoutes": [
+    {
+      "method": "GET",
+      "path": "/health"
+    },
+    {
+      "method": "GET",
+      "path": "/openapi.json"
+    },
+    {
+      "method": "GET",
+      "path": "/admin"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/journal"
+    },
+    {
+      "method": "GET",
+      "path": "/mock/time"
+    },
+    {
+      "method": "POST",
+      "path": "/mock/time"
+    },
+    {
+      "method": "GET",
+      "path": "/mock/state"
+    },
+    {
+      "method": "PUT",
+      "path": "/mock/state"
+    },
+    {
+      "method": "POST",
+      "path": "/mock/reset"
+    },
+    {
+      "method": "GET",
+      "path": "/mock/scenarios"
+    },
+    {
+      "method": "POST",
+      "path": "/mock/scenarios"
+    },
+    {
+      "method": "DELETE",
+      "path": "/mock/scenarios"
+    },
+    {
+      "method": "GET",
+      "path": "/mock/sandboxes"
+    },
+    {
+      "method": "POST",
+      "path": "/mock/sandboxes"
+    },
+    {
+      "method": "DELETE",
+      "path": "/mock/sandboxes"
+    },
+    {
+      "method": "GET",
+      "path": "/sandboxes"
+    },
+    {
+      "method": "POST",
+      "path": "/sandboxes"
+    },
+    {
+      "method": "DELETE",
+      "path": "/sandboxes"
+    },
+    {
+      "method": "GET",
+      "path": "/sandboxes/me"
+    },
+    {
+      "method": "DELETE",
+      "path": "/sandboxes/me"
+    },
+    {
+      "method": "POST",
+      "path": "/sandboxes/me/reset"
+    },
+    {
+      "method": "POST",
+      "path": "/sandboxes/me/reset-creds"
+    }
+  ],
+  "auth": {
+    "scheme": "Authorization: auth.sid <Sid>",
+    "apiKeyHeader": "X-Kontur-Ofd-ApiKey",
+    "sidTtlSecsDefault": 2592000,
+    "credentialsEnv": [
+      "MOCK_KONTUR_OFD_LOGIN",
+      "MOCK_KONTUR_OFD_PASSWORD",
+      "MOCK_KONTUR_OFD_API_KEY"
+    ]
+  },
+  "documentTypes": [
+    "fiscalReport",
+    "fiscalReportCorrection",
+    "currentStateReport",
+    "openShift",
+    "closeShift",
+    "receipt",
+    "bso",
+    "receiptCorrection",
+    "bsoCorrection",
+    "closeArchive"
+  ],
+  "amountUnits": "integer kopeks",
+  "pagination": {
+    "requestCursor": "offset",
+    "responseCursor": "nextOffset",
+    "defaultLimit": 1000,
+    "maximumLimit": 1000,
+    "terminalCursor": null
+  },
+  "errors": [
+    400,
+    401,
+    403,
+    404,
+    500
+  ],
+  "authErrorCodeIds": [
+    401002,
+    401003
+  ],
+  "forks": [
+    "[FORK] offset canonical per URL examples; currentOffset rejected. Local OpenAPI/selftest only: NOT confirmed against provider test schema. Owner approved before implementation.",
+    "[FORK] No public static credentials: env only; owned sandbox creates random mock credentials. No provider credentials claimed.",
+    "[FORK] Fixture object fields beyond public slice, numeric offset, inclusive period bounds, timezone-less timestamps as UTC, nextOffset=null at exhaustion. Synthetic demo IDs, integer kopeks, operationType 1..4 (FFD convention).",
+    "[FORK] mock-local fail/hang/duplicate; duplicate appends same fiscal identity before pagination; cursor counts repeated rows, page cap retained. ErrorCodeId=HTTP status except 401002/401003; message field mock-local.",
+    "[FORK] Provider write/create receipt/refund/callback printing not modeled; only mock control can import fixtures. Cookie auth.sid not modeled.",
+    "[FORK] Sid TTL 30 days on virtual clock, reissue keeps previous Sid until TTL; reset/state import/credential rotation revoke sessions; exported state omits Sid."
+  ],
+  "outOfScope": [
+    "write API",
+    "printing callbacks",
+    "statistics",
+    "Cookie auth.sid",
+    "provider schema verification"
+  ]
+}

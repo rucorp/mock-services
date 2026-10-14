@@ -27,6 +27,7 @@ const KNOWN_SERVICES = [
   ['3105', '/health'],   // sber-mock
   ['3106', '/health'],   // vtb-mock
   ['3107', '/health'],   // first-ofd-mock
+  ['3108', '/health'],   // kontur-ofd-mock
 ];
 
 const PROBES = process.env.MOCK_PORT
