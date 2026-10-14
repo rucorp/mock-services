@@ -64,6 +64,7 @@
     "scripts",
     "protocols",
     "docker-compose.include.yml",
+    "docker-compose.staging.yml",
     "docs/integration",
     "docs/openapi",
     "README.md",
