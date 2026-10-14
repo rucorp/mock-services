@@ -1970,6 +1970,26 @@ async function main() {
 
   });
 
+  check('PD-02: откат после retention не воскрешает очищенные документы', () => {
+    const rt = core.createSandboxRuntime({
+      state: {}, globalMaxStateBytes: 200, initialStateFactory: () => ({ entries: {} }),
+      retention: (state) => {
+        if (!state.entries.old) return 0;
+        delete state.entries.old;
+        return 1;
+      },
+    });
+    rt.create({ id: 'retained' });
+    rt.importState({ entries: { old: 'x'.repeat(80) } }, 'retained');
+    assert.strictEqual(rt.sweep().pruned, 1);
+    const before = JSON.stringify(rt.find('retained').state);
+    assert.throws(() => rt.run(rt.admit({ url: '/', headers: { 'x-mock-sandbox': 'retained' } }), () => {
+      rt.state.entries.next = 'x'.repeat(200);
+      rt.persist();
+    }), (e) => e.code === 'SANDBOX_STATE_BUDGET_EXCEEDED');
+    assert.strictEqual(JSON.stringify(rt.find('retained').state), before);
+  });
+
   check('PD-02: восстановленный default остаётся снимком отката, не заменяется начальным состоянием', () => {
     const state = { entries: {} };
     const rt = core.createSandboxRuntime({ state, globalMaxStateBytes: 100 });

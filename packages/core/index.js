@@ -3260,6 +3260,7 @@ function createSandboxRuntime({
           pruned += n;
           if (n > 0) {
             touch(rec);
+            rememberState(rec); // отказ следующей записи не должен воскресить удалённые retention данные
             dirtyIds.add(rec.id);
           }
         } catch (e) {
