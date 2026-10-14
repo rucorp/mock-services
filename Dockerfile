@@ -31,10 +31,12 @@ FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18
 WORKDIR /app
 
 # Только рантайм-файлы: без node_modules (зависимостей нет), без доков и тестов.
+# Из scripts в образ нужен только healthcheck (Dockerfile HEALTHCHECK);
+# остальные скрипты (drift/links/compose/smoke/sync) — dev/CI-утилиты и в образ не попадают.
 COPY package.json ./
 COPY packages ./packages
 COPY services ./services
-COPY scripts ./scripts
+COPY scripts/docker-healthcheck.js ./scripts/docker-healthcheck.js
 COPY protocols ./protocols
 COPY docs/integration ./docs/integration
 COPY docs/openapi ./docs/openapi
