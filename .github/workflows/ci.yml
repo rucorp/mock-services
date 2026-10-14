@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 name: CI
 
-# Раннер выбирается переменной репозитория `CI_RUNNER` (self-hosted на CHUWI,
-# лейбл `rucorp-ci`) с fallback на закреплённый `ubuntu-24.04` (страховка от
+# Джоб `test` выбирает раннер переменной репозитория `CI_RUNNER` (self-hosted на
+# CHUWI, лейбл `rucorp-ci`) с fallback на закреплённый `ubuntu-24.04` (страховка от
 # авто-миграции `ubuntu-latest` → Ubuntu 26.04; апгрейд — отдельным PR, MS-40).
-# Канон self-hosted: lovii_docs/canon/CI_RUNNERS_SELFHOSTED.md, `runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}`.
+# Джобы `docker` и `publish-ghcr` закреплены на `ubuntu-24.04`: они публикуют
+# фиксированные хостовые порты 3100–3107, занятые на разделяемом self-hosted хосте
+# (dev-стенд lovii-core). Канон: lovii_docs/canon/CI_RUNNERS_SELFHOSTED.md.
 
 on:
   push:
@@ -57,7 +59,7 @@ jobs:
         run: npm run check:drift
 
   docker:
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -121,7 +123,7 @@ jobs:
     name: Публикация образа в GHCR
     needs: [test, docker]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
