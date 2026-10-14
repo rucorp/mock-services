@@ -598,8 +598,8 @@ async function main() {
       }
       // /3ds HTML отдаётся тем же sendPage; отдельная проверка — единая точка выхода HTML.
       const serverSrc = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
-      check('PG-08: весь HTML платёжных страниц идёт через sendPage (ветка /3ds в общем контуре), html(res, …) не осталось',
-        serverSrc.includes('function sendPage(') && !/html\(res,/.test(serverSrc));
+      check('PG-08: весь HTML платёжных страниц идёт через sendPage (ветка /3ds в общем контуре), прямых html(res, …) не осталось',
+        serverSrc.includes('function sendPage(') && !/[^.\w]html\(res,/.test(serverSrc));
     }
 
     const flowAcsBadPass = await fullFlow(port, { tdsPassword: '00000000', callbackUrl: HOOK_URL });
@@ -1222,7 +1222,11 @@ async function main() {
     children.push(childControl);
     const portControl = await childControl.port;
     const adminNoToken = await request(portControl, 'GET', '/admin');
-    checkError('/admin без токена: 401', adminNoToken, { code: 2, status: 401 });
+    // MS-06: без токена /admin отдаёт форму входа (200), а не 401.
+    check('/admin без токена: 200 — форма входа (MS-06)', adminNoToken.statusCode === 200 && adminNoToken.body.includes('Вход в панель управления'));
+    const adminLogin = await request(portControl, 'POST', '/admin/login', 'admin_token=adm-t', { 'Content-Type': 'application/x-www-form-urlencoded' });
+    const loginCookie = (adminLogin.headers['set-cookie'] || []).find((c) => c.startsWith('mock_admin_token='));
+    check('/admin/login: 302 + Set-Cookie HttpOnly (MS-06)', adminLogin.statusCode === 302 && Boolean(loginCookie) && /HttpOnly/.test(loginCookie));
     const adminOk = await request(portControl, 'GET', '/admin', undefined, { 'X-Admin-Token': 'adm-t' });
     check('/admin с X-Admin-Token: 200 HTML-консоль', adminOk.statusCode === 200 && adminOk.body.includes('Консоль стенда Альфа-Эквайринга'));
     const journalNoToken = await request(portControl, 'GET', '/admin/journal');

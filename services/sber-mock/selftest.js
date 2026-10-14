@@ -514,7 +514,8 @@ async function main() {
       const hosted = startChild({ MOCK_HOSTED: 'true', MOCK_TENANCY: 'owned', MOCK_ADMIN_TOKEN: '', MOCK_OPERATOR_TOKEN: '' });
       childrenForExtras.push(hosted);
       const hostedPort = await hosted.port;
-      check('hosted: /admin без токена закрыт', (await request(hostedPort, 'GET', '/admin')).statusCode === 401);
+      const res = await request(hostedPort, 'GET', '/admin');
+      check('hosted: /admin без токена отдает форму входа', res.statusCode === 200 && String(res.body).includes('name="admin_token"'));
       check('hosted: /mock/time без токена закрыт, /health открыт', (await request(hostedPort, 'GET', '/mock/time')).statusCode === 401 && (await request(hostedPort, 'GET', '/health')).statusCode === 200);
     } finally {
       for (const child of childrenForExtras) await child.stop();

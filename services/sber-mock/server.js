@@ -1151,7 +1151,7 @@ function sandboxPolicy(p) {
 function sendSandboxError(res, admission) {
   const id = admission.sandbox || 'default';
   if (admission.kind === 'not-found') return jsonRaw(res, 404, sberError(3, `Песочница «${id}» не найдена`, { hint: 'Создайте песочницу: POST /sandboxes.' }));
-  if (admission.kind === 'unauthorized') return jsonRaw(res, 401, sberError(2, `Доступ к песочнице «${id}» ограничен: знание ID не является доступом`, { field: 'X-Sandbox-Token', hint: 'Передайте owner-token из POST /sandboxes: Authorization: Bearer <ownerToken>, X-Sandbox-Token или ?sandbox_token=.' }));
+  if (admission.kind === 'unauthorized') return jsonRaw(res, 401, sberError(2, `Доступ к песочнице «${id}» ограничен: знание ID не является доступом`, { field: 'X-Sandbox-Token', hint: 'Передайте owner-token из POST /sandboxes: Authorization: Bearer <ownerToken>, X-Sandbox-Token или cookie (mock_sandbox_token=...). В hosted-режиме query-токены запрещены.' }));
   if (admission.kind === 'expired') return jsonRaw(res, 410, sberError(3, `Песочница «${id}» истекла по TTL`, { hint: 'Создайте новую песочницу через POST /sandboxes.' }));
   if (admission.kind === 'rate-limit' || admission.kind === 'limit') return jsonRaw(res, 429, sberError(5, 'Лимит создания песочниц исчерпан'));
   return jsonRaw(res, 500, sberError(6, 'Не удалось разрешить контекст песочницы'));
@@ -1265,13 +1265,19 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
   const owner = sandboxRuntime.recordByOwnerToken(req);
   const ownerSurface = surface === 'operator' && Boolean(owner && admission.record && owner.id === admission.record.id);
   if (surface && admission.via !== 'owner' && !ownerSurface) {
+    if (p === '/admin/login' && req.method === 'POST') {
+      return core.handleAdminLogin(req, res, typeof raw !== 'undefined' ? raw : undefined, parseBody, send);
+    }
     const access = checkControlAccess(req, { adminToken: MOCK_ADMIN_TOKEN, operatorToken: OPERATOR_TOKEN, surface, hosted: HOSTED });
     if (!access.allowed) {
+      if (p === '/admin' && req.method === 'GET') {
+        return core.html(res, core.adminLoginForm(req));
+      }
       const envName = surface === 'admin' ? 'MOCK_ADMIN_TOKEN' : 'MOCK_OPERATOR_TOKEN';
       const message = access.reason === 'hosted-fail-closed'
         ? `${p} закрыт в hosted-режиме: задайте ${envName}`
         : `Для ${p} требуется управляющий токен ${envName}`;
-      return jsonRaw(res, 401, sberError(2, message, { field: surface === 'admin' ? 'Authorization' : 'X-Operator-Token', hint: `Передайте Authorization: Bearer <${envName}> или X-Operator-Token/X-Admin-Token.` }));
+      return jsonRaw(res, 401, sberError(2, message, { field: surface === 'admin' ? 'Authorization' : 'X-Operator-Token', hint: access.hint || `Передайте Authorization: Bearer <${envName}> или X-Operator-Token/X-Admin-Token.` }));
     }
   }
 

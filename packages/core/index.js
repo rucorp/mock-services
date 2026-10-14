@@ -1924,7 +1924,7 @@ function createScenarioRegistry({
 function checkAdminAuth(req, adminToken = process.env.MOCK_ADMIN_TOKEN || '') {
   const expected = String(adminToken || '').trim();
   if (!expected) return true;
-  return tokenMatches(req, expected);
+  return tokenMatches(req, expected).matched;
 }
 
 /** Сравнение секретов без утечки длины по таймингу (constant-time). */
@@ -2005,20 +2005,35 @@ function isSameOriginRequest(req) {
 }
 
 /** Токен из Authorization: Bearer, X-(Admin|Operator)-Token или query. */
-function tokenMatches(req, expected) {
+function tokenMatches(req, expected, options = {}) {
   const wanted = String(expected || '');
-  if (!wanted) return false;
+  if (!wanted) return { matched: false };
   const headers = (req && req.headers) || {};
   const auth = String(headers.authorization || '');
-  if (auth.toLowerCase().startsWith('bearer ') && safeEqual(auth.slice(7).trim(), wanted)) return true;
-  if (safeEqual(String(headers['x-admin-token'] || '').trim(), wanted)) return true;
-  if (safeEqual(String(headers['x-operator-token'] || '').trim(), wanted)) return true;
+  if (auth.toLowerCase().startsWith('bearer ') && safeEqual(auth.slice(7).trim(), wanted)) return { matched: true };
+  if (safeEqual(String(headers['x-mock-admin-token'] || headers['x-admin-token'] || '').trim(), wanted)) return { matched: true };
+  if (safeEqual(String(headers['x-operator-token'] || '').trim(), wanted)) return { matched: true };
+  if (headers.cookie) {
+    const cookies = String(headers.cookie).split(';').map(s => s.trim());
+    if (cookies.includes('mock_admin_token=' + wanted)) return { matched: true };
+    if (cookies.includes('mock_operator_token=' + wanted)) return { matched: true };
+  }
   try {
     const u = new URL((req && req.url) || '/', 'http://localhost');
-    if (safeEqual(String(u.searchParams.get('admin_token') || ''), wanted)) return true;
-    if (safeEqual(String(u.searchParams.get('operator_token') || ''), wanted)) return true;
+    if (safeEqual(String(u.searchParams.get('admin_token') || ''), wanted) ||
+        safeEqual(String(u.searchParams.get('operator_token') || ''), wanted)) {
+      if (options.hosted) {
+        return { matched: false, rejectedQuery: true };
+      }
+      if (options.log) {
+        options.log('[WARN] Приём admin_token/operator_token из query-строки устарел. Используйте заголовки X-Mock-Admin-Token, X-Operator-Token, Authorization или cookie.');
+      } else {
+        console.warn('[WARN] Приём admin_token/operator_token из query-строки устарел. Используйте заголовки X-Mock-Admin-Token, X-Operator-Token, Authorization или cookie.');
+      }
+      return { matched: true };
+    }
   } catch { /* ignore */ }
-  return false;
+  return { matched: false };
 }
 
 /**
@@ -2034,7 +2049,7 @@ function tokenMatches(req, expected) {
  *
  * Возвращает { allowed, role, reason }: адаптер сам выбирает формат DX-ответа.
  */
-function checkControlAccess(req, { adminToken = '', operatorToken = '', surface = 'operator', hosted = false } = {}) {
+function checkControlAccess(req, { adminToken = '', operatorToken = '', surface = 'operator', hosted = false, log = console.warn } = {}) {
   const admin = String(adminToken || '').trim();
   const operator = String(operatorToken || '').trim();
   const expected = surface === 'admin' ? admin : (operator || admin);
@@ -2043,7 +2058,11 @@ function checkControlAccess(req, { adminToken = '', operatorToken = '', surface 
       ? { allowed: false, role: null, reason: 'hosted-fail-closed', token: null }
       : { allowed: true, role: 'open', reason: 'no-token-configured', token: null };
   }
-  if (tokenMatches(req, expected)) return { allowed: true, role: surface, reason: null, token: null };
+  const matchResult = tokenMatches(req, expected, { hosted, log });
+  if (matchResult.matched) return { allowed: true, role: surface, reason: null, token: null };
+  if (matchResult.rejectedQuery) {
+    return { allowed: false, role: null, reason: 'invalid-token', token: null, hint: 'Токены в query запрещены в hosted-режиме. Используйте заголовки (X-Mock-Admin-Token) или cookie.' };
+  }
   return { allowed: false, role: null, reason: 'invalid-token', token: null };
 }
 
@@ -2735,6 +2754,11 @@ function createSandboxRuntime({
     const direct = String(headers['x-sandbox-token'] || '').trim()
       || String(headers['x-owner-token'] || '').trim();
     if (direct) return direct;
+    if (headers.cookie) {
+      const cookies = String(headers.cookie).split(';').map(s => s.trim());
+      const st = cookies.find(c => c.startsWith('mock_sandbox_token='));
+      if (st) return st.split('=')[1];
+    }
     const auth = String(headers.authorization || '');
     if (auth.toLowerCase().startsWith('bearer ')) {
       const bearer = auth.slice(7).trim();
@@ -2742,10 +2766,20 @@ function createSandboxRuntime({
     }
     try {
       const u = new URL((req && req.url) || '/', 'http://mock.local');
-      return String(u.searchParams.get('sandbox_token') || '').trim();
+      const queryToken = String(u.searchParams.get('sandbox_token') || '').trim();
+      if (queryToken) {
+        if (mode === 'owned') {
+          // fail-closed in owned mode
+          return 'FAIL_QUERY_TOKEN_REJECTED';
+        } else {
+          log('[WARN] Приём sandbox_token из query-строки устарел. Используйте заголовки X-Sandbox-Token, Authorization: Bearer или куки.');
+          return queryToken;
+        }
+      }
     } catch {
-      return '';
+      // ignore
     }
+    return '';
   }
 
   function isOperatorToken(token) {
@@ -2762,7 +2796,7 @@ function createSandboxRuntime({
   function isOperatorRequest(req) {
     if (!req) return false;
     if (isOperatorToken(ownerTokenOf(req))) return true;
-    return operators.some((expected) => tokenMatches(req, expected));
+    return operators.some((expected) => tokenMatches(req, expected).matched);
   }
 
   function recordAuthorized(rec, req) {
@@ -3548,6 +3582,50 @@ async function verifyMerchantWebhook({
   };
 }
 
+
+
+function adminLoginForm(req) {
+  return `<!DOCTYPE html>
+<html lang="ru">
+<head><meta charset="utf-8"><title>Вход в панель управления mock-services</title></head>
+<body style="font-family: sans-serif; padding: 2rem; max-width: 400px; margin: 0 auto;">
+  <h2>Вход в панель управления</h2>
+  <form method="POST" action="/admin/login" style="display: flex; flex-direction: column; gap: 1rem;">
+    <label style="display:flex; flex-direction:column;">Admin Token (если есть):
+      <input type="password" name="admin_token" style="padding: 0.5rem; margin-top: 0.25rem;">
+    </label>
+    <label style="display:flex; flex-direction:column;">Operator Token (если есть):
+      <input type="password" name="operator_token" style="padding: 0.5rem; margin-top: 0.25rem;">
+    </label>
+    <label style="display:flex; flex-direction:column;">Sandbox Token (если есть):
+      <input type="password" name="sandbox_token" style="padding: 0.5rem; margin-top: 0.25rem;">
+    </label>
+    <button type="submit" style="padding: 0.75rem; background: #007bff; color: white; border: none; cursor: pointer;">Войти</button>
+  </form>
+</body>
+</html>`;
+}
+
+async function handleAdminLogin(req, res, raw, parseBody, send) {
+  if (raw === undefined) raw = await readBody(req);
+  const formData = parseBody(raw, req.headers['content-type'] || '');
+  const cookies = [];
+  
+  if (formData.admin_token) cookies.push(`mock_admin_token=${encodeURIComponent(formData.admin_token)}; HttpOnly; SameSite=Strict; Path=/`);
+  else if (formData.admin_token === '') cookies.push(`mock_admin_token=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
+  
+  if (formData.operator_token) cookies.push(`mock_operator_token=${encodeURIComponent(formData.operator_token)}; HttpOnly; SameSite=Strict; Path=/`);
+  else if (formData.operator_token === '') cookies.push(`mock_operator_token=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
+  
+  if (formData.sandbox_token) cookies.push(`mock_sandbox_token=${encodeURIComponent(formData.sandbox_token)}; HttpOnly; SameSite=Strict; Path=/`);
+  else if (formData.sandbox_token === '') cookies.push(`mock_sandbox_token=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
+
+  return send(res, 302, '', {
+    Location: '/admin',
+    ...(cookies.length > 0 ? { 'Set-Cookie': cookies } : {})
+  });
+}
+
 /* ------------------------------------------------- graceful shutdown (MS-04) */
 
 /**
@@ -3634,6 +3712,8 @@ function installGracefulShutdown({
 }
 
 module.exports = {
+  adminLoginForm,
+  handleAdminLogin,
   createStore,
   createLog,
   nowIso,
