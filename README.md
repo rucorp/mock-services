@@ -68,6 +68,8 @@ SPDX-License-Identifier: Apache-2.0
 ```bash
 # 1. Стенд «банк + касса + ЮKassa + АТОЛ Онлайн + Альфа-Банк + Сбер Ecom + ВТБ SMB + Первый ОФД» целиком
 docker compose up            # tbank-mock :3100, kassa-mock :3101, yookassa-mock :3102, atol-mock :3103, alfa-mock :3104, sber-mock :3105, vtb-mock :3106, first-ofd-mock :3107
+# Контейнеры харденированы (MS-04): read-only rootfs, tmpfs /tmp, cap_drop ALL,
+# no-new-privileges, pids_limit 256, init; запись — только в volume /data.
 
 # Порты root compose по умолчанию слушают только 127.0.0.1.
 # Для осознанного сетевого доступа задайте bind отдельно для нужного сервиса:
@@ -119,6 +121,35 @@ TLS-прокси — см. [`SECURITY.md`](SECURITY.md).
 (Первый ОФД — облачная касса OKassa) и [`docs/integration/lovii.md`](docs/integration/lovii.md)
 (подключение как внешнего сервиса в платформу Lovii). Контракты и переменные окружения — в README каждого сервиса
 (`services/tbank-mock`, `services/kassa-mock`, `services/yookassa-mock`, `services/atol-mock`, `services/alfa-mock`, `services/sber-mock`, `services/vtb-mock`, `services/first-ofd-mock`). Для acqapi Т-Банка тестовые Basic-креды по умолчанию `partner:partner`, а регистрация точки требует полной схемы реквизитов из `docs/reference/tbank/03-payouts-and-deals.md`. Дефолты alfa-mock (`ALFAMOCKTEST`/`mockpass123`) — синтетические креды мока, а не реквизиты банка: реальные тестовые креды Альфа-Банк выдаёт индивидуально. Дефолты sber-mock (`SBERMOCKTEST`/`mockpass123`) также синтетические; тестовые креды Сбербанка merchant получает отдельно. Дефолты vtb-mock (`vtbmocktest`/`mockpass123`) — синтетические; настоящие тестовые `client_id`/`client_secret` ВТБ выдаёт merchant отдельно. Дефолты first-ofd-mock (`firstofdmocktest` + синтетический UUID-ключ) также синтетические: публичных тестовых login/API-ключей Первого ОФД нет — реквизиты выдаются в тестовом ЛК.
+
+### Контейнерный харденинг и graceful shutdown (MS-04)
+
+Все три compose-файла задают один и тот же набор харденинг-флагов каждому
+сервису (`docker-compose.yml` — 8 сервисов, `docker-compose.include.yml` — 9,
+там же kontur-ofd-mock, `docker-compose.staging.yml` — tbank + kassa):
+
+| Флаг | Значение | Зачем |
+|---|---|---|
+| `init` | `true` | tini как PID 1: сигналы доходят до Node, зомби-процессы не накапливаются |
+| `read_only` | `true` | root filesystem только для чтения: запись — лишь в volume `/data` (состояние) и tmpfs `/tmp` |
+| `tmpfs` | `["/tmp"]` | `/tmp` — в памяти: запись не требует изменения read-only rootfs |
+| `cap_drop` | `["ALL"]` | все Linux capabilities сняты (порты 3100+ непривилегированные — не нужен `NET_BIND_SERVICE`) |
+| `security_opt` | `["no-new-privileges:true"]` | запрет повышения привилегий |
+| `pids_limit` | `256` | ограничение числа процессов |
+
+По `SIGTERM`/`SIGINT` (`docker stop`, `docker compose restart`, остановка
+оркестратором) сервис перестаёт принимать новое, **синхронно сбрасывает
+отложенные записи** состояния и очереди (окно debounce реестра песочниц — 150 мс),
+закрывает соединения и выходит с кодом 0; страховочный таймер — 1 с, поэтому
+остановка не упирается в десятисекундный SIGKILL. Хелпер — `installGracefulShutdown`
+в `packages/core`; запуск без compose (`node services/<name>-mock/server.js`)
+поведение не меняет.
+
+Проверки: `npm run test:docker` — контейнер с полным набором флагов
+(`docker stop` → exit 0 не дольше 2 с, отложенная запись переживает рестарт);
+`npm run test:tbank` и `npm run test:kassa` — регресс «отложенная запись →
+сигнал → рестарт с тем же state-файлом → данные на месте»; CI — шаг «Проверка
+контейнерного харденинга» для всех трёх compose.
 
 ## Структура
 
@@ -203,7 +234,7 @@ npm run check:drift   # 644 инварианта: protocols/*.json <-> server.js
 npm run test:upstream  # офлайн selftest синхронизатора snapshot
 npm --silent run check:upstream -- --json # JSON-отчёт; без --silent npm печатает служебный баннер
 npm run check:upstream -- --update # явное обновление snapshot после просмотра
-npm run test:docker  # image smoke (нужен docker): tbank/kassa/sber/vtb/first-ofd healthchecks, непривилегированный UID, persist/restore при --read-only rootfs
+npm run test:docker  # image smoke (нужен docker): tbank/kassa/sber/vtb/first-ofd healthchecks, непривилегированный UID, persist/restore при --read-only rootfs, MS-04: харденированный контейнер + SIGTERM → exit 0 ≤ 2 с
 npm run test:compose  # black-box selftest против контейнеров compose (:3100–:3107)
 ```
 

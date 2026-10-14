@@ -222,6 +222,24 @@ async function stopChild(child) {
   });
 }
 
+/**
+ * MS-04: остановить дочерний стенд штатным сигналом (по умолчанию SIGTERM) и
+ * дождаться самостоятельного выхода. Возвращает `{code, signal, ms}` — регресс
+ * «отложенная запись переживает SIGTERM» проверяет по ним код 0 и время ≤ 2 с.
+ */
+async function stopChildGracefully(child, signal = 'SIGTERM', timeoutMs = 3000) {
+  const proc = child && child.proc ? child.proc : child;
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) {
+    return { code: proc ? proc.exitCode : null, signal: proc ? proc.signalCode : null, ms: 0 };
+  }
+  const started = Date.now();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`MS-04: дочерний стенд не вышел по ${signal} за ${timeoutMs} мс`)), timeoutMs);
+    proc.once('exit', (code, sig) => { clearTimeout(timer); resolve({ code, signal: sig, ms: Date.now() - started }); });
+    try { proc.kill(signal); } catch (error) { clearTimeout(timer); reject(error); }
+  });
+}
+
 function waitNotification(pred, timeoutMs = 4000) {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
@@ -2062,6 +2080,52 @@ process.env.MOCK_RETRY_MS = '1000';
     assert.strictEqual(sw.current, 'ci-worker-b');
     const healthNoSel = JSON.parse((await request(mockPort, 'GET', '/health')).body);
     assert.strictEqual(healthNoSel.sandbox, 'default', 'PA-55: запрос без селектора остаётся в default');
+  }
+
+  // 49. MS-04: SIGTERM сохраняет отложенную (debounced) запись песочницы —
+  // «отложенная запись → SIGTERM → рестарт с тем же state-файлом → данные на месте».
+  {
+    let verified = false;
+    for (let attempt = 1; attempt <= 3 && !verified; attempt += 1) {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tbank-ms04-'));
+      const stateFile = path.join(tmpDir, 'state.json');
+      const sandboxId = `ms04-${attempt}`;
+      const recordFile = `${stateFile}.sandboxes.records/${sandboxId}.json`;
+      // Маркер отложенной записи — сам платёж в state (не его id: PaymentId
+      // совпадает со счётчиком `counters.paymentId`, а счётчик уже сброшен на
+      // диск при создании песочницы).
+      const paymentsOnDisk = () => {
+        try { return JSON.parse(fs.readFileSync(recordFile, 'utf8')).sandbox.state.payments || {}; } catch { return {}; }
+      };
+      let child = startChild({ MOCK_STATE_FILE: stateFile });
+      try {
+        const port = await child.port;
+        const payload = { TerminalKey: TERMINAL, Amount: '100', OrderId: `ms04-order-${attempt}`, PaymentRecipientId: DEFAULT_RECIPIENT };
+        const paymentId = JSON.parse((await request(port, 'POST', '/v2/Init', { ...payload, Token: tokenOf(payload) }, { 'X-Mock-Sandbox': sandboxId })).body).PaymentId;
+        if (paymentsOnDisk()[paymentId]) {
+          // Окно debounce (150 мс) истекло раньше сигнала: регресс не смог бы
+          // отличить сброс при SIGTERM от обычного отложенного сброса —
+          // повторяем попытку с чистой песочницей.
+          continue;
+        }
+        const stopped = await stopChildGracefully(child, 'SIGTERM');
+        assert.strictEqual(stopped.signal, null, `MS-04: дочерний стенд должен выйти сам (signal=${stopped.signal})`);
+        assert.strictEqual(stopped.code, 0, `MS-04: SIGTERM должен давать exit 0 (получено ${stopped.code})`);
+        assert.ok(stopped.ms <= 2000, `MS-04: SIGTERM должен завершаться ≤ 2 с (получено ${stopped.ms} мс)`);
+        assert.ok(paymentsOnDisk()[paymentId], 'MS-04: SIGTERM не сбросил отложенную запись песочницы на диск');
+        // Рестарт с тем же state-файлом: платёж обязан быть на месте.
+        child = startChild({ MOCK_STATE_FILE: stateFile });
+        const port2 = await child.port;
+        const restored = JSON.parse((await request(port2, 'GET', `/mock/state?sandbox=${sandboxId}`)).body);
+        assert.ok(restored.state.state.payments[paymentId], 'MS-04: после рестарта отложенная запись отсутствует');
+        assert.strictEqual(restored.state.state.payments[paymentId].orderId, `ms04-order-${attempt}`, 'MS-04: восстановлен именно ожидаемый платёж');
+        verified = true;
+      } finally {
+        await stopChild(child);
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    }
+    assert.ok(verified, 'MS-04: не удалось наблюдать отложенную запись (окно debounce 150 мс истекло 3 раза)');
   }
 
   console.log(`selftest: ${WEBHOOK_HITS.length} webhook deliveries, ${Object.keys(state.payments).length} payment sessions`);

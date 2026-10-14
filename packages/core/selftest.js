@@ -2074,6 +2074,75 @@ async function main() {
     }
   });
 
+  /* ------------------------------- MS-04: graceful shutdown (SIGTERM/SIGINT) */
+
+  await acheck('MS-04: shutdown флашит состояние, закрывает сервер и выходит 0 один раз', async () => {
+    const srv = http.createServer((req, res) => res.end('ok'));
+    await listen(srv);
+    const exited = [];
+    const flushed = [];
+    const shutdown = core.installGracefulShutdown({
+      server: srv,
+      flush: () => flushed.push('flush'),
+      log: () => {},
+      exit: (code) => exited.push(code),
+    });
+    try {
+      shutdown('SIGTERM');
+      shutdown('SIGINT'); // идемпотентность: второй сигнал shutdown не перезапускает
+      await withTimeout((async () => {
+        while (!exited.length) await sleep(5);
+      })(), 2000, 'MS-04: shutdown не завершился за 2 с');
+      assert.deepStrictEqual(flushed, ['flush'], 'flush должен вызываться ровно один раз');
+      assert.deepStrictEqual(exited, [0], 'выход — ровно один, код 0');
+      assert.strictEqual(srv.listening, false, 'listener закрыт');
+    } finally {
+      shutdown.dispose();
+      if (srv.listening) srv.close();
+    }
+  });
+
+  await acheck('MS-04: сигналы процесса (SIGTERM/SIGINT) снимаются dispose()', async () => {
+    const srv = http.createServer(() => {});
+    await listen(srv);
+    const before = { term: process.listenerCount('SIGTERM'), int: process.listenerCount('SIGINT') };
+    const shutdown = core.installGracefulShutdown({ server: srv, exit: () => {} });
+    assert.strictEqual(process.listenerCount('SIGTERM'), before.term + 1, 'SIGTERM-обработчик поставлен');
+    assert.strictEqual(process.listenerCount('SIGINT'), before.int + 1, 'SIGINT-обработчик поставлен');
+    shutdown.dispose();
+    assert.strictEqual(process.listenerCount('SIGTERM'), before.term, 'SIGTERM-обработчик снят');
+    assert.strictEqual(process.listenerCount('SIGINT'), before.int, 'SIGINT-обработчик снят');
+    if (srv.listening) srv.close();
+  });
+
+  await acheck('MS-04: страховочный таймер выходит 0, если server.close не завершился', async () => {
+    const exited = [];
+    const logs = [];
+    // Сервер, который «не может закрыться»: колбэк close никогда не зовётся.
+    const stuck = { close: () => {}, closeAllConnections: () => {} };
+    const shutdown = core.installGracefulShutdown({
+      server: stuck,
+      flush: () => { throw new Error('диск недоступен'); },
+      log: (message) => logs.push(message),
+      timeoutMs: 20,
+      exit: (code) => exited.push(code),
+    });
+    try {
+      shutdown();
+      await withTimeout((async () => {
+        while (!exited.length) await sleep(5);
+      })(), 2000, 'MS-04: fallback-таймер не сработал');
+      assert.deepStrictEqual(exited, [0], 'fallback тоже выходит с кодом 0');
+      assert.ok(logs.some((m) => m.includes('flush не удался')), 'ошибка flush залогирована, но не отменяет выход');
+    } finally {
+      shutdown.dispose();
+    }
+  });
+
+  await acheck('MS-04: installGracefulShutdown без server — явная ошибка', async () => {
+    assert.throws(() => core.installGracefulShutdown({ flush: () => {} }), /требуется http\.Server/);
+  });
+
   hook.close();
   fs.rmSync(dir, { recursive: true, force: true });
   console.log(`\nИТОГ: ${passed} passed, ${failed} failed\n`);

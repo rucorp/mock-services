@@ -1118,6 +1118,48 @@ async function main() {
     }
   }
 
+  // 30. MS-04: SIGINT сохраняет отложенную (debounced) запись песочницы —
+  // «отложенная запись → сигнал → рестарт с тем же state-файлом → данные на месте»;
+  // SIGTERM-ветка того же хелпера проверяется selftest'ом Т-Банка.
+  {
+    let verified = false;
+    for (let attempt = 1; attempt <= 3 && !verified; attempt += 1) {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kassa-ms04-'));
+      const stateFile = path.join(tmpDir, 'state.json');
+      const sandboxId = `k-ms04-${attempt}`;
+      const recordFile = `${stateFile}.sandboxes.records/${sandboxId}.json`;
+      const receiptsOnDisk = () => {
+        try { return JSON.parse(fs.readFileSync(recordFile, 'utf8')).sandbox.state.receipts || {}; } catch { return {}; }
+      };
+      let child = await startKassaChild({ MOCK_STATE_FILE: stateFile });
+      try {
+        const token = (await requestOn(child.port, 'POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' }, { 'X-Mock-Sandbox': sandboxId })).json().token;
+        const uuid = (await requestOn(child.port, 'POST', `/possystem/v1/Main/sell?token=${token}`, validBody(`k-ms04-${attempt}`), { 'X-Mock-Sandbox': sandboxId })).json().uuid;
+        if (receiptsOnDisk()[uuid]) {
+          // Окно debounce (150 мс) истекло раньше сигнала: регресс не смог бы
+          // отличить сброс при SIGINT от обычного отложенного сброса —
+          // повторяем попытку с чистой песочницей.
+          continue;
+        }
+        const stopped = await stopChildGracefully(child, 'SIGINT');
+        check('MS-04: SIGINT даёт самостоятельный exit 0',
+          stopped.signal === null && stopped.code === 0, `code=${stopped.code} signal=${stopped.signal}`);
+        check('MS-04: выход по SIGINT ≤ 2 с', stopped.ms <= 2000, `${stopped.ms} мс`);
+        check('MS-04: SIGINT сбросил отложенную запись песочницы на диск', Boolean(receiptsOnDisk()[uuid]));
+        // Рестарт с тем же state-файлом: чек обязан быть на месте.
+        child = await startKassaChild({ MOCK_STATE_FILE: stateFile });
+        const restored = (await requestOn(child.port, 'GET', `/mock/state?sandbox=${sandboxId}`)).json().state;
+        check('MS-04: после рестарта отложенная запись на месте',
+          Boolean(restored && restored.receipts[uuid] && restored.receipts[uuid].externalId === `k-ms04-${attempt}`));
+        verified = true;
+      } finally {
+        await stopChild(child);
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    }
+    check('MS-04: удалось наблюдать отложенную запись (окно debounce 150 мс)', verified);
+  }
+
   await phaseRestart();
 
   console.log(`\nИТОГ: ${passed} passed, ${failed} failed\n`);
@@ -1188,6 +1230,23 @@ async function stopChild(child) {
   await new Promise((resolve) => {
     proc.once('exit', resolve);
     try { proc.kill('SIGKILL'); } catch { resolve(); }
+  });
+}
+
+/**
+ * MS-04: остановить дочерний стенд штатным сигналом и дождаться выхода.
+ * Возвращает `{code, signal, ms}` — регресс проверяет по ним код 0 и ≤ 2 с.
+ */
+async function stopChildGracefully(child, signal = 'SIGTERM', timeoutMs = 3000) {
+  const proc = child && child.proc ? child.proc : child;
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) {
+    return { code: proc ? proc.exitCode : null, signal: proc ? proc.signalCode : null, ms: 0 };
+  }
+  const started = Date.now();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`MS-04: дочерний стенд не вышел по ${signal} за ${timeoutMs} мс`)), timeoutMs);
+    proc.once('exit', (code, sig) => { clearTimeout(timer); resolve({ code, signal: sig, ms: Date.now() - started }); });
+    try { proc.kill(signal); } catch (error) { clearTimeout(timer); reject(error); }
   });
 }
 

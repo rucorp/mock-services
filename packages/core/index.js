@@ -3583,6 +3583,7 @@ async function verifyMerchantWebhook({
 }
 
 
+
 function adminLoginForm(req) {
   return `<!DOCTYPE html>
 <html lang="ru">
@@ -3625,6 +3626,91 @@ async function handleAdminLogin(req, res, raw, parseBody, send) {
   });
 }
 
+/* ------------------------------------------------- graceful shutdown (MS-04) */
+
+/**
+ * Останавливает сервис по SIGTERM/SIGINT без потери отложенных записей (MS-04):
+ *
+ *   1. синхронно `flush()` — сброс на диск отложенных (debounced) записей,
+ *      прежде всего реестра песочниц (`sandboxRuntime.flush()`), ДО закрытия
+ *      соединений: окно 150 мс иначе терялось бы при рестарте контейнера;
+ *   2. `server.close()` — listener перестаёт принимать новое;
+ *   3. `server.closeAllConnections()` (Node >= 18.2) — не ждём keep-alive и
+ *      простаивающие соединения (для более старых Node — `closeIdleConnections`);
+ *   4. `exit(0)` — по колбэку `close` либо по страховочному таймеру `timeoutMs`
+ *      (unref): контейнер завершается за предсказуемое время, `restart`/`stop`
+ *      не упираются в десятисекундный SIGKILL.
+ *
+ * Идемпотентен: повторный сигнал (или повторный вызов) ничего не запускает
+ * заново. Возвращает функцию `shutdown(signal)`; `shutdown.dispose()` снимает
+ * обработчики сигналов — это нужно только selftest'ам ядра.
+ *
+ * Хелпер вызывается только в `require.main === module`-блоке адаптера, поэтому
+ * импорт модуля сервиса (selftest'ы) обработчиков сигналов не навешивает и
+ * поведение при `require` не меняет.
+ */
+function installGracefulShutdown({
+  server,
+  flush = () => {},
+  log = () => {},
+  signals = ['SIGTERM', 'SIGINT'],
+  timeoutMs = 1000,
+  exit = (code) => process.exit(code),
+} = {}) {
+  if (!server || typeof server.close !== 'function') {
+    throw new Error('installGracefulShutdown: требуется http.Server (server.close)');
+  }
+  let stopping = false;
+  let timer = null;
+  const finish = (code) => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    exit(code);
+  };
+
+  function shutdown(signal = 'shutdown') {
+    if (stopping) return;
+    stopping = true;
+    // 1. Отложенные записи: flush хелпера синхронный (persist/restore ядра
+    //    пишут файлы через fs.*Sync), поэтому к моменту закрытия соединений
+    //    состояние уже на диске.
+    try {
+      flush();
+    } catch (e) {
+      log(`graceful shutdown (${signal}): flush не удался: ${e.message}`);
+    }
+    // 2. Новое не принимаем, висящие соединения не держим: процесс должен
+    //    выйти быстро, а не дожидаться чужого keep-alive.
+    try {
+      server.close(() => finish(0));
+      if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
+      else if (typeof server.closeIdleConnections === 'function') server.closeIdleConnections();
+    } catch (e) {
+      log(`graceful shutdown (${signal}): server.close не удался: ${e.message}`);
+    }
+    // 3. Страховка: выход, если `close` не завершился вовремя.
+    timer = setTimeout(() => finish(0), Math.max(0, timeoutMs));
+    if (typeof timer.unref === 'function') timer.unref();
+  }
+
+  const handlers = new Map();
+  for (const signal of signals) {
+    const handler = () => {
+      log(`graceful shutdown: получен ${signal} — сохраняю отложенные записи и закрываю соединения (fallback ${timeoutMs} мс)`);
+      shutdown(signal);
+    };
+    handlers.set(signal, handler);
+    process.once(signal, handler);
+  }
+  shutdown.dispose = () => {
+    for (const [signal, handler] of handlers) process.removeListener(signal, handler);
+    handlers.clear();
+  };
+  return shutdown;
+}
+
 module.exports = {
   adminLoginForm,
   handleAdminLogin,
@@ -3632,6 +3718,7 @@ module.exports = {
   createLog,
   nowIso,
   flagEnabled,
+  installGracefulShutdown,
   readBody,
   parseBody,
   send,

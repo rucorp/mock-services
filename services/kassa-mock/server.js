@@ -2012,6 +2012,9 @@ if (process.env.MOCK_FERMA_DOWN === 'true' || process.env.MOCK_FERMA_DOWN === '1
 sandboxRuntime.refreshStateQuota();
 
 if (require.main === module) {
+  // MS-04: SIGTERM/SIGINT (docker stop/restart) — синхронно сбросить отложенный
+  // реестр песочниц и выйти 0; fallback-таймер 1 с — в packages/core.
+  core.installGracefulShutdown({ server, flush: () => sandboxRuntime.flush(), log });
   server.listen(parseInt(MOCK_PORT, 10), MOCK_HOST, () => {
     const port = server.address().port; // MOCK_PORT=0 -> реальный порт
     log(`kassa-mock (Ferma cloud-cashbox mock) on ${MOCK_HOST}:${port}`);

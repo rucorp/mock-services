@@ -3469,6 +3469,9 @@ sandboxRuntime.tickAll(() => {
 sandboxRuntime.refreshStateQuota();
 
 if (require.main === module) {
+  // MS-04: SIGTERM/SIGINT (docker stop/restart) — синхронно сбросить отложенный
+  // реестр песочниц и выйти 0; fallback-таймер 1 с — в packages/core.
+  core.installGracefulShutdown({ server, flush: () => sandboxRuntime.flush(), log });
   server.listen(parseInt(MOCK_PORT, 10), MOCK_HOST, () => {
     const port = server.address().port; // MOCK_PORT=0 -> реальный порт (освобождает тесты от фиксированных номеров)
     console.log(`[mock] T-Bank multisplit mock on http://${MOCK_HOST}:${port}`);
