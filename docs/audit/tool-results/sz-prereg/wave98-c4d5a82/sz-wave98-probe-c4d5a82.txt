@@ -1,0 +1,25 @@
+— нога first-ofd owned (Bearer-класс, углы a–g)
+  PASS getToken в hosted требует owner-заголовок — status=200 len=48
+  PASS (a) owned: Bearer<очередь>+X-Sandbox-Token<owner> → 200 («после»; «до» на 6b01501 — 401) — status=200
+  PASS (b) битый X-Sandbox-Token → 401 «знание ID ≠ доступ» — status=401 code=invalid_token
+  PASS (в) fallback: только Bearer<owner> → 200 (state) — status=200
+  PASS (в) контроль: только Bearer<очередь> на state → 401 (бизнес-токен не owner) — status=401
+  PASS (г) оператор по Bearer обслуживает при чужом X-Sandbox-Token → 200 — status=200
+  PASS (д) X-Owner-Token<owner> + Bearer<очередь> → 200 (бизнес и state) — biz=200 state=200
+  PASS (е) query: без Authorization → 200 — status=200
+  PASS (е) пустой Bearer + query → 200 (единообразие: пустой = отсутствует) — status=200
+  PASS (е) непустой Bearer<очередь> + query<owner> → 401 (Bearer затеняет query; доступ не ослаблен) — status=401
+  PASS (е) невалидный query → 401 (негативный контроль) — status=401
+  PASS (ж) X-Sandbox-Token валид + X-Owner-Token битый → 200 (порядок источников) — status=200
+  PASS (ж) X-Sandbox-Token битый + X-Owner-Token валид → 401 (непустой затеняет) — status=401
+  PASS (ж) X-Sandbox-Token пустой + X-Owner-Token валид → 200 (пустой = отсутствует) — status=200
+— нога vtb owned (Bearer-класс, угол h)
+  PASS vtb: OAuth access_token получен — len=48
+  PASS (h) vtb: Bearer<access>+X-Sandbox-Token<owner> → 200 («после»; «до» — 401) — status=200
+  PASS (h) vtb контроль: Bearer<access> без явного owner → 401 (знание ID ≠ доступ) — status=401
+— нога atol owned (не-Bearer класс, угол i — регресса нет)
+  PASS (i) atol: X-Sandbox-Token<owner> → 200 (не-Bearer класс без регресса) — status=200
+  PASS (i) atol: битый X-Sandbox-Token → 401 (инвариант сохранён) — status=401
+================ ИТОГ ================
+PASSED: 19
+FAILED: 0
