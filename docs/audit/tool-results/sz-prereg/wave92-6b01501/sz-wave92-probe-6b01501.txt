@@ -1,0 +1,124 @@
+SZ wave-#92 проба first-ofd-mock (OKassa) — DoD issue #92. server.js: /tmp/w92-tree/services/first-ofd-mock/server.js
+server.js exists: true
+
+=== G1: getToken — выдача / истечение 24 ч / повтор ===
+  PASS G1a getToken: 200 + token — status=200 tokenLen=48
+  PASS G1a TTL-заголовки: 86400 + Expires-At ISO — ttl=86400 expiresAt=2026-10-15T08:54:39.219Z
+  PASS G1b плохие креды: 401 invalid_credentials — status=401 code=invalid_credentials
+  PASS G1b пустое тело: 400 invalid_request — status=400 code=invalid_request
+  PASS G1d повторная выдача: 200, второй токен — t1!==t2: true
+  PASS G1d прежний токен жив (повтор не аннулирует): 404 request_not_found — status=404 code=request_not_found
+  PASS G1d новый токен жив: 404 — status=404
+  PASS G1c после +25h токен 1: 401 invalid_token — status=401 code=invalid_token text=Неизвестный токен
+  PASS G1c после +25h токен 2: 401 — status=401
+  PASS G1c повторная выдача после истечения: рабочий токен — issue=200 use=404
+
+=== G2: очередь transaction/{type} → requestId → status/transaction ===
+  PASS G2a openShift → requestId — status=200 body={"requestId":"868042fc-a0f6-4c5b-ae5c-c80a548c0c29"}
+  PASS G2a сразу: IN_PROGRESS — status=IN_PROGRESS
+  PASS G2a после +5s: COMPLETED — status=COMPLETED errorCode=null
+  PASS G2a результат: requestId/transactionType/errorCode/errorType/details/payload — keys=requestId,transactionType,status,errorCode,errorType,details,payload,externalId,userGroup,createdAt,updatedAt
+  PASS G2a payload смены: shiftNumber=1 — shiftNumber=1
+  PASS G2a GET transaction/{id}: заявка + результат — status=200 resultStatus=COMPLETED type=openShift
+  PASS G2b receipt INCOME → requestId — status=200
+  PASS G2b INCOME COMPLETED + фискальный payload — payload={"fiscalDocumentNumber":2,"fiscalDocumentSign":"1000000002","fiscalDriveNumber":"9999078900000000","kkmRegId":"100000000000001","shiftNumber":1,"documentDate":"
+  PASS G2b payload: operationType=INCOME, суммы — десятичные рубли (числа) — op=INCOME totalSum=200 price=100 vat=VAT_22
+  PASS G2b receipt: GET transaction отдаёт эхо-тело (как принято) — echo extId=sz-inc-1
+
+=== G2c/d: receiptCorrection + операции написания по схеме ===
+  PASS G2d INCOME_RETURN: COMPLETED, operationType сохранён — status=COMPLETED op=INCOME_RETURN
+  PASS G2d EXPENCE (как в схеме): COMPLETED, operationType сохранён — status=COMPLETED op=EXPENCE
+  PASS G2d EXPENCE_RETURN: COMPLETED, operationType сохранён — status=COMPLETED op=EXPENCE_RETURN
+  PASS G2c receiptCorrection (+correctionCause): COMPLETED — status=COMPLETED corrCause=есть
+  PASS G2c без correctionCause: 400 (обязателен по схеме) — status=400 field=document.correctionCause
+  PASS G2e currentStateReport: COMPLETED, responseType — status=COMPLETED responseType=CURRENT_STATE_REPORT
+  PASS G2e отчёт состояния — не фискальный документ ([VERIFY] наблюдение) — fiscalDocumentNumber=undefined
+
+=== G3: statuses по externalId+groupId ===
+  PASS G3b повтор externalId в группе: НОВАЯ заявка + свой requestId ([VERIFY] зафиксировано) — r1=748336cd-a9ad-4984-bfa0-bb6d163bd958 r2=1031c963-5771-4ecb-8fbd-355000180ab0
+  PASS G3b маркер дубликата: X-Mock-Duplicate-External-Id: 1 — hdr=1
+  PASS G3a statuses по externalId+groupId: обе заявки — len=2
+  PASS G3a фильтр status=COMPLETED: 2/2 — len=2
+  PASS G3a без groupId: 400 missing_parameter — status=400 code=missing_parameter
+  PASS G3a без externalId: 400 — status=400
+  PASS G3a плохой фильтр status: 400 — status=400
+
+=== G4: /receipts за период (+пагинация) ===
+  PASS G4-pre часы: snapshot.now виртуальный — now=1792058119264 iso=2026-10-15T09:55:19.264Z virtual=true
+  PASS G4a receipts: 200, envelope {items,total,page,pageSize} — total=8 ожид=8 page=1
+  PASS G4b пагинация pageSize=4: 4+4+0 — pages=[4,4,0] total=8
+  PASS G4b страницы без пересечений и без потерь — уникальных ФД=8 из 8
+  PASS G4b упорядочивание по documentDate —  ASC-порядок сохранён
+  PASS G4c фильтр transactionType=receipt: только чеки (без коррекции/смен) — total=6
+  PASS G4c фильтр groupId: весь каталог группы — total=8
+  PASS G4c фильтр kkmRegId: та же касса — total=8
+  PASS G4d без from: 400 missing_parameter — status=400
+  PASS G4d from>to: 400 invalid_request — status=400
+  PASS G4d pageSize>100 (mock cap): 400 — status=400
+  PASS G4e пустой период: 200 + пустой список (не ошибка) — total=0
+
+=== G5: оба слоя ошибок (API vs KKT) + правила смен ===
+  PASS G5a сценарий kkt-error: ERROR, слой KKT — status=ERROR type=KKT code=KKT_UNAVAILABLE
+  PASS G5a details присутствуют — details="ККТ недоступна (сценарий kkt-error): заявка обработана, фискальный документ не 
+  PASS G5a ERROR-заявка не создаёт фискальный документ — payload=null
+  PASS G5b сценарий api-error: ERROR, слой API — status=ERROR type=API code=DOCUMENT_REJECTED
+  PASS G5b слои раздельны: KKT и API каталоги не совпадают — kkt=KKT_UNAVAILABLE api=DOCUMENT_REJECTED
+  PASS G5c повторный openShift: ERROR KKT SHIFT_ALREADY_OPEN ([FORK]) — code=SHIFT_ALREADY_OPEN type=KKT
+  PASS G5c closeShift при открытой смене: COMPLETED — status=COMPLETED
+  PASS G5c повторный closeShift: ERROR KKT SHIFT_NOT_OPEN ([FORK]) — code=SHIFT_NOT_OPEN
+
+=== G6: негативы ===
+  PASS G6a без Authorization: 401 invalid_token — status=401 code=invalid_token
+  PASS G6a чужой/неизвестный Bearer: 401 invalid_token — status=401
+  PASS G6a non-Bearer схема: 401 — status=401
+  PASS G6c чек без userInn: 400 (обязателен) — status=400 field=cashboxParameters.userInn
+  PASS G6c userInn некорректный: 400 — status=400
+  PASS G6c без requestMetadata: 400 ([VERIFY] строгая схема OpenAPI) — status=400 code=invalid_request
+  PASS G6c без userGroup: 400 (обязателен) — status=400 field=requestMetadata.userGroup
+  PASS G6c чек без document: 400 — status=400
+  PASS G6d receipt-тело на openShift: 400 (не собирать универсальный объект) — status=400 field=document hint=Document с operationType/items/totalSum отправляйте в POST /
+  PASS G6e неизвестный userGroup: 400 unknown_user_group — status=400 code=unknown_user_group
+  PASS G6f EXPENSE (не по схеме): 400 invalid_operation_type с подсказкой EXPENCE — code=invalid_operation_type hint=Допустимые операции: INCOME, INCOME_RETURN, EXPENCE, EXPENCE
+  PASS G6h неизвестный vatCode: 400 invalid_vat_code — code=invalid_vat_code
+  PASS G6g неизвестный requestId: 404 request_not_found (status/transaction) — status=404/404
+
+=== G7: «знание ID ≠ доступ» (namespaces) ===
+  PASS G7 sandbox B: токен выдан — status=200
+  PASS G7 sandbox B: заявка создана — status=200
+  PASS G7a чужой requestId из дефолтной песочницы: 404 (ID ≠ доступ) — status=404
+  PASS G7a statuses в дефолтной песочнице: чужих заявок нет — len=0
+  PASS G7b токен песочницы B на дефолтной: 401 invalid_token — status=401
+  PASS G7 владелец внутри B читает свою заявку: 200 — status=200
+
+=== G1e: квирк примера getToken ([VERIFY] расхождение №4) ===
+  PASS G1e сценарий getToken-error-quirk: 200 + error{code:0} — status=200 error={"code":0,"text":"Неверный логин и пароль"}
+
+=== G8: callback без подписи + сверка статусом + retry-график ===
+  PASS G8a заявка с callbackUrl: COMPLETED — status=COMPLETED
+  PASS G8a callback доставлен (2xx ACK) — body.requestId=1a3099bd-b4c4-4e58-ba05-5eca27603922
+  PASS G8a уведомление без подписи (никаких signature/HMAC-заголовков) — headers=
+  PASS G8a тело: результат заявки + externalId + userGroup — extId=sz-cb-ok group=MOCKGROUP status=COMPLETED
+  PASS G8a сверка статусом: COMPLETED (источник истины — метод статуса) — status=COMPLETED
+  PASS G8b ретраи по графику: 3 попытки (max) при 500 — attempt=3
+  PASS G8b заявка сама COMPLETED — ошибка доставки не влияет на заявку — status=COMPLETED (доставка фиксируется в очереди callback, сверка — статусом)
+
+=== G8c: SSRF-терминальность callback (MOCK_BLOCK_PRIVATE_WEBHOOKS=1) ===
+  PASS G8c заявка при SSRF-блоке: COMPLETED (блокирует только доставка) — status=COMPLETED
+  PASS G8c терминальный SSRF-отказ: заявка dumped, без повторов — [first-ofd-mock 2026-10-14 08:54:42] callback 1 заблокирован политикой SSRF — терминальный отказ, без повторов
+  PASS G8c после +65s второй попытки нет (терминально) — attempt-строк до=1 после=1
+  PASS G8c маркер ошибки доставки — сообщение политики SSRF (не литерал) — маркер в логе
+
+=== legD: MOCK_FIRST_OFD_TOKEN_SINGLE=1 — повторная выдача аннулирует ===
+  PASS legD прежний токен аннулирован: 401 — status=401
+  PASS legD новый токен рабочий: 404 (авторизован) — status=404
+
+=== legE: owned-режим (MOCK_HOSTED=1) — наблюдение для #98 (INFO) ===
+  PASS legE-a владелец (X-Sandbox-Token): 200 — status=200
+  PASS legE-b Bearer+X-Sandbox-Token: 401 (ограничение #98 воспроизводится) — status=401 code=invalid_token
+  PASS legE-b текст отказа про «знание ID» — text=Доступ к песочнице «default» ограничен: знание ID не является доступом
+  PASS legE-c битый X-Sandbox-Token: 401 — status=401 code=invalid_token
+  PASS legE-d только Bearer<owner-token>: 200 (fallback работает и до, и после #98) — status=200 — вводные для предрегистрации #98
+
+================ ИТОГ ================
+PASSED: 92
+FAILED: 0
