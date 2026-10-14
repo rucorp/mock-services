@@ -1,0 +1,38 @@
+SZ проба MS-04 (fcd3b05e): graceful shutdown + контейнерный харденинг
+ROOT: /tmp/w-ms04
+
+== A. SIGTERM/SIGINT → exit 0 за ≤2 с (живые сервисы, graceful shutdown)
+  PASS A tbank-mock SIGTERM → exit 0 за ≤2000мс — code=0, signal=null, 4мс
+  PASS A tbank-mock SIGINT → exit 0 за ≤2000мс — code=0, signal=null, 4мс
+  PASS A first-ofd-mock SIGTERM → exit 0 за ≤2000мс — code=0, signal=null, 3мс
+  PASS A first-ofd-mock SIGINT → exit 0 за ≤2000мс — code=0, signal=null, 3мс
+  PASS A kontur-ofd-mock SIGTERM → exit 0 за ≤2000мс — code=0, signal=null, 4мс
+  PASS A kontur-ofd-mock SIGINT → exit 0 за ≤2000мс — code=0, signal=null, 4мс
+  PASS A kassa-mock SIGTERM → exit 0 за ≤2000мс — code=0, signal=null, 3мс
+  PASS A kassa-mock SIGINT → exit 0 за ≤2000мс — code=0, signal=null, 3мс
+
+== A+. Идемпотентность: повторный SIGTERM не ломает shutdown
+  PASS A+ двойной SIGTERM → exit 0 без исключений — code=0, signal=null
+
+== B. Отложенные записи (окно 150 мс): graceful flush спасает, SIGKILL теряет
+  PASS B.1 create песочницы → ок — HTTP 200
+  PASS B.2 default-маркер записан (синхронный persist) — HTTP 200
+  PASS B.2b бизнес-запись на песочницу (incoming; persist отложен на 150 мс) — HTTP 200
+  PASS B.3 SIGTERM → exit 0 (graceful flush отработал) — code=0, 4мс
+  PASS B.4 после рестарта песочница persist-me жива — sandboxes=[default, persist-me]
+  PASS B.5 отложенная запись состояния спасена flush-ом: incoming в песочнице жив — incoming=1
+  PASS B.6 default-маркер пережил рестарт — marker=ms04
+  PASS B.7 SIGKILL → процесс убит сигналом (exit code null) — code=null, signal=SIGKILL
+  PASS B.8 контраст: сама песочница kill-me жива даже после SIGKILL (create персистится немедленно) — sandboxes=[default, kill-me]
+  PASS B.9 негатив: отложенная запись состояния (incoming) потеряна в окне 150 мс — incoming=0
+  PASS B.10 контраст: default-маркер жив и после SIGKILL (синхронные записи состояния) — marker=kill-window
+
+== C. Харденинг-инвариант трёх compose (независимое воспроизведение CI-проверки)
+  PASS C docker-compose.yml: все 8 сервис(ов) с init/read_only/tmpfs/cap_drop/no-new-privileges/pids_limit=256 — tbank-mock, kassa-mock, yookassa-mock, atol-mock, alfa-mock, sber-mock, vtb-mock, first-ofd-mock
+  PASS C docker-compose.yml: tbank-mock и kassa-mock присутствуют и захарденены
+  PASS C docker-compose.staging.yml: все 2 сервис(ов) с init/read_only/tmpfs/cap_drop/no-new-privileges/pids_limit=256 — tbank-mock, kassa-mock
+  PASS C docker-compose.staging.yml: tbank-mock и kassa-mock присутствуют и захарденены
+  PASS C docker-compose.include.yml: все 9 сервис(ов) с init/read_only/tmpfs/cap_drop/no-new-privileges/pids_limit=256 — tbank-mock, kassa-mock, yookassa-mock, atol-mock, alfa-mock, sber-mock, vtb-mock, first-ofd-mock, kontur-ofd-mock
+  PASS C docker-compose.include.yml: tbank-mock и kassa-mock присутствуют и захарденены
+
+ИТОГ: 26 passed, 0 failed
