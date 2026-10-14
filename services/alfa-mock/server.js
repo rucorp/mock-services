@@ -110,6 +110,8 @@ const {
   MOCK_SANDBOX_TTL_MS = '',
   MOCK_SANDBOX_MAX = '',
   MOCK_SANDBOX_MAX_DOCUMENTS = '',
+  MOCK_SANDBOX_MAX_STATE_BYTES = '',
+  MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES = '',
   MOCK_SANDBOX_RETENTION_MS = '',
   MOCK_SANDBOX_HOST_SUFFIX = '',
   MOCK_SANDBOX_CREATE_LIMIT = '',
@@ -292,6 +294,8 @@ const sandboxRuntime = createSandboxRuntime({
   ttlMs: SANDBOX_TTL_MS,
   maxSandboxes: SANDBOX_MAX,
   maxDocuments: SANDBOX_MAX_DOCUMENTS,
+  maxStateBytes: parseMsOr(MOCK_SANDBOX_MAX_STATE_BYTES, null),
+  globalMaxStateBytes: parseMsOr(MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES, null),
   documentCounter: countAlfaDocuments,
   retention: alfaRetention,
   defaultOwnerToken: SANDBOX_OWNER_TOKEN,
@@ -1529,6 +1533,7 @@ function handleSandboxApi(req, res, url, body, admission) {
           hint: 'Сохраните ownerToken: он показывается один раз и даёт доступ к песочнице. creds.callbackSecret — секрет симметричного checksum (HMAC-SHA256) для проверки GET-callback.',
         }, 201);
       } catch (e) {
+        if (core.sendSandboxStateQuotaError(res, e)) return;
         const status = e.code === 'SANDBOX_EXISTS' ? 409 : 429;
         return jsonRaw(res, status, aerrBody(5, e.message, {
           hint: 'Ограничения: MOCK_SANDBOX_MAX (количество), MOCK_SANDBOX_CREATE_LIMIT (созданий в час на IP).',
@@ -1907,6 +1912,7 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
         }
         return sendJson(res, { ok: true, sandbox: imported.sandbox });
       } catch (e) {
+        if (core.sendSandboxStateQuotaError(res, e)) return;
         return jsonRaw(res, 400, aerrBody(6, `Недопустимый снимок состояния: ${e.message}`, {
           field: 'state',
           hint: 'Исправьте снимок и повторите импорт; ключи __proto__, constructor и prototype запрещены.',
@@ -1926,6 +1932,7 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
         await deliveryQueue.tick();
         return sendJson(res, snap);
       } catch (e) {
+        if (core.sendSandboxStateQuotaError(res, e)) return;
         return jsonRaw(res, 400, aerrBody(6, e.message, { field: 'advance|offset|iso', hint: 'Поля: advance ("+30m"), offset (мс), iso (дата), reset (true).' }));
       }
     }
@@ -2131,6 +2138,7 @@ async function handleRest(req, res, p, body) {
 
 const server = http.createServer((req, res) => {
   route(req, res).catch((e) => {
+    if (core.sendSandboxStateQuotaError(res, e)) return;
     if (e && e.code === 'SANDBOX_EXPIRED') {
       try { sendSandboxError(res, { ok: false, kind: 'expired', sandbox: e.sandbox || 'default' }); } catch { /* headers sent */ }
       return;
@@ -2150,6 +2158,9 @@ const server = http.createServer((req, res) => {
 });
 
 restore();
+
+// После restore/startup-миграций снимок отката должен содержать восстановленные данные.
+sandboxRuntime.refreshStateQuota();
 
 if (require.main === module) {
   server.listen(parseInt(MOCK_PORT, 10), MOCK_HOST, () => {

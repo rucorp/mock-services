@@ -79,6 +79,8 @@ const sandboxRuntime = core.createSandboxRuntime({
   ttlMs: core.parseMsOr(env.MOCK_SANDBOX_TTL_MS, TENANCY === 'owned' ? 86400000 : 0),
   maxSandboxes: core.parseMsOr(env.MOCK_SANDBOX_MAX, 100),
   maxDocuments: core.parseMsOr(env.MOCK_SANDBOX_MAX_DOCUMENTS, TENANCY === 'owned' ? 5000 : 0),
+  maxStateBytes: core.parseMsOr(env.MOCK_SANDBOX_MAX_STATE_BYTES, null),
+  globalMaxStateBytes: core.parseMsOr(env.MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES, null),
   documentCounter: (s) => s.documents.length + Object.keys(s.sessions).length,
   defaultOwnerToken: env.MOCK_SANDBOX_TOKEN || '', hostSuffix: env.MOCK_SANDBOX_HOST_SUFFIX || '',
   operatorTokens: [env.MOCK_ADMIN_TOKEN, env.MOCK_OPERATOR_TOKEN],
@@ -293,7 +295,10 @@ async function route(req, res) {
     if (p === '/sandboxes' || p === '/mock/sandboxes' || p.startsWith('/sandboxes/')) return handleSandboxes(req, res, url, body, p);
     if (p === '/mock/time') {
       try { return core.sendJson(res, req.method === 'GET' ? clock.snapshot() : clock.set(body)); }
-      catch (e) { return error(res, 400, e.message); }
+      catch (e) {
+        if (core.sendSandboxStateQuotaError(res, e)) return;
+        return error(res, 400, e.message);
+      }
     }
     if (p === '/mock/reset') {
       const target = body.sandbox || admission.record.id;
@@ -315,7 +320,10 @@ async function route(req, res) {
         if (!validFixture(snapshot)) return error(res, 400, 'Недопустимый fixture: organizations[], cashboxes[], documents[]; суммы целыми копейками');
         const result = sandboxRuntime.importState({ ...snapshot, sessions: {} }, admission.record.id, req);
         return result.ok ? core.sendJson(res, result) : sandboxError(res, result);
-      } catch (e) { return error(res, 400, e.message); }
+      } catch (e) {
+        if (core.sendSandboxStateQuotaError(res, e)) return;
+        return error(res, 400, e.message);
+      }
     }
     if (p === '/mock/scenarios') {
       if (req.method === 'GET') return core.sendJson(res, { rules: scenarios.listRules(), history: scenarios.listHistory() });
@@ -363,6 +371,7 @@ const server = http.createServer((req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   route(req, res).catch((e) => {
     if (res.headersSent || res.destroyed) return;
+    if (core.sendSandboxStateQuotaError(res, e)) return;
     const status = e.code === 'BODY_TOO_LARGE' ? 413 : e.code === 'SANDBOX_EXPIRED' ? 410
       : e.code === 'SANDBOX_EXISTS' ? 409 : e.code?.startsWith('SANDBOX_') ? 429 : e instanceof URIError ? 400 : 500;
     error(res, status, status === 500 ? 'Внутренняя ошибка мока' : e.message);

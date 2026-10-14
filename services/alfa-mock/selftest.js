@@ -244,6 +244,8 @@ function startChild(env = {}) {
     MOCK_SANDBOX_SWEEP_MS: '',
     MOCK_SANDBOX_MAX: '',
     MOCK_SANDBOX_MAX_DOCUMENTS: '',
+    MOCK_SANDBOX_MAX_STATE_BYTES: '',
+    MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES: '',
     MOCK_SANDBOX_RETENTION_MS: '',
     MOCK_SANDBOX_HOST_SUFFIX: '',
     MOCK_SANDBOX_CREATE_LIMIT: '',
@@ -313,7 +315,46 @@ function checkError(name, r, { code, field, status = 200 } = {}) {
 
 /* ------------------------------------------------------------------- main */
 
+async function testStateByteEnv() {
+  const verify = (name, condition) => { check(name, condition); };
+  const configs = [
+    { env: { MOCK_SANDBOX_MAX_STATE_BYTES: '1024', MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES: '0' }, code: 'sandbox_state_quota_exceeded', size: 2048 },
+    { env: { MOCK_SANDBOX_MAX_STATE_BYTES: '10000', MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES: '16000' }, code: 'sandbox_state_budget_exceeded', size: 8000 },
+    { env: { MOCK_SANDBOX_MAX_STATE_BYTES: '0', MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES: '0' }, code: null, size: 20000 },
+    { env: { MOCK_SANDBOX_MAX_STATE_BYTES: '', MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES: '' }, code: null, size: 20000 },
+  ];
+  for (const config of configs) {
+    const child = startChild({ MOCK_TENANCY: 'namespaces', ...config.env });
+    try {
+      const port = await child.port;
+      const call = async (method, url, body, id) => {
+        const headers = { 'X-Mock-Sandbox': id };
+        const response = await request(port, method, url, body, headers);
+        return { status: response.statusCode, body: response.json() };
+      };
+      if (config.code === 'sandbox_state_budget_exceeded') {
+        const first = await call('POST', '/mock/state', { state: { blob: 'я'.repeat(3000) } }, 'bytes-a');
+        const second = await call('POST', '/mock/state', { state: { blob: 'я'.repeat(3000) } }, 'bytes-b');
+        verify('PD-02: env global — две песочницы ниже суммарного бюджета проходят', first.status === 200 && second.status === 200);
+      }
+      const before = await call('GET', '/mock/state', undefined, 'bytes-target');
+      const result = await call('POST', '/mock/state', { state: { blob: 'x'.repeat(config.size) } }, 'bytes-target');
+      if (config.code) {
+        verify(`PD-02: env ${config.code} доходит до рантайма → HTTP 400 + errorCode + kind`,
+          result.status === 400 && result.body.errorCode === 400 && result.body.code === config.code && result.body.kind === 'bytes');
+        const after = await call('GET', '/mock/state', undefined, 'bytes-target');
+        verify('PD-02: отказ импорта не применяет состояние частично', JSON.stringify(after.body.state) === JSON.stringify(before.body.state));
+      } else {
+        verify('PD-02: env 0/пусто — импорт проходит', result.status === 200);
+      }
+    } finally {
+      await child.stop();
+    }
+  }
+}
+
 async function main() {
+  await testStateByteEnv();
   const receiverPort = await listen(receiver);
   const HOOK_URL = `http://127.0.0.1:${receiverPort}/hook`;
   const FLAKY_URL = `http://127.0.0.1:${receiverPort}/flaky`;

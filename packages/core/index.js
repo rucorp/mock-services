@@ -2200,6 +2200,23 @@ function createSandboxManager({ state, persist = () => {}, initialStateFactory }
 const SANDBOX_ID_UNSAFE = /[^a-zA-Z0-9_.-]/g;
 /** PD-02: лимит байт состояния одной песочницы по умолчанию (квота включена вместе с maxDocuments). */
 const DEFAULT_MAX_STATE_BYTES = 8 * 1024 * 1024;
+/** Квота per-sandbox ≠ память контейнера: общий бюджет JSON-состояний рантайма. */
+const DEFAULT_GLOBAL_MAX_STATE_BYTES = 64 * 1024 * 1024;
+
+/** Единый HTTP-отказ байтовых квот для управляющих и бизнес-записей адаптеров. */
+function sendSandboxStateQuotaError(res, error) {
+  if (!error || !['SANDBOX_QUOTA_BYTES', 'SANDBOX_STATE_BUDGET_EXCEEDED'].includes(error.code)) return false;
+  sendJson(res, {
+    errorCode: 400,
+    code: error.code === 'SANDBOX_QUOTA_BYTES' ? 'sandbox_state_quota_exceeded' : 'sandbox_state_budget_exceeded',
+    kind: 'bytes',
+    message: error.message,
+    sandbox: error.sandbox,
+    used: error.used,
+    limit: error.limit,
+  }, 400);
+  return true;
+}
 const SANDBOX_ID_MAX = 64;
 const SANDBOX_WORDS_ADJ = [
   'swift', 'calm', 'brave', 'lucky', 'quiet', 'bright', 'kind', 'bold',
@@ -2300,6 +2317,7 @@ function createSandboxRuntime({
   maxSandboxes = 0,
   maxDocuments = 0,
   maxStateBytes = null,
+  globalMaxStateBytes = DEFAULT_GLOBAL_MAX_STATE_BYTES,
   documentCounter = null,
   retention = null,
   defaultOwnerToken = '',
@@ -2320,6 +2338,9 @@ function createSandboxRuntime({
   const byteLimit = maxStateBytes === null || maxStateBytes === undefined
     ? (Number(maxDocuments) > 0 ? DEFAULT_MAX_STATE_BYTES : 0)
     : Math.max(0, Math.floor(Number(maxStateBytes) || 0));
+  const globalByteLimit = globalMaxStateBytes === null || globalMaxStateBytes === undefined
+    ? DEFAULT_GLOBAL_MAX_STATE_BYTES
+    : Math.max(0, Math.floor(Number(globalMaxStateBytes) || 0));
   const suffix = String(hostSuffix || '').trim().toLowerCase().replace(/^\./, '');
   const operators = (Array.isArray(operatorTokens) ? operatorTokens : [operatorTokens])
     .map((t) => String(t || '').trim())
@@ -2486,6 +2507,37 @@ function createSandboxRuntime({
     return rec.stateBytes;
   }
 
+  function totalStateBytes() {
+    let total = 0;
+    for (const rec of sandboxes.values()) total += stateBytesOf(rec);
+    return total;
+  }
+
+  function byteQuota(rec, inclusive = false, perSandbox = true) {
+    if (byteLimit <= 0 && globalByteLimit <= 0) return { ok: true };
+    const exceeds = (used, limit) => limit > 0 && (inclusive ? used >= limit : used > limit);
+    const bytes = stateBytesOf(rec);
+    if (perSandbox && exceeds(bytes, byteLimit)) return { ok: false, kind: 'bytes', code: 'SANDBOX_QUOTA_BYTES', used: bytes, limit: byteLimit };
+    if (globalByteLimit > 0) {
+      const total = totalStateBytes();
+      if (exceeds(total, globalByteLimit)) return { ok: false, kind: 'bytes', code: 'SANDBOX_STATE_BUDGET_EXCEEDED', used: total, limit: globalByteLimit };
+    }
+    return { ok: true };
+  }
+
+  function quotaError(rec, quota) {
+    const scope = quota.code === 'SANDBOX_QUOTA_BYTES' ? 'Байтовая квота песочницы' : 'Глобальный бюджет состояния песочниц';
+    const error = new Error(`${scope}: лимит исчерпан (${quota.used}/${quota.limit} байт)`);
+    Object.assign(error, quota, { sandbox: rec.id });
+    return error;
+  }
+
+  // Последний принятый JSON нужен для атомарного отката при persist(), в том
+  // числе при вложенных мутациях фасада. Не сериализуем соседей повторно.
+  function rememberState(rec) {
+    if (byteLimit > 0 || globalByteLimit > 0) rec.quotaSnapshot = JSON.stringify(rec.state);
+  }
+
   function flushRegistry() {
     if (saveTimer) {
       clearTimeout(saveTimer);
@@ -2537,7 +2589,17 @@ function createSandboxRuntime({
     if (typeof saveTimer.unref === 'function') saveTimer.unref();
   }
 
-  function persistRecord(rec, immediate = false) {
+  function persistRecord(rec, immediate = false, verifyPerSandbox = false) {
+    if (rec && (byteLimit > 0 || globalByteLimit > 0)) {
+      touch(rec);
+      const quota = byteQuota(rec, false, verifyPerSandbox);
+      if (!quota.ok) {
+        mergeValidatedInto(rec.state, JSON.parse(rec.quotaSnapshot || '{}'));
+        touch(rec);
+        throw quotaError(rec, quota);
+      }
+      rememberState(rec);
+    }
     if (!rec || rec.isDefault) {
       if (rec) touch(rec);
       defaultPersist();
@@ -2566,7 +2628,7 @@ function createSandboxRuntime({
     }
     const restored = freshState(id);
     mergeValidatedInto(restored, stored);
-    sandboxes.set(id, {
+    const rec = {
       id,
       isDefault: false,
       createdAt: item.createdAt || isoNow(),
@@ -2576,7 +2638,9 @@ function createSandboxRuntime({
       creds: item.creds || null,
       profile: item.profile || null,
       state: restored,
-    });
+    };
+    rememberState(rec);
+    sandboxes.set(id, rec);
     return true;
   }
 
@@ -2826,10 +2890,11 @@ function createSandboxRuntime({
     if (maxDocuments > 0 && used !== null && used >= maxDocuments) {
       return { ok: false, used, limit: maxDocuments };
     }
-    if (byteLimit > 0) {
-      const bytes = stateBytesOf(rec);
-      if (bytes >= byteLimit) return { ok: false, kind: 'bytes', used: bytes, limit: byteLimit };
-    }
+    const quota = byteQuota(rec, true);
+    // Глобальный отказ одинаков для всех адаптеров, независимо от их
+    // provider-shaped отказа по количеству документов.
+    if (!quota.ok && quota.code === 'SANDBOX_STATE_BUDGET_EXCEEDED') throw quotaError(rec, quota);
+    if (!quota.ok) return quota;
     return { ok: true, used, limit: maxDocuments };
   }
 
@@ -2858,8 +2923,14 @@ function createSandboxRuntime({
       profile: profile || null,
       state: freshState(id),
     };
+    rememberState(rec);
     sandboxes.set(id, rec);
-    persistRecord(rec, true);
+    try {
+      persistRecord(rec, true);
+    } catch (error) {
+      sandboxes.delete(id);
+      throw error;
+    }
     return rec;
   }
 
@@ -3157,24 +3228,12 @@ function createSandboxRuntime({
     const authRes = authorizeTarget(rec, auth);
     if (!authRes.ok) return { ok: false, sandbox: rec.id, error: authRes.error };
 
-    // PD-02: импорт — слияние; при превышении байтовой квоты откатываем состояние
-    // к снимку до слияния (JSON-состояние round-trip-безопасно).
-    const before = byteLimit > 0 ? JSON.stringify(rec.state) : null;
+    // Импорт и обычная запись проверяются одной квотой в persistRecord;
+    // снимок до импорта сохраняет актуальное состояние при отказе.
+    rememberState(rec);
     mergeValidatedInto(rec.state, safe);
-    if (byteLimit > 0) {
-      touch(rec);
-      const bytes = stateBytesOf(rec);
-      if (bytes > byteLimit) {
-        mergeValidatedInto(rec.state, JSON.parse(before));
-        touch(rec);
-        const e = new Error(`Снимок превышает байтовую квоту песочницы (${bytes} > ${byteLimit} байт)`);
-        e.code = 'SANDBOX_QUOTA_BYTES';
-        e.sandbox = rec.id;
-        throw e;
-      }
-    }
     rec.updatedAt = isoNow();
-    persistRecord(rec, true);
+    persistRecord(rec, true, true);
     return { ok: true, sandbox: rec.id };
   }
 
@@ -3265,6 +3324,7 @@ function createSandboxRuntime({
     },
   });
 
+  rememberState(defaultRecord);
   restoreRegistry();
 
   return {
@@ -3298,9 +3358,16 @@ function createSandboxRuntime({
     documents,
     checkDocuments,
     activeId: () => activeId,
-    stats: () => ({ mode: tenancy, activeId, count: sandboxes.size - 1, file: recordsDir || null }),
+    stats: () => ({ mode: tenancy, activeId, count: sandboxes.size - 1, file: recordsDir || null, maxStateBytes: byteLimit, globalMaxStateBytes: globalByteLimit }),
     flush: flushRegistry,
     restore: restoreRegistry,
+    // Адаптер восстанавливает default через свой store после создания рантайма.
+    refreshStateQuota: () => {
+      for (const rec of sandboxes.values()) {
+        touch(rec);
+        rememberState(rec);
+      }
+    },
   };
 }
 
@@ -3528,6 +3595,7 @@ module.exports = {
   applyRequestChaos,
   createSandboxManager,
   createSandboxRuntime,
+  sendSandboxStateQuotaError,
   resolveTenancyMode,
   generateSandboxId,
   sanitizeSandboxId,

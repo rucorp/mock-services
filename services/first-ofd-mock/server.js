@@ -96,6 +96,8 @@ const {
   MOCK_SANDBOX_TTL_MS = '',
   MOCK_SANDBOX_MAX = '',
   MOCK_SANDBOX_MAX_DOCUMENTS = '',
+  MOCK_SANDBOX_MAX_STATE_BYTES = '',
+  MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES = '',
   MOCK_SANDBOX_RETENTION_MS = '',
   MOCK_SANDBOX_HOST_SUFFIX = '',
   MOCK_SANDBOX_CREATE_LIMIT = '',
@@ -351,6 +353,8 @@ const sandboxRuntime = createSandboxRuntime({
   ttlMs: SANDBOX_TTL_MS,
   maxSandboxes: SANDBOX_MAX,
   maxDocuments: SANDBOX_MAX_DOCUMENTS,
+  maxStateBytes: parseMsOr(MOCK_SANDBOX_MAX_STATE_BYTES, null),
+  globalMaxStateBytes: parseMsOr(MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES, null),
   documentCounter: countFirstOfdDocuments,
   retention: firstOfdRetention,
   defaultOwnerToken: SANDBOX_OWNER_TOKEN,
@@ -1586,6 +1590,7 @@ function handleSandboxApi(req, res, url, body) {
           hint: `Сохраните ownerToken и креды песочницы: они показываются один раз. Токен очереди живёт ${TOKEN_TTL_SECS} с; callback не подписан — сверяйте его методом статуса.`,
         }, 201);
       } catch (error) {
+        if (core.sendSandboxStateQuotaError(res, error)) return;
         return jsonRaw(res, error.code === 'SANDBOX_EXISTS' ? 409 : 429, firstOfdError('limit_exceeded', error.message, { hint: 'Проверьте MOCK_SANDBOX_MAX и MOCK_SANDBOX_CREATE_LIMIT.' }));
       }
     }
@@ -1932,6 +1937,7 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
         if (!imported.ok) return sendSandboxError(res, { ok: false, kind: imported.error || 'unauthorized', sandbox: imported.sandbox || target });
         return sendJson(res, { ok: true, sandbox: imported.sandbox });
       } catch (error) {
+        if (core.sendSandboxStateQuotaError(res, error)) return;
         return jsonRaw(res, 400, firstOfdError('invalid_request', `Недопустимый снимок состояния: ${error.message}`, { field: 'state', hint: 'Опасные ключи __proto__, constructor и prototype запрещены.' }));
       }
     }
@@ -1945,6 +1951,7 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
         await deliveryQueue.tick();
         return sendJson(res, snapshot);
       } catch (error) {
+        if (core.sendSandboxStateQuotaError(res, error)) return;
         return jsonRaw(res, 400, firstOfdError('invalid_request', error.message, { field: 'advance|offset|iso', hint: 'Поля: advance (например "+2s"), offset (мс), iso (дата), reset (true).' }));
       }
     }
@@ -2057,6 +2064,7 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
 
 const server = http.createServer((req, res) => {
   route(req, res).catch((error) => {
+    if (core.sendSandboxStateQuotaError(res, error)) return;
     if (error && error.code === 'SANDBOX_EXPIRED') {
       try { sendSandboxError(res, { ok: false, kind: 'expired', sandbox: error.sandbox || 'default' }); } catch { /* headers sent */ }
       return;
@@ -2071,6 +2079,9 @@ const server = http.createServer((req, res) => {
 });
 
 restore();
+
+// После restore/startup-миграций снимок отката должен содержать восстановленные данные.
+sandboxRuntime.refreshStateQuota();
 
 if (require.main === module) {
   const port = Number(MOCK_PORT);

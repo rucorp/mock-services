@@ -10,6 +10,12 @@ SPDX-License-Identifier: Apache-2.0
 ## [Unreleased]
 
 ### Added
+- **PD-02, #74:** env `MOCK_SANDBOX_MAX_STATE_BYTES` во всех 9 адаптерах
+  (пусто сохраняет прежний per-sandbox дефолт) и глобальный JSON-бюджет
+  `globalMaxStateBytes` / `MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES`: 64 МиБ по
+  умолчанию, `0` выключает. Запись/импорт сверх бюджета → HTTP 400,
+  `errorCode`, `sandbox_state_budget_exceeded`, `kind: bytes`, откат состояния.
+  Обе env проброшены в include compose; документация и регрессии ядра/адаптеров.
 - **Контур.ОФД — read/reconciliation, Stage 2, #97.** Девятый сервис
   `kontur-ofd-mock` на :3108: plaintext auth → Sid + API key, организации,
   кассы, фискальные документы за дату/период и по ID; копейки, пагинация

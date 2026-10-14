@@ -1891,6 +1891,111 @@ async function main() {
     const over = rt.run(rt.admit({ headers: { 'x-mock-sandbox': 'quota' }, url: '/' }, 'business'), () => rt.checkDocuments());
     assert.strictEqual(over.ok, false);
     assert.strictEqual(over.kind, 'bytes');
+
+  });
+
+  await acheck('PD-02: глобальный бюджет суммирует default/A/B; HTTP 400, импорт и запись атомарны', async () => {
+    let persisted = 0;
+    const rt = core.createSandboxRuntime({
+      state: {}, maxStateBytes: 1000, globalMaxStateBytes: 160,
+      persist: () => { persisted += 1; }, initialStateFactory: () => ({ entries: {} }),
+    });
+    rt.create({ id: 'a' });
+    rt.create({ id: 'b' });
+    rt.importState({ entries: { x: 'я'.repeat(25) } }, 'a');
+    const beforeA = JSON.stringify(rt.find('a').state);
+    const beforeB = JSON.stringify(rt.find('b').state);
+    const entriesRef = rt.find('b').state.entries;
+    const server = http.createServer((_req, res) => {
+      try {
+        rt.importState({ entries: { y: 'я'.repeat(50) } }, 'b');
+        core.sendJson(res, { ok: true });
+      } catch (error) {
+        if (!core.sendSandboxStateQuotaError(res, error)) core.sendJson(res, { error: error.message }, 500);
+      }
+    });
+    const port = await listen(server);
+    try {
+      const response = await new Promise((resolve, reject) => {
+        http.get(`http://127.0.0.1:${port}/mock/state`, (res) => {
+          let body = '';
+          res.on('data', (chunk) => { body += chunk; });
+          res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(body) }));
+        }).on('error', reject);
+      });
+      assert.strictEqual(response.status, 400);
+      assert.strictEqual(response.body.errorCode, 400);
+      assert.strictEqual(response.body.code, 'sandbox_state_budget_exceeded');
+      assert.strictEqual(response.body.kind, 'bytes');
+      assert.ok(response.body.used > response.body.limit);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+    assert.strictEqual(JSON.stringify(rt.find('a').state), beforeA);
+    assert.strictEqual(JSON.stringify(rt.find('b').state), beforeB);
+    assert.strictEqual(rt.find('b').state.entries, entriesRef);
+    assert.throws(() => rt.run(rt.admit({ url: '/', headers: { 'x-mock-sandbox': 'b' } }), () => {
+      rt.state.entries.y = 'я'.repeat(50);
+      rt.persist();
+    }), (error) => error.code === 'SANDBOX_STATE_BUDGET_EXCEEDED');
+    assert.strictEqual(JSON.stringify(rt.find('b').state), beforeB);
+    // default тоже занимает бюджет, но отказ не вызывает внешнюю персистентность.
+    assert.throws(() => rt.run(rt.admit({ url: '/', headers: {} }), () => {
+      rt.state.blob = 'z'.repeat(160);
+      rt.persist();
+    }), (error) => error.code === 'SANDBOX_STATE_BUDGET_EXCEEDED');
+    assert.strictEqual(persisted, 0);
+    assert.strictEqual(JSON.stringify(rt.find('default').state), '{}');
+    rt.remove('a');
+    assert.strictEqual(rt.importState({ entries: { y: 'я'.repeat(50) } }, 'b').ok, true, 'удаление освобождает бюджет');
+  });
+
+  check('PD-02: 0 выключает глобальный бюджет; байтовые квоты независимы и дефолты сохранены', () => {
+    const off = core.createSandboxRuntime({ state: {}, maxStateBytes: 0, globalMaxStateBytes: 0 });
+    off.create({ id: 'a' });
+    off.create({ id: 'b' });
+    for (const id of ['a', 'b']) assert.strictEqual(off.importState({ blob: 'x'.repeat(1000) }, id).ok, true);
+    const per = core.createSandboxRuntime({ state: {}, maxStateBytes: 40, globalMaxStateBytes: 1000 });
+    assert.throws(() => per.importState({ blob: 'x'.repeat(40) }), (e) => e.code === 'SANDBOX_QUOTA_BYTES');
+    const global = core.createSandboxRuntime({ state: {}, maxStateBytes: 1000, globalMaxStateBytes: 40 });
+    assert.throws(() => global.importState({ blob: 'x'.repeat(40) }), (e) => e.code === 'SANDBOX_STATE_BUDGET_EXCEEDED');
+    const perOnly = core.createSandboxRuntime({ state: {}, maxStateBytes: 40, globalMaxStateBytes: 0 });
+    assert.throws(() => perOnly.importState({ blob: 'x'.repeat(40) }), (e) => e.code === 'SANDBOX_QUOTA_BYTES');
+    const defaults = core.createSandboxRuntime({ state: {}, maxDocuments: 1 });
+    assert.throws(() => defaults.importState({ blob: 'x'.repeat(8 * 1024 * 1024) }), (e) => e.code === 'SANDBOX_QUOTA_BYTES');
+    const defaultGlobal = core.createSandboxRuntime({ state: {} });
+    assert.strictEqual(defaultGlobal.stats().globalMaxStateBytes, 64 * 1024 * 1024);
+    assert.strictEqual(defaultGlobal.stats().maxStateBytes, 0);
+    assert.strictEqual(defaults.stats().maxStateBytes, 8 * 1024 * 1024);
+
+  });
+
+  check('PD-02: восстановленный default остаётся снимком отката, не заменяется начальным состоянием', () => {
+    const state = { entries: {} };
+    const rt = core.createSandboxRuntime({ state, globalMaxStateBytes: 100 });
+    // createStore.restore() у адаптеров выполняется после создания рантайма.
+    state.entries.saved = 'from-disk';
+    rt.refreshStateQuota();
+    const before = JSON.stringify(state);
+    rt.state.entries.oversized = 'x'.repeat(100);
+    assert.throws(() => rt.persist(), (e) => e.code === 'SANDBOX_STATE_BUDGET_EXCEEDED');
+    assert.strictEqual(JSON.stringify(state), before);
+  });
+
+  check('PD-02: точная граница, замена без двойного учёта и reset/TTL освобождают бюджет', () => {
+    let now = 0;
+    const rt = core.createSandboxRuntime({ state: {}, globalMaxStateBytes: 20, ttlMs: 10, now: () => now });
+    rt.create({ id: 'a' });
+    rt.importState({ blob: '1234567' }, 'a'); // 18 байт + default {} = 20
+    assert.throws(() => rt.run(rt.admit({ url: '/', headers: { 'x-mock-sandbox': 'a' } }), () => rt.checkDocuments()), (e) => e.code === 'SANDBOX_STATE_BUDGET_EXCEEDED');
+    assert.strictEqual(rt.importState({ blob: '7654321' }, 'a').ok, true);
+    rt.reset('a');
+    assert.strictEqual(rt.importState({ blob: '1234567' }, 'default').ok, true);
+    rt.reset('default');
+    rt.importState({ blob: '1234567' }, 'a');
+    now = 11;
+    rt.sweep();
+    assert.strictEqual(rt.importState({ blob: '1234567' }, 'default').ok, true);
   });
 
   /* ------------------------------------- PA-52: очередь per-sandbox в tickAll */
