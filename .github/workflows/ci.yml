@@ -2,8 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 name: CI
 
-# Раннер закреплён явно (ubuntu-24.04): страховка от авто-миграции
-# `ubuntu-latest` → Ubuntu 26.04. Апгрейд — отдельным контролируемым PR (MS-40).
+# Джоб `test` выбирает раннер переменной репозитория `CI_RUNNER` (self-hosted на
+# CHUWI, лейбл `rucorp-ci`) с fallback на закреплённый `ubuntu-24.04` (страховка от
+# авто-миграции `ubuntu-latest` → Ubuntu 26.04; апгрейд — отдельным PR, MS-40).
+# Джобы `docker` и `publish-ghcr` закреплены на `ubuntu-24.04`: они публикуют
+# фиксированные хостовые порты 3100–3107, занятые на разделяемом self-hosted хосте
+# (dev-стенд lovii-core). Канон: lovii_docs/canon/CI_RUNNERS_SELFHOSTED.md.
 
 on:
   push:
@@ -13,7 +17,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
     strategy:
       fail-fast: false
       matrix:
