@@ -95,6 +95,44 @@ Zero dependencies, Node >= 18. Self-test: `npm run test:core`.
 - `createErrorCatalog({provider, docsBase, codes})` — каталог ошибок DX-слоя:
   `{код, объяснение, поле, подсказка, ссылка на официальный раздел доки}`.
 
+## Песочницы (RFC-001): источники owner-token
+
+`createSandboxRuntime({mode, ...})` даёт адаптеру `admit`, `run`, `selector`,
+`ownerTokenOf`, `isOperatorToken`, `isOperatorRequest`, `recordAuthorized`,
+`recordByOwnerToken` и операции жизненного цикла песочниц. В `owned`-режиме
+(включается `MOCK_HOSTED=1` или явным `MOCK_TENANCY=owned`) доступ к песочнице
+даёт только её owner-token: **знание id доступа не даёт** (F-12).
+
+`ownerTokenOf(req)` читает owner-token в строгом порядке (задача #98):
+
+| # | Источник | Комментарий |
+|---|---|---|
+| 1 | `X-Sandbox-Token: <токен>` | явный заголовок владельца — самый приоритетный |
+| 2 | `X-Owner-Token: <токен>` | синоним; уступает `X-Sandbox-Token` |
+| 3 | `Authorization: Bearer <токен>` | fallback для клиентов, знающих только Bearer |
+| 4 | `?sandbox_token=<токен>` | последний источник |
+
+Порядок важен: у адаптеров, чей бизнес-контракт сам ходит по
+`Authorization: Bearer <токен>` (first-ofd — токен очереди, vtb — OAuth
+`access_token`), Bearer приоритетнее явного заголовка означал, что ядро
+принимало токен бизнес-авторизации за owner-token, владелец не находился и
+получал 401 «знание ID не является доступом». Bearer оставлен как fallback, а не
+убран: клиенты, передающие owner-token только в `Authorization`, продолжают
+работать.
+
+Правила, закреплённые тестами `packages/core/selftest.js`:
+
+- источник с пустым или пробельным значением считается **отсутствующим** и не
+  затеняет следующие источники;
+- невалидный/чужой owner-token → `admit` отвечает `kind: 'unauthorized'`
+  (HTTP 401), состояние песочницы не выдаётся;
+- операторский путь (`MOCK_OPERATOR_TOKEN`) от этого порядка не зависит:
+  `isOperatorRequest` дополнительно сверяет `tokenMatches` по самому
+  `Authorization` / `X-Operator-Token` / query, поэтому оператор с Bearer
+  узнаётся даже когда owner-заголовок занят чужим токеном;
+- при `mode` `namespaces`/`off` (self-hosted) owner-token не требуется вовсе, и
+  бизнес-заголовки адаптера не трактуются как owner-token.
+
 ## Как добавить нового провайдера (спека §2)
 
 1. Новый каталог в `services/<provider>-mock` с `server.js` на ядре.

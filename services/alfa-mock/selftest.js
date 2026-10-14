@@ -1059,7 +1059,7 @@ async function main() {
 
     /* --------------------------------------- owned-песочницы (дочерний процесс) */
     console.log('— песочницы (owned): свои userName/password/callbackSecret, ownerToken, изоляция');
-    const childOwned = startChild({ MOCK_TENANCY: 'owned', MOCK_SANDBOX_TOKEN: 'root-owner-token' });
+    const childOwned = startChild({ MOCK_TENANCY: 'owned', MOCK_SANDBOX_TOKEN: 'root-owner-token', MOCK_OPERATOR_TOKEN: 'op98' });
     children.push(childOwned);
     const portOwned = await childOwned.port;
 
@@ -1119,6 +1119,25 @@ async function main() {
     check('повторное создание team-b: 409', dupB.statusCode === 409);
     const crossB = await rest(portOwned, 'getOrderStatus.do', { ...sbxBJson.creds, orderId: orderIdA }, { 'X-Mock-Sandbox': 'team-b', 'X-Sandbox-Token': sbxBJson.ownerToken });
     checkError('изоляция: заказ песочницы A не виден из песочницы B', crossB, { code: 3 });
+
+    // #98: Альфа — не-Bearer адаптер (креды приходят в теле *.do), поэтому
+    // конфликта с Authorization нет; проверяем, что явный X-Sandbox-Token
+    // владельца не затеняется посторонним Bearer, а fallback и оператор живы.
+    const regNoisy = await rest(portOwned, 'register.do', { ...sbxAJson.creds, orderNumber: nextOrderNumber('sbxA-98'), amount: '100', returnUrl: 'https://shop.test/ok' },
+      { ...headersA, Authorization: 'Bearer gateway-or-proxy-noise' });
+    check('#98 owned: X-Sandbox-Token приоритетнее постороннего Authorization: Bearer (не-Bearer адаптер)',
+      (regNoisy.json() || {}).errorCode === 0, `HTTP ${regNoisy.statusCode} ${regNoisy.body.slice(0, 140)}`);
+    const regForeign = await rest(portOwned, 'register.do', { ...sbxAJson.creds, orderNumber: nextOrderNumber('sbxA-98f'), amount: '100', returnUrl: 'https://shop.test/ok' },
+      { 'X-Mock-Sandbox': sbxAJson.id, 'X-Sandbox-Token': 'sbx_foreign-token' });
+    check('#98 owned: чужой X-Sandbox-Token → 401 «знание ID ≠ доступ» (не-Bearer адаптер)',
+      regForeign.statusCode === 401, `HTTP ${regForeign.statusCode}`);
+    const meA98 = await request(portOwned, 'GET', '/sandboxes/me', undefined, { Authorization: `Bearer ${sbxAJson.ownerToken}` });
+    check('#98 owned: Bearer <owner-token> без явных заголовков → 200 (fallback сохранён, не-Bearer адаптер)',
+      meA98.statusCode === 200 && Boolean((meA98.json() || {}).sandbox), `HTTP ${meA98.statusCode}`);
+    const opA98 = await request(portOwned, 'GET', '/mock/state', undefined,
+      { 'X-Mock-Sandbox': sbxAJson.id, 'X-Sandbox-Token': 'sbx_foreign-token', Authorization: 'Bearer op98' });
+    check('#98 owned: оператор по Bearer обслужит песочницу даже с чужим X-Sandbox-Token',
+      opA98.statusCode === 200, `HTTP ${opA98.statusCode}`);
 
     const resetCreds = await request(portOwned, 'POST', '/sandboxes/me/reset-creds', {}, headersA);
     const newCreds = (resetCreds.json() || {}).creds || {};

@@ -55,6 +55,30 @@ SPDX-License-Identifier: Apache-2.0
   `docs/integration/first-ofd.md` «за 10 минут». Регресс/selftest:
   `services/first-ofd-mock/selftest.js` (94 проверки).
 
+### Fixed
+- **#98 — owned-режим: приоритет явных `X-Sandbox-Token`/`X-Owner-Token` над
+  `Authorization: Bearer` в `ownerTokenOf` ядра (`packages/core/index.js`).**
+  В hosted-режиме (`MOCK_HOSTED=1`) адаптеры, чей бизнес-контракт сам ходит по
+  `Authorization: Bearer <токен>` (Первый ОФД — токен очереди из `/getToken`,
+  ВТБ — OAuth `access_token`), получали 401 «знание ID не является доступом»:
+  ядро читало Bearer первым и принимало токен бизнес-авторизации адаптера за
+  owner-token, затеняя явный заголовок владельца. Порядок источников теперь:
+  `X-Sandbox-Token` → `X-Owner-Token` → `Authorization: Bearer` (fallback для
+  клиентов, знающих только Bearer) → `?sandbox_token=`; источник с пустым или
+  пробельным значением считается отсутствующим и не затеняет следующие.
+  Свойство «знание ID ≠ доступ» сохранено (чужой/битый owner-token → 401 без
+  выдачи состояния, адаптеры не регрессируют), операторский путь по
+  `Authorization: Bearer`/`X-Operator-Token`/query не изменился, поведение
+  self-hosted (`namespaces`/`off`) не затронуто.
+  Регресс-тесты: `packages/core/selftest.js` (порядок источников; owned-режим +
+  Bearer адаптера → доступ владельцу; чужой/битый `X-Sandbox-Token` → 401;
+  Bearer-fallback; оператор; self-hosted) и end-to-end проверки в
+  `services/first-ofd-mock/selftest.js`, `services/vtb-mock/selftest.js`
+  (Bearer-адаптеры), `services/atol-mock/selftest.js`,
+  `services/alfa-mock/selftest.js` (не-Bearer адаптеры).
+  Документация: `packages/core/README.md` (порядок источников owner-token),
+  `SECURITY.md` (модель угроз песочниц), `docs/rfc/RFC-001-multi-tenant-sandboxes.md` §6.
+
 ## [0.6.0] — 2026-10-13
 
 ### Added

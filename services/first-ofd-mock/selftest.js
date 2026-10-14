@@ -764,6 +764,65 @@ async function main() {
         (await request(hostedPort, 'GET', '/mock/time')).statusCode === 401
         && (await request(hostedPort, 'GET', '/health')).statusCode === 200);
     }
+
+    // #98: owned-режим + бизнес-контракт на Authorization: Bearer <токен очереди>.
+    // Явный X-Sandbox-Token владельца не должен затеняться токеном очереди.
+    console.log('— #98 owned: Bearer-адаптер — приоритет X-Sandbox-Token над Authorization: Bearer');
+    {
+      const ownedChild = startChild({
+        MOCK_HOSTED: '1',
+        MOCK_OPERATOR_TOKEN: 'op98',
+        MOCK_FIRST_OFD_PROCESS_MS: '1',
+      });
+      children.push(ownedChild);
+      const oPort = await ownedChild.port;
+      const created = await request(oPort, 'POST', '/sandboxes', {});
+      const createdJson = created.json() || {};
+      const ownerToken = createdJson.ownerToken;
+      const sbxId = createdJson.id;
+      const sbxCreds = createdJson.creds || {};
+      check('#98 hosted: POST /sandboxes — id, ownerToken и креды песочницы',
+        created.statusCode === 201 && Boolean(sbxId) && Boolean(ownerToken) && Boolean(sbxCreds.login),
+        JSON.stringify(createdJson).slice(0, 160));
+
+      const HK = { 'X-Mock-Sandbox': sbxId, 'X-Sandbox-Token': ownerToken };
+      const tokenRes = await getToken(oPort, { login: sbxCreds.login, pass: sbxCreds.pass, headers: HK });
+      const queueToken = (tokenRes.json() || {}).token;
+      check('#98 hosted: креды песочницы выдают токен очереди', Boolean(queueToken), tokenRes.body.slice(0, 160));
+
+      // (а) бизнес-вызов: Bearer <токен очереди> + X-Sandbox-Token <owner-token> → заявка принята
+      const owned = await submit(oPort, queueToken, 'receipt', receiptBody({ document: { totalSum: 12 } }), HK);
+      check('#98 hosted: Bearer <токен очереди> + X-Sandbox-Token <owner-token> → 200 (было 401 «знание ID ≠ доступ»)',
+        owned.response.statusCode === 200 && Boolean(owned.requestId),
+        `HTTP ${owned.response.statusCode} ${owned.response.body.slice(0, 160)}`);
+      // (а′) control-plane владельца (recordByOwnerToken) с тем же набором заголовков
+      const ownerControl = await request(oPort, 'GET', '/mock/state', null, { ...HK, Authorization: `Bearer ${queueToken}` });
+      check('#98 hosted: /mock/state владельца с бизнес-Bearer → 200 (control-plane не теряется)',
+        ownerControl.statusCode === 200, `HTTP ${ownerControl.statusCode}`);
+
+      // (б) битый/чужой X-Sandbox-Token → 401, токен очереди доступа не даёт
+      const foreign = await submit(oPort, queueToken, 'receipt', receiptBody(), { 'X-Mock-Sandbox': sbxId, 'X-Sandbox-Token': 'sbx_foreign-token' });
+      check('#98 hosted: чужой X-Sandbox-Token → 401 «знание ID ≠ доступ»', foreign.response.statusCode === 401,
+        `HTTP ${foreign.response.statusCode}`);
+      const idOnly = await submit(oPort, queueToken, 'receipt', receiptBody(), { 'X-Mock-Sandbox': sbxId });
+      check('#98 hosted: только ID + токен очереди → 401 (бизнес-Bearer — не owner-token)',
+        idOnly.response.statusCode === 401, `HTTP ${idOnly.response.statusCode}`);
+      // ID песочницы в тексте 401 — это то, что клиент сам запросил; утечкой был бы state.
+      const noLeak = await request(oPort, 'GET', '/mock/state', null, { 'X-Mock-Sandbox': sbxId, 'X-Sandbox-Token': 'sbx_foreign-token', Authorization: `Bearer ${queueToken}` });
+      check('#98 hosted: чужой токен не открывает состояние песочницы (401, state не выдаётся)',
+        noLeak.statusCode === 401 && !(noLeak.json() || {}).state && !noLeak.body.includes('totalSum'),
+        `HTTP ${noLeak.statusCode}`);
+
+      // (в) fallback сохранён: только Authorization: Bearer <owner-token> → /sandboxes/me отвечает
+      const fallback = await request(oPort, 'GET', '/sandboxes/me', undefined, { Authorization: `Bearer ${ownerToken}` });
+      check('#98 hosted: Bearer <owner-token> без явных заголовков → 200 (fallback сохранён)',
+        fallback.statusCode === 200 && (fallback.json() || {}).sandbox, `HTTP ${fallback.statusCode}`);
+
+      // (г) операторский путь не сломан: Bearer оператора узнаётся даже при затеняющем owner-заголовке
+      const operator = await request(oPort, 'GET', '/mock/state', null, { 'X-Mock-Sandbox': sbxId, 'X-Sandbox-Token': 'sbx_foreign-token', Authorization: 'Bearer op98' });
+      check('#98 hosted: оператор по Bearer обслужит песочницу даже с чужим X-Sandbox-Token',
+        operator.statusCode === 200, `HTTP ${operator.statusCode}`);
+    }
   } finally {
     for (const child of children) await child.stop();
     callbackReceiver.close();

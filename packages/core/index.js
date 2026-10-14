@@ -2651,12 +2651,31 @@ function createSandboxRuntime({
     return { id: '', source: null };
   }
 
+  /**
+   * Owner-token запроса (#98). Порядок источников — сначала ЯВНЫЕ заголовки
+   * владельца, затем `Authorization: Bearer` (fallback для клиентов, знающих
+   * только его), затем query `?sandbox_token=`:
+   *
+   *   1. `X-Sandbox-Token`   2. `X-Owner-Token`
+   *   3. `Authorization: Bearer <…>`   4. `?sandbox_token=`
+   *
+   * Раньше Bearer читался первым и затенял явный owner-заголовок у адаптеров,
+   * чей бизнес-контракт сам ходит по `Authorization: Bearer <токен>` (first-ofd —
+   * токен очереди, vtb — OAuth): ядро принимало токен бизнес-авторизации за
+   * owner-token, владелец не находился и получал 401 «знание ID ≠ доступ».
+   * Источник с пустым/пробельным значением считается отсутствующим — он не
+   * затеняет следующие источники.
+   */
   function ownerTokenOf(req) {
     const headers = (req && req.headers) || {};
+    const direct = String(headers['x-sandbox-token'] || '').trim()
+      || String(headers['x-owner-token'] || '').trim();
+    if (direct) return direct;
     const auth = String(headers.authorization || '');
-    if (auth.toLowerCase().startsWith('bearer ')) return auth.slice(7).trim();
-    const direct = headers['x-sandbox-token'] || headers['x-owner-token'];
-    if (direct) return String(direct).trim();
+    if (auth.toLowerCase().startsWith('bearer ')) {
+      const bearer = auth.slice(7).trim();
+      if (bearer) return bearer;
+    }
     try {
       const u = new URL((req && req.url) || '/', 'http://mock.local');
       return String(u.searchParams.get('sandbox_token') || '').trim();
@@ -2669,6 +2688,13 @@ function createSandboxRuntime({
     return Boolean(token) && operators.some((expected) => safeEqual(token, expected));
   }
 
+  /**
+   * Операторский путь (#98): распознаётся и по owner-источникам
+   * (`ownerTokenOf`), и напрямую по `tokenMatches` (Bearer / X-Operator-Token /
+   * query). Второй проход обязателен: после смены приоритета в `ownerTokenOf`
+   * явный owner-заголовок арендатора затеняет `Authorization: Bearer`, поэтому
+   * оператор, пришедший с Bearer, должен узнаваться по самому Bearer.
+   */
   function isOperatorRequest(req) {
     if (!req) return false;
     if (isOperatorToken(ownerTokenOf(req))) return true;

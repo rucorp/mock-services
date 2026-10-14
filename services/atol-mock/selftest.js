@@ -794,7 +794,7 @@ async function main() {
     }
 
     // Hosted-режим (tenancy=owned): у песочницы свои креды АТОЛ и своя группа.
-    let hostedChild = startChild({ MOCK_HOSTED: '1', MOCK_PROCESS_MS: '200' });
+    let hostedChild = startChild({ MOCK_HOSTED: '1', MOCK_PROCESS_MS: '200', MOCK_OPERATOR_TOKEN: 'op98' });
     try {
       const hPort = await hostedChild.port;
       const created = await request(hPort, 'POST', '/sandboxes', { sandbox: 't1' });
@@ -836,6 +836,27 @@ async function main() {
       check('hosted: ofd_receipt_url несёт селектор песочницы',
         /sandbox=t1/.test((hRep.json().payload || {}).ofd_receipt_url || ''),
         String((hRep.json().payload || {}).ofd_receipt_url));
+      // #98: АТОЛ — не-Bearer адаптер (бизнес-авторизация заголовком `Token`),
+      // поэтому конфликта с Authorization нет; проверяем, что явный X-Sandbox-Token
+      // владельца не затеняется посторонним Bearer (эхо/шлюз/прокси) и что
+      // fallback на Bearer <owner-token> и операторский путь сохранены.
+      const hSellNoisy = await request(hPort, 'POST', `/possystem/v4/${creds.atolGroup}/sell`, doc('st-host-98'),
+        { ...HT, Authorization: 'Bearer gateway-or-proxy-noise' });
+      check('#98 hosted: X-Sandbox-Token приоритетнее постороннего Authorization: Bearer (не-Bearer адаптер)',
+        hSellNoisy.statusCode === 200 && Boolean(hSellNoisy.json().uuid),
+        `HTTP ${hSellNoisy.statusCode} ${hSellNoisy.body.slice(0, 140)}`);
+      const hSellForeign = await request(hPort, 'POST', `/possystem/v4/${creds.atolGroup}/sell`, doc('st-host-98x'),
+        { ...HK, Token: hToken.json().token, 'X-Sandbox-Token': 'sbx_foreign-token' });
+      check('#98 hosted: чужой X-Sandbox-Token → 401 «знание ID ≠ доступ» (не-Bearer адаптер)',
+        hSellForeign.statusCode === 401, `HTTP ${hSellForeign.statusCode}`);
+      const hMe = await request(hPort, 'GET', '/sandboxes/me', undefined, { Authorization: `Bearer ${ownerToken}` });
+      check('#98 hosted: Bearer <owner-token> без явных заголовков → 200 (fallback сохранён, не-Bearer адаптер)',
+        hMe.statusCode === 200 && (hMe.json() || {}).sandbox, `HTTP ${hMe.statusCode}`);
+      const hOp = await request(hPort, 'GET', '/mock/state', undefined,
+        { 'X-Mock-Sandbox': 't1', 'X-Sandbox-Token': 'sbx_foreign-token', Authorization: 'Bearer op98' });
+      check('#98 hosted: оператор по Bearer обслужит песочницу даже с чужим X-Sandbox-Token',
+        hOp.statusCode === 200, `HTTP ${hOp.statusCode}`);
+
       const removed = await request(hPort, 'DELETE', '/sandboxes/me', undefined, { 'X-Sandbox-Token': ownerToken });
       check('hosted: владелец удаляет свою песочницу', removed.statusCode === 200 && removed.json().removed === 't1',
         removed.body.slice(0, 120));
