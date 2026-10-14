@@ -987,6 +987,9 @@ function validateTransactionRequest(type, body) {
         cashboxParameters: cashbox.value,
         requestMetadata: metadata.value,
         document: null,
+        // Эхо «заявка как принята» и для StateCommandRequest (README/гайд
+        // обещают полную заявку для всех типов; у receipt-типов — ниже).
+        rawRequest: body,
       },
     };
   }

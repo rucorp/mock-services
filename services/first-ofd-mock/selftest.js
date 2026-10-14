@@ -478,6 +478,10 @@ async function main() {
     const openStatus = (await api(port, 'GET', `${QUEUE}/status/${openShift.requestId}`, token)).json() || {};
     check('openShift: COMPLETED, смена открыта (shiftState=OPEN)',
       openStatus.status === 'COMPLETED' && openStatus.payload && openStatus.payload.shiftState === 'OPEN' && openStatus.payload.shiftNumber >= 1);
+    const openTxn = (await api(port, 'GET', `${QUEUE}/transaction/${openShift.requestId}`, token)).json() || {};
+    check('openShift: GET transaction отдаёт эхо request (StateCommandRequest «как принят»)',
+      Boolean(openTxn.request) && openTxn.request.requestMetadata && openTxn.request.requestMetadata.userGroup === 'MOCKGROUP'
+      && openTxn.request.document === undefined && Boolean(openTxn.result) && openTxn.result.requestId === openShift.requestId);
     const openAgain = await submit(port, token, 'openShift', {
       cashboxParameters: { userInn: '7842223709' },
       requestMetadata: { userGroup: 'MOCKGROUP', callbackUrl: '' },
