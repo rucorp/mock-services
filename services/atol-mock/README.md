@@ -181,7 +181,7 @@ ACK, подписи и расписания повторов (`docs/reference/at
 | `MOCK_PORT` | `3103` | порт |
 | `MOCK_ATOL_LOGIN` / `MOCK_ATOL_PASSWORD` | `v4-online-atol-ru` / `iGFFuihss` | креды стенда (алиасы `ATOL_LOGIN`, `ATOL_PASSWORD`) |
 | `MOCK_ATOL_GROUP` | `v4-online-atol-ru_4179` | группа по умолчанию (алиас `ATOL_GROUP`) |
-| `MOCK_GROUPS` | — | дополнительные разрешённые группы через запятую |
+| `MOCK_GROUPS` | — | дополнительные разрешённые группы через запятую (алиас: `MOCK_ATOL_GROUPS`) |
 | `MOCK_TOKEN_TTL_MS` | 24 ч | TTL токена (`0` — без истечения) |
 | `MOCK_PROCESS_MS` | `15000` | задержка `wait → done` |
 | `MOCK_CALLBACK_RETRY_MS` / `MOCK_CALLBACK_MAX_ATTEMPTS` | `10000` / `24` | ретраи callback |

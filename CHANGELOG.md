@@ -17,6 +17,19 @@ SPDX-License-Identifier: Apache-2.0
   `errorCode`, `sandbox_state_budget_exceeded`, `kind: bytes`, откат состояния.
   Обе env проброшены в include compose; документация и регрессии ядра/адаптеров.
 
+### Fixed
+- **MS-02 — include-контур не подхватывает env потребителя.** Из `docker-compose.include.yml`
+  убраны fallback-и на переменные потребителя (`TBANK_*`, `FERMA_*`, `YOOKASSA_*`, `ATOL_*`,
+  `ALFA_*` — 14 строк): значения берутся только из `MOCK_*`-переменных контура (синтетические
+  дефолты). Исключены коллизии с env реальных интеграций потребителя.
+- **PD-05 (хвост MS-02): `MOCK_GROUPS` для atol-mock.** В include-контуре `MOCK_GROUPS`
+  теперь основной источник и для atol (алиас `MOCK_ATOL_GROUPS` поддержан); README atol
+  документирует алиас. Потребитель, задавший документированную `MOCK_GROUPS`, влияет
+  и на kassa, и на atol.
+- **first-ofd-mock: эхо `request` для StateCommandRequest.** `GET /api/external/queue/v1/
+  transaction/{requestId}` отдаёт тело заявки «как принято» для всех типов
+  (receipt/receiptCorrection/смены/отчёт), как обещает README; регресс в selftest.
+
 ## [0.7.0] — 2026-10-14
 
 ### Added
