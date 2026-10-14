@@ -1,0 +1,117 @@
+# © 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
+#
+# Самодостаточный стенд «банк + касса» (tbank-mock :3100 + kassa-mock/Ferma :3101)
+# из опубликованного образа GHCR — без клонирования репозитория и без сборки.
+#
+# Запуск одной командой:
+#   curl -fsSLO https://raw.githubusercontent.com/rucorp/mock-services/main/docker-compose.staging.yml
+#   docker compose -f docker-compose.staging.yml up -d
+#
+# Порты по умолчанию слушают только 127.0.0.1; сетевой доступ — осознанно:
+#   MOCK_TBANK_BIND_IP=0.0.0.0 MOCK_KASSA_BIND_IP=0.0.0.0 docker compose -f docker-compose.staging.yml up -d
+#   (на публичном хосте обязательно MOCK_OPERATOR_TOKEN/MOCK_ADMIN_TOKEN, firewall и TLS)
+#
+# Подключение приложения (потребительская точка зрения):
+#   URL API банка      → http://<хост>:3100/v2        (health: /health)
+#   URL кассы (Ferma)  → http://<хост>:3101/possystem/v1  (health: /healthz)
+#   Публичные URL платежных страниц/чеков задаются MOCK_TBANK_PUBLIC_BASE_URL
+#   и MOCK_KASSA_PUBLIC_BASE_URL (по умолчанию — localhost-порты).
+#
+# Релиз закреплён дайджестом: обновление — только контролируемым bump
+# (см. «Обновление базового образа» в CONTRIBUTING.md); пустой MOCK_STAGING_IMAGE_DIGEST=
+# снимает pin. Токены администратора/оператора задаются ПЕРЕД первым запуском
+# на общем хосте — после старта состояние уже записано в volume.
+
+services:
+  tbank-mock:
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.6.0}${MOCK_STAGING_IMAGE_DIGEST-@sha256:8d0314fd5bf5f73edf1937553d069240cdf835026940e6ac3b6c5746b9df7987}
+    working_dir: /app
+    command: ["node", "services/tbank-mock/server.js"]
+    ports:
+      - "${MOCK_TBANK_BIND_IP:-127.0.0.1}:${MOCK_TBANK_HOST_PORT:-3100}:3100"
+    environment:
+      MOCK_HOST: "0.0.0.0"
+      MOCK_PORT: "3100"
+      MOCK_HEALTH_PATH: "/health"
+      MOCK_ACQAPI_CLIENT_ID: "${MOCK_ACQAPI_CLIENT_ID:-partner}"
+      MOCK_ACQAPI_CLIENT_SECRET: "${MOCK_ACQAPI_CLIENT_SECRET:-partner}"
+      MOCK_ACQAPI_TOKEN_TTL_MS: "${MOCK_ACQAPI_TOKEN_TTL_MS:-1h}"
+      MOCK_PROFILE: "${MOCK_TBANK_PROFILE:-plain}"
+      MOCK_TERMINAL_KEY: "${MOCK_TERMINAL_KEY:-TBANKMOCKTEST}"
+      MOCK_TERMINAL_PASSWORD: "${MOCK_TERMINAL_PASSWORD:-mockpass123}"
+      MOCK_PUBLIC_BASE_URL: "${MOCK_TBANK_PUBLIC_BASE_URL:-http://localhost:${MOCK_TBANK_HOST_PORT:-3100}}"
+      MOCK_RETRY_MS: "${MOCK_RETRY_MS:-60000}"
+      MOCK_MAX_ATTEMPTS: "${MOCK_MAX_ATTEMPTS:-24}"
+      MOCK_STRICT_TOKEN: "${MOCK_STRICT_TOKEN:-true}"
+      MOCK_BLOCK_PRIVATE_WEBHOOKS: "${MOCK_BLOCK_PRIVATE_WEBHOOKS:-}"
+      MOCK_VIRTUAL_CLOCK: "${MOCK_VIRTUAL_CLOCK:-}"
+      MOCK_ADMIN_TOKEN: "${MOCK_ADMIN_TOKEN:-}"
+      MOCK_OPERATOR_TOKEN: "${MOCK_OPERATOR_TOKEN:-}"
+      MOCK_HOSTED: "${MOCK_HOSTED:-false}"
+      MOCK_TENANCY: "${MOCK_TENANCY:-}"
+      MOCK_SANDBOX_TOKEN: "${MOCK_SANDBOX_TOKEN:-}"
+      MOCK_SANDBOX_TTL_MS: "${MOCK_SANDBOX_TTL_MS:-}"
+      MOCK_SANDBOX_MAX: "${MOCK_SANDBOX_MAX:-}"
+      MOCK_STATE_FILE: "/data/tbank-state.json"
+    volumes:
+      - mock-staging-data:/data
+    labels:
+      caddy: "${MOCK_TBANK_CADDY_DOMAIN:-}"
+      caddy.reverse_proxy: "{{upstreams 3100}}"
+    mem_limit: "${MOCK_MEM_LIMIT:-128m}"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3100,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    restart: unless-stopped
+
+  kassa-mock:
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.6.0}${MOCK_STAGING_IMAGE_DIGEST-@sha256:8d0314fd5bf5f73edf1937553d069240cdf835026940e6ac3b6c5746b9df7987}
+    working_dir: /app
+    command: ["node", "services/kassa-mock/server.js"]
+    ports:
+      - "${MOCK_KASSA_BIND_IP:-127.0.0.1}:${MOCK_KASSA_HOST_PORT:-3101}:3101"
+    environment:
+      MOCK_HOST: "0.0.0.0"
+      MOCK_PORT: "3101"
+      MOCK_HEALTH_PATH: "/healthz"
+      MOCK_FERMA_LOGIN: "${MOCK_FERMA_LOGIN:-loviitest}"
+      MOCK_FERMA_PASSWORD: "${MOCK_FERMA_PASSWORD:-mockpass123}"
+      MOCK_PROCESS_MS: "${MOCK_PROCESS_MS:-4000}"
+      MOCK_CALLBACK_RETRY_MS: "${MOCK_CALLBACK_RETRY_MS:-10000}"
+      MOCK_CALLBACK_MAX_ATTEMPTS: "${MOCK_CALLBACK_MAX_ATTEMPTS:-24}"
+      MOCK_TOKEN_TTL_MS: "${MOCK_TOKEN_TTL_MS:-43200000}"
+      MOCK_VALIDATE_RECEIPTS: "${MOCK_VALIDATE_RECEIPTS:-true}"
+      MOCK_GROUPS: "${MOCK_GROUPS:-Main}"
+      MOCK_AGENT_LINE: "${MOCK_AGENT_LINE:-ТЕСТОВАЯ КАССА (МОК)}"
+      MOCK_AGENT_INN: "${MOCK_AGENT_INN:-7800000000}"
+      MOCK_PUBLIC_BASE_URL: "${MOCK_KASSA_PUBLIC_BASE_URL:-http://localhost:${MOCK_KASSA_HOST_PORT:-3101}}"
+      MOCK_BLOCK_PRIVATE_WEBHOOKS: "${MOCK_BLOCK_PRIVATE_WEBHOOKS:-}"
+      MOCK_VIRTUAL_CLOCK: "${MOCK_VIRTUAL_CLOCK:-}"
+      MOCK_ADMIN_TOKEN: "${MOCK_ADMIN_TOKEN:-}"
+      MOCK_OPERATOR_TOKEN: "${MOCK_OPERATOR_TOKEN:-}"
+      MOCK_HOSTED: "${MOCK_HOSTED:-false}"
+      MOCK_TENANCY: "${MOCK_TENANCY:-}"
+      MOCK_SANDBOX_TOKEN: "${MOCK_SANDBOX_TOKEN:-}"
+      MOCK_SANDBOX_TTL_MS: "${MOCK_SANDBOX_TTL_MS:-}"
+      MOCK_SANDBOX_MAX: "${MOCK_SANDBOX_MAX:-}"
+      MOCK_STATE_FILE: "/data/kassa-state.json"
+    volumes:
+      - mock-staging-data:/data
+    labels:
+      caddy: "${MOCK_KASSA_CADDY_DOMAIN:-}"
+      caddy.reverse_proxy: "{{upstreams 3101}}"
+    mem_limit: "${MOCK_MEM_LIMIT:-128m}"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3101,path:'/healthz'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    restart: unless-stopped
+
+volumes:
+  mock-staging-data:
