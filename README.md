@@ -10,7 +10,7 @@ SPDX-License-Identifier: Apache-2.0
 провайдером** — с честными схемами, кодами ошибок, сценариями отказов и
 внятными подсказками «что не так в запросе и как это чинить».
 
-> Статус: **alpha (0.6.0)**. Репозиторий готовится к публикации:
+> Статус: **alpha (0.7.0)**. Репозиторий готовится к публикации:
 > см. [аудит](docs/audit/AUDIT-2026-10-08.md) и [дорожную карту](#дорожную-карту).
 > Сегодня поддерживается: эквайринг Т-Банка (обычный + Мультирасчеты Wave 2, СБП QR, рекурренты `RebillId`/`Charge`, регистрация партнёров `acqapi`, чарджбэки e2e,
 > выплаты e2c, верификация AV), облачная касса OFD Ferma (полная матрица 54-ФЗ:
@@ -89,6 +89,24 @@ npm run start:kontur-ofd     # http://localhost:3108
 # 3. Проверить сам стенд
 npm test                     # selftest ядра + всех адаптеров
 ```
+
+### Стенд «банк + касса» одной командой (без клонирования репозитория)
+
+`docker-compose.staging.yml` — самодостаточный стенд из двух сервисов
+(tbank-mock :3100 `/health` + kassa-mock/Ferma :3101 `/healthz`) из опубликованного
+образа GHCR, закреплённого дайджестом:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/rucorp/mock-services/main/docker-compose.staging.yml
+docker compose -f docker-compose.staging.yml up -d
+```
+
+Приложение подключается consumer-ски: URL API банка → `http://<хост>:3100/v2`,
+URL кассы Ferma → `http://<хост>:3101/possystem/v1`; публичные URL платёжных
+страниц/чеков задаются `MOCK_TBANK_PUBLIC_BASE_URL`/`MOCK_KASSA_PUBLIC_BASE_URL`.
+По умолчанию порты слушают только `127.0.0.1`; для общего хоста задайте
+`MOCK_OPERATOR_TOKEN`/`MOCK_ADMIN_TOKEN` **до** первого запуска и поднимите
+TLS-прокси — см. [`SECURITY.md`](SECURITY.md).
 
 Инструкции «интеграция за 10 минут»: [`docs/integration/tbank-eacq.md`](docs/integration/tbank-eacq.md)
 (эквайринг), [`docs/integration/ferma-ofd.md`](docs/integration/ferma-ofd.md)

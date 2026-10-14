@@ -1,7 +1,7 @@
 {
   "$comment": "© 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0; SPDX-License-Identifier: Apache-2.0",
   "name": "mock-services",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "description": "Mock bank & fiscal (OFD) services for testing payment integrations against official provider protocols",
   "scripts": {
@@ -61,9 +61,10 @@
   "files": [
     "packages",
     "services",
-    "scripts",
+    "scripts/docker-healthcheck.js",
     "protocols",
     "docker-compose.include.yml",
+    "docker-compose.staging.yml",
     "docs/integration",
     "docs/openapi",
     "README.md",
