@@ -200,7 +200,7 @@ default-стенд): `POST /sandboxes` выдаёт песочницу с **св
 | `MOCK_CALLBACK_CHECKSUM` | `true` | `false` — неподписанные callback (эмуляция оговорки PDF) |
 | `MOCK_SESSION_TIMEOUT_SECS` | `1200` | дефолтный срок жизни заказа (переопределяется `sessionTimeoutSecs`); число секунд либо длительность (`'20m'`, `'1h'`), `0`/непарсимое — WARN и `1200` |
 | `MOCK_ALFA_TERMINAL_ID` | `ALFA-MOCK-1` | `terminalId` в ответах статуса |
-| `MOCK_PUBLIC_BASE_URL` | `http://localhost:3104` | база для `formUrl` |
+| `MOCK_PUBLIC_BASE_URL` | `http://localhost:${MOCK_ALFA_HOST_PORT:-3104}` | база для `formUrl` |
 | `MOCK_DEFAULT_CALLBACK_URL` | — | приёмник GET-callback по умолчанию (mock-расширение) |
 | `MOCK_CALLBACK_RETRY_MS` / `MOCK_CALLBACK_MAX_ATTEMPTS` | `10000` / `24` | ретраи доставки — **mock-конфиг** (PDF параметры не задаёт); интервал — мс или длительность (`'1h'`), `0` — повтор без паузы; число попыток < 1 — WARN и 1 попытка |
 | `MOCK_STATE_FILE` | — | персистентность состояния между рестартами |

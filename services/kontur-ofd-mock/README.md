@@ -77,7 +77,7 @@ Docker: `docker build -t mock-services:kontur-local .`, затем
 | `MOCK_KONTUR_OFD_PASSWORD` | пусто; UTF-8 plaintext password, не выводится в лог |
 | `MOCK_KONTUR_OFD_API_KEY` | пусто; дополнительный ключ data API, не выводится в лог |
 | `MOCK_KONTUR_OFD_SID_TTL_SECS` | `2592000`; целые секунды 1..31536000 на виртуальных часах |
-| `MOCK_KONTUR_OFD_PUBLIC_BASE_URL` | `http://localhost:3108`; публичная база provisioning-ссылок |
+| `MOCK_KONTUR_OFD_PUBLIC_BASE_URL` | `http://localhost:${MOCK_KONTUR_OFD_HOST_PORT:-3108}`; публичная база provisioning-ссылок |
 | `MOCK_VIRTUAL_CLOCK` | пусто → текущее время; ISO начальных виртуальных часов |
 | `MOCK_HOSTED` | `false`; hosted fail-closed для control endpoints |
 | `MOCK_TENANCY` | `namespaces`, при hosted → `owned`; поддерживается `off` |

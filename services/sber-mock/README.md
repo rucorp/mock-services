@@ -113,7 +113,7 @@ hosted-режиме SSRF-проверка исходящих callback включ
 | `MOCK_HOST` / `MOCK_PORT` | `0.0.0.0` / `3105` | адрес и порт HTTP-сервера |
 | `MOCK_SBER_USERNAME` | `SBERMOCKTEST` | синтетический merchant-логин |
 | `MOCK_SBER_PASSWORD` | `mockpass123` | синтетический пароль |
-| `MOCK_SBER_PUBLIC_BASE_URL` | `http://localhost:3105` | внешний base URL, используемый в `formUrl` |
+| `MOCK_SBER_PUBLIC_BASE_URL` | `http://localhost:${MOCK_SBER_HOST_PORT:-3105}` | внешний base URL, используемый в `formUrl` |
 | `MOCK_SBER_CALLBACK_URL` | пусто | callback URL стенда по умолчанию; `dynamicCallbackUrl` регистрации приоритетнее |
 | `MOCK_SBER_CALLBACK_RETRY_MS` | `60000` (`60s`) | интервал retry; число в миллисекундах либо длительность (`60s`, `1m`) |
 | `MOCK_SBER_CALLBACK_MAX_ATTEMPTS` | `3` | максимум доставок; значение меньше 1 нормализуется в 1 |

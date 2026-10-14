@@ -55,6 +55,20 @@ SPDX-License-Identifier: Apache-2.0
   `docs/integration/first-ofd.md` «за 10 минут». Регресс/selftest:
   `services/first-ofd-mock/selftest.js` (94 проверки).
 
+### Changed
+- **CI: джоб `docker` переведён на self-hosted раннер (`vars.CI_RUNNER`, лейбл
+  `rucorp-ci`) с порт-ремапом 3910–3917 (#103).** На разделяемом self-hosted хосте
+  (CHUWI) фиксированные порты 3100/3101 заняты dev-стендом lovii-core, из-за чего
+  `docker`-джоб не мог там запускаться. Хост-порты разведены в свободный диапазон
+  `3910–3917` (`MOCK_*_HOST_PORT` джоба), healthcheck и black-box `test:compose`
+  (`MOCK_*_URL`) переведены на этот диапазон; `publish-ghcr` остаётся на
+  `ubuntu-24.04` (публикация образа, без портов). Вместе с этим закрыт **MS-22**:
+  `MOCK_*_PUBLIC_BASE_URL` больше не захардкожен под `localhost:310x`, а следует
+  за хост-портом — `"${MOCK_<SVC>_PUBLIC_BASE_URL:-http://localhost:${MOCK_<SVC>_HOST_PORT:-310x}}"` —
+  в `docker-compose.yml` (8 сервисов) и `docker-compose.include.yml` (9). Дефолт
+  без `MOCK_*_HOST_PORT` не меняется (обратная совместимость): `confirmation_url`,
+  `ofd_receipt_url`, `PaymentURL`, `formUrl`/`payUrl` теперь верны и при ремапе.
+
 ### Fixed
 - **#98 — owned-режим: приоритет явных `X-Sandbox-Token`/`X-Owner-Token` над
   `Authorization: Bearer` в `ownerTokenOf` ядра (`packages/core/index.js`).**

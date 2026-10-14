@@ -163,7 +163,7 @@ Owner-token принимается в `Authorization: Bearer`, `X-Sandbox-Token`
 | `MOCK_PORT` / `MOCK_HOST` | `3100` / `0.0.0.0` | прослушивание |
 | `MOCK_PROFILE` | `plain` | `plain` — обычный эквайринг; `multisplit` — требования Мультирасчётов и валидация сделок |
 | `MOCK_TERMINAL_KEY` / `MOCK_TERMINAL_PASSWORD` | `TBANK_TERMINAL_*` из env ядра, иначе `TBANKMOCKTEST`/`mockpass123` | ключи терминала мока |
-| `MOCK_PUBLIC_BASE_URL` | `http://localhost:3100` | база для `PaymentURL` (виден покупателю!) |
+| `MOCK_PUBLIC_BASE_URL` | `http://localhost:${MOCK_TBANK_HOST_PORT:-3100}` | база для `PaymentURL` (виден покупателю!) |
 | `MOCK_ACQAPI_CLIENT_ID` / `MOCK_ACQAPI_CLIENT_SECRET` | `partner` / `partner` | фактические Basic-креды acqapi; секрет не печатается и не хранится в state |
 | `MOCK_ACQAPI_TOKEN_TTL_MS` | `3600000` (1 ч) | TTL Bearer-токена acqapi; виртуальные часы применяются для проверки истечения |
 | `MOCK_DEFAULT_NOTIFICATION_URL` | — | куда слать нотификации, если Init без `NotificationURL` |

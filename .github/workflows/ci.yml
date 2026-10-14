@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 name: CI
 
-# Джоб `test` выбирает раннер переменной репозитория `CI_RUNNER` (self-hosted на
-# CHUWI, лейбл `rucorp-ci`) с fallback на закреплённый `ubuntu-24.04` (страховка от
-# авто-миграции `ubuntu-latest` → Ubuntu 26.04; апгрейд — отдельным PR, MS-40).
-# Джобы `docker` и `publish-ghcr` закреплены на `ubuntu-24.04`: они публикуют
-# фиксированные хостовые порты 3100–3107, занятые на разделяемом self-hosted хосте
-# (dev-стенд lovii-core). Канон: lovii_docs/canon/CI_RUNNERS_SELFHOSTED.md.
+# Джобы `test` и `docker` выбирают раннер переменной репозитория `CI_RUNNER`
+# (self-hosted на CHUWI, лейбл `rucorp-ci`) с fallback на закреплённый `ubuntu-24.04`
+# (страховка от авто-миграции `ubuntu-latest` → Ubuntu 26.04; апгрейд — отдельным PR,
+# MS-40). Джоб `docker` публикует хостовые порты, ремапнутые в свободный диапазон
+# 3910–3917 (см. env джоба): на разделяемом self-hosted хосте 3100/3101 заняты
+# dev-стендом lovii-core, а публичный URL следует за host-портом (MS-22).
+# Джоб `publish-ghcr` закреплён на `ubuntu-24.04` (публикация образа, без портов).
+# Канон: lovii_docs/canon/CI_RUNNERS_SELFHOSTED.md.
 
 on:
   push:
@@ -59,7 +61,27 @@ jobs:
         run: npm run check:drift
 
   docker:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+    env:
+      # Порт-ремап в свободный диапазон: на разделяемом self-hosted хосте
+      # 3100–3107 заняты dev-стендом lovii-core. Публичные URL следуют за
+      # host-портом (MS-22), MOCK_*_URL — black-box test:compose снаружи.
+      MOCK_TBANK_HOST_PORT: '3910'
+      MOCK_KASSA_HOST_PORT: '3911'
+      MOCK_YOOKASSA_HOST_PORT: '3912'
+      MOCK_ATOL_HOST_PORT: '3913'
+      MOCK_ALFA_HOST_PORT: '3914'
+      MOCK_SBER_HOST_PORT: '3915'
+      MOCK_VTB_HOST_PORT: '3916'
+      MOCK_FIRST_OFD_HOST_PORT: '3917'
+      MOCK_TBANK_URL: 'http://127.0.0.1:3910'
+      MOCK_KASSA_URL: 'http://127.0.0.1:3911'
+      MOCK_YOOKASSA_URL: 'http://127.0.0.1:3912'
+      MOCK_ATOL_URL: 'http://127.0.0.1:3913'
+      MOCK_ALFA_URL: 'http://127.0.0.1:3914'
+      MOCK_SBER_URL: 'http://127.0.0.1:3915'
+      MOCK_VTB_URL: 'http://127.0.0.1:3916'
+      MOCK_FIRST_OFD_URL: 'http://127.0.0.1:3917'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -96,13 +118,13 @@ jobs:
         run: |
           docker compose up -d
           for i in $(seq 1 30); do
-            if curl -fsS http://localhost:3100/health >/dev/null && curl -fsS http://localhost:3101/healthz >/dev/null && curl -fsS http://localhost:3102/health >/dev/null && curl -fsS http://localhost:3103/health >/dev/null && curl -fsS http://localhost:3104/health >/dev/null && curl -fsS http://localhost:3105/health >/dev/null && curl -fsS http://localhost:3106/health >/dev/null && curl -fsS http://localhost:3107/health >/dev/null; then
+            if curl -fsS http://localhost:3910/health >/dev/null && curl -fsS http://localhost:3911/healthz >/dev/null && curl -fsS http://localhost:3912/health >/dev/null && curl -fsS http://localhost:3913/health >/dev/null && curl -fsS http://localhost:3914/health >/dev/null && curl -fsS http://localhost:3915/health >/dev/null && curl -fsS http://localhost:3916/health >/dev/null && curl -fsS http://localhost:3917/health >/dev/null; then
               echo "стенд поднялся"; exit 0
             fi
             sleep 1
           done
           echo "стенд не поднялся за 30 с"; docker compose logs; exit 1
-      - name: Black-box selftest против контейнеров compose (:3100–:3107)
+      - name: Black-box selftest против контейнеров compose (:3910–:3917)
         run: npm run test:compose
       - name: Прогон selftest-наборов внутри собранного образа
         run: |
