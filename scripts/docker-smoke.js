@@ -73,6 +73,32 @@ function request(port, method, p, body, headers = {}) {
   });
 }
 
+/**
+ * Host-порт опубликованного порта контейнера. У эфемерного маппинга
+ * (`-p 127.0.0.1::3100`) порт выделяется при КАЖДОМ старте контейнера, поэтому
+ * после `docker start`/`docker restart` его обязательно читать заново: старый
+ * порт после рестарта отдаёт ECONNREFUSED (реальный отказ CI-прогона MS-04).
+ */
+function hostPort(name, containerPort) {
+  const format = `{{(index (index .NetworkSettings.Ports "${containerPort}/tcp") 0).HostPort}}`;
+  const raw = docker(['inspect', '--format', format, name]);
+  if (!/^\d+$/.test(raw)) throw new Error(`контейнер ${name}: порт ${containerPort}/tcp не опубликован (${raw})`);
+  return Number(raw);
+}
+
+/** HTTP-запрос с повторами: контейнер уже healthy, но маппинг порта может «доехать». */
+async function requestRetry(port, method, p, body, headers = {}, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      return await request(port, method, p, body, headers);
+    } catch (e) {
+      if (Date.now() >= deadline) throw e;
+      await sleep(500);
+    }
+  }
+}
+
 async function waitForHealth(name, timeoutMs = 45000) {
   const deadline = Date.now() + timeoutMs;
   let status = 'unknown';
@@ -162,7 +188,7 @@ async function main() {
   if (!Object.hasOwn(exposed, '3108/tcp')) throw new Error('Dockerfile не публикует EXPOSE 3108');
   docker(['run', '-d', '--name', NAME_KONTUR_OFD, '-p', '127.0.0.1::3108', IMAGE, 'node', 'services/kontur-ofd-mock/server.js']);
   await waitForHealth(NAME_KONTUR_OFD);
-  const konturPort = Number(docker(['inspect', '--format', '{{(index (index .NetworkSettings.Ports "3108/tcp") 0).HostPort}}', NAME_KONTUR_OFD]));
+  const konturPort = hostPort(NAME_KONTUR_OFD, 3108);
   assertEqual((await request(konturPort, 'GET', '/health')).statusCode, 200, 'kontur-ofd-mock /health');
   const konturApi = await request(konturPort, 'GET', '/openapi.json');
   assertEqual(JSON.parse(konturApi.body).openapi, '3.1.0', 'kontur-ofd-mock OpenAPI в image');
@@ -232,10 +258,10 @@ async function main() {
     IMAGE,
   ]);
   await waitForHealth(NAME_HARDENED);
-  const hardenedPort = Number(docker(['inspect', '--format', '{{(index (index .NetworkSettings.Ports "3100/tcp") 0).HostPort}}', NAME_HARDENED]));
+  let hardenedPort = hostPort(NAME_HARDENED, 3100);
   // Запись в именованную песочницу: её реестр сбрасывается debounce'ом, поэтому
   // SIGTERM отправляется сразу после ответа Init — до истечения окна 150 мс.
-  const hardenedInit = await request(hardenedPort, 'POST', '/v2/Init',
+  const hardenedInit = await requestRetry(hardenedPort, 'POST', '/v2/Init',
     { TerminalKey: 'TBANKMOCKTEST', Amount: '1000', OrderId: 'smoke-sigterm-1' },
     { 'X-Mock-Sandbox': 'smoke-sigterm' });
   const hardenedInitJson = JSON.parse(hardenedInit.body);
@@ -254,7 +280,10 @@ async function main() {
   // Рестарт того же контейнера с тем же volume: отложенная запись на месте.
   docker(['start', NAME_HARDENED]);
   await waitForHealth(NAME_HARDENED);
-  const hardenedState = JSON.parse((await request(hardenedPort, 'GET', '/mock/state?sandbox=smoke-sigterm')).body);
+  // Эфемерный host-порт выделяется при каждом старте: после рестарта он другой,
+  // поэтому читаем его заново, а не переиспользуем до-reстартный (CI MS-04).
+  hardenedPort = hostPort(NAME_HARDENED, 3100);
+  const hardenedState = JSON.parse((await requestRetry(hardenedPort, 'GET', '/mock/state?sandbox=smoke-sigterm')).body);
   const hardenedInner = (hardenedState.state && hardenedState.state.state) || hardenedState.state || {};
   const restored = Object.values(hardenedInner.payments || {}).some((p) => p.orderId === 'smoke-sigterm-1');
   if (!restored) {
