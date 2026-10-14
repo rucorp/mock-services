@@ -1051,6 +1051,129 @@ async function main() {
     rt.run(right, () => assert.strictEqual(rt.creds().terminalKey, 'K'));
   });
 
+  check('#98: ownerTokenOf — порядок источников owner-token (явные заголовки выше Bearer)', () => {
+    const rt = core.createSandboxRuntime({
+      state: {},
+      initialStateFactory: () => ({}),
+      mode: 'owned',
+      log: () => {},
+    });
+    const of = (headers, url = '/v2/Init') => rt.ownerTokenOf({ headers, url });
+    // 1. X-Sandbox-Token → 2. X-Owner-Token → 3. Authorization: Bearer → 4. ?sandbox_token=
+    assert.strictEqual(
+      of({ authorization: 'Bearer business-token', 'x-owner-token': 'owner-header', 'x-sandbox-token': 'sandbox-header' }, '/x?sandbox_token=query-token'),
+      'sandbox-header',
+      'X-Sandbox-Token — самый приоритетный источник',
+    );
+    assert.strictEqual(
+      of({ authorization: 'Bearer business-token', 'x-owner-token': 'owner-header' }, '/x?sandbox_token=query-token'),
+      'owner-header',
+      'X-Owner-Token приоритетнее Authorization: Bearer',
+    );
+    assert.strictEqual(
+      of({ authorization: 'Bearer business-token' }, '/x?sandbox_token=query-token'),
+      'business-token',
+      'Authorization: Bearer — fallback для клиентов без явных заголовков',
+    );
+    assert.strictEqual(of({}, '/x?sandbox_token=query-token'), 'query-token', 'query sandbox_token — последний источник');
+    assert.strictEqual(of({}, '/x'), '', 'без токенов — пустая строка');
+    // Регистр схемы значения не имеет (как и раньше)
+    assert.strictEqual(of({ authorization: 'bearer business-token', 'x-owner-token': 'owner-header' }), 'owner-header');
+    // Пустой/пробельный явный заголовок = «заголовка нет»: следующий источник не затеняется
+    assert.strictEqual(
+      of({ authorization: 'Bearer business-token', 'x-sandbox-token': '   ', 'x-owner-token': '' }),
+      'business-token',
+      'пустой явный заголовок не отнимает fallback у Bearer',
+    );
+    assert.strictEqual(
+      of({ authorization: 'Bearer   ' }, '/x?sandbox_token=query-token'),
+      'query-token',
+      'Bearer без токена не перекрывает query',
+    );
+  });
+
+  check('#98: owned-режим адаптера с бизнес-Bearer (first-ofd/vtb) — владелец получает доступ, чужой токен — 401', () => {
+    const rt = core.createSandboxRuntime({
+      state: {},
+      initialStateFactory: () => ({ payments: {} }),
+      mode: 'owned',
+      operatorTokens: ['op-secret-98'],
+      log: () => {},
+    });
+    const created = rt.create({ id: 'bearer-tenant', creds: { terminalKey: 'K98' } });
+    const ownerToken = created.ownerToken;
+    // Токен бизнес-авторизации адаптера (токен очереди first-ofd / OAuth-токен vtb):
+    // он НЕ является owner-token и раньше затенял явный заголовок владельца.
+    const BUSINESS_BEARER = 'queue-token-of-adapter';
+    const req = (extra) => ({ headers: { 'x-mock-sandbox': 'bearer-tenant', ...extra }, url: '/v2/Init' });
+
+    // (а) owned-режим + Authorization: Bearer <queue-token> + X-Sandbox-Token <owner-token> → доступ владельцу
+    const viaHeader = rt.admit(req({ authorization: `Bearer ${BUSINESS_BEARER}`, 'x-sandbox-token': ownerToken }), 'business');
+    assert.strictEqual(viaHeader.ok, true, 'владелец не должен терять доступ из-за Bearer-авторизации адаптера');
+    assert.strictEqual(viaHeader.via, 'owner');
+    assert.strictEqual(viaHeader.record.id, 'bearer-tenant');
+    rt.run(viaHeader, () => assert.strictEqual(rt.creds().terminalKey, 'K98'));
+
+    const viaOwnerHeader = rt.admit(req({ authorization: `Bearer ${BUSINESS_BEARER}`, 'x-owner-token': ownerToken }), 'business');
+    assert.strictEqual(viaOwnerHeader.ok, true, 'X-Owner-Token работает так же, как X-Sandbox-Token');
+    assert.strictEqual(viaOwnerHeader.via, 'owner');
+
+    // (б) битый/чужой X-Sandbox-Token → 401 «знание ID ≠ доступ», бизнес-Bearer не спасает
+    const foreign = rt.admit(req({ authorization: `Bearer ${BUSINESS_BEARER}`, 'x-sandbox-token': 'sbx_foreign-token' }), 'business');
+    assert.strictEqual(foreign.ok, false);
+    assert.strictEqual(foreign.kind, 'unauthorized');
+    assert.strictEqual(
+      rt.exportState('bearer-tenant', req({ authorization: `Bearer ${BUSINESS_BEARER}`, 'x-sandbox-token': 'sbx_foreign-token' })).ok,
+      false,
+      'чужой owner-token не открывает экспорт состояния',
+    );
+    const idOnly = rt.admit(req({ authorization: `Bearer ${BUSINESS_BEARER}` }), 'business');
+    assert.strictEqual(idOnly.ok, false);
+    assert.strictEqual(idOnly.kind, 'unauthorized', 'знание ID + бизнес-токен адаптера доступа не даёт');
+
+    // (в) только Authorization: Bearer <owner-token> → доступ (fallback сохранён)
+    const bearerOnly = rt.admit(req({ authorization: `Bearer ${ownerToken}` }), 'business');
+    assert.strictEqual(bearerOnly.ok, true);
+    assert.strictEqual(bearerOnly.via, 'owner');
+    const emptyHeader = rt.admit(req({ authorization: `Bearer ${ownerToken}`, 'x-sandbox-token': '  ' }), 'business');
+    assert.strictEqual(emptyHeader.ok, true, 'пустой явный заголовок не ломает Bearer-fallback');
+    assert.strictEqual(emptyHeader.via, 'owner');
+
+    // (г) операторский путь не сломан: Bearer оператора распознаётся и один, и при затеняющем owner-заголовке
+    const operator = rt.admit(req({ authorization: 'Bearer op-secret-98' }), 'business');
+    assert.strictEqual(operator.ok, true);
+    assert.strictEqual(operator.via, 'operator');
+    const operatorShadowed = rt.admit(req({ authorization: 'Bearer op-secret-98', 'x-sandbox-token': 'sbx_foreign-token' }), 'business');
+    assert.strictEqual(operatorShadowed.ok, true);
+    assert.strictEqual(operatorShadowed.via, 'operator', 'оператор по Bearer узнаётся через tokenMatches, а не только через ownerTokenOf');
+    const operatorHeader = rt.admit(req({ authorization: `Bearer ${BUSINESS_BEARER}`, 'x-sandbox-token': 'op-secret-98' }), 'business');
+    assert.strictEqual(operatorHeader.ok, true);
+    assert.strictEqual(operatorHeader.via, 'operator');
+  });
+
+  check('#98: self-hosted (namespaces) — бизнес-Bearer не становится owner-token, поведение не меняется', () => {
+    const rt = core.createSandboxRuntime({
+      state: {},
+      initialStateFactory: () => ({}),
+      mode: 'namespaces',
+      log: () => {},
+    });
+    const admission = rt.admit({ headers: { 'x-mock-sandbox': 'ci-98', authorization: 'Bearer queue-token' }, url: '/v2/Init' }, 'business');
+    assert.strictEqual(admission.ok, true);
+    assert.strictEqual(admission.record.id, 'ci-98');
+    assert.strictEqual(admission.via, 'namespace');
+
+    const off = core.createSandboxRuntime({
+      state: {},
+      initialStateFactory: () => ({}),
+      mode: 'off',
+      log: () => {},
+    });
+    const offAdmission = off.admit({ headers: { authorization: 'Bearer queue-token' }, url: '/v2/Init' }, 'business');
+    assert.strictEqual(offAdmission.ok, true);
+    assert.strictEqual(offAdmission.via, 'off');
+  });
+
   await acheck('createSandboxRuntime: TTL-очистка и персистентность реестра без relabel default', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'core-sbx-'));
     const stateFile = path.join(dir, 'state.json');
