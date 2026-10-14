@@ -7,6 +7,16 @@ SPDX-License-Identifier: Apache-2.0
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версии — [SemVer](https://semver.org/lang/ru/).
 
+## [Unreleased]
+
+### Added
+- **PD-02, #74:** env `MOCK_SANDBOX_MAX_STATE_BYTES` во всех 9 адаптерах
+  (пусто сохраняет прежний per-sandbox дефолт) и глобальный JSON-бюджет
+  `globalMaxStateBytes` / `MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES`: 64 МиБ по
+  умолчанию, `0` выключает. Запись/импорт сверх бюджета → HTTP 400,
+  `errorCode`, `sandbox_state_budget_exceeded`, `kind: bytes`, откат состояния.
+  Обе env проброшены в include compose; документация и регрессии ядра/адаптеров.
+
 ## [0.7.0] — 2026-10-14
 
 ### Added

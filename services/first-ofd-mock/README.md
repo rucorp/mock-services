@@ -184,3 +184,18 @@ callback включена по умолчанию.
 - Selftest (getToken/TTL, очередь и оба слоя ошибок, смены, `statuses`/`receipts`, callback без подписи, SSRF, RFC-001): `npm run test:first-ofd`.
 - Гайд «за 10 минут»: [`docs/integration/first-ofd.md`](../../docs/integration/first-ofd.md).
 - Ограничения безопасности общие с проектом: [`SECURITY.md`](../../SECURITY.md).
+
+## Байтовые квоты состояния (PD-02)
+
+| Env | Дефолт | Назначение |
+| --- | --- | --- |
+| `MOCK_SANDBOX_MAX_STATE_BYTES` | пусто: `8388608` (8 МиБ) при `maxDocuments > 0`, иначе без лимита | байты JSON одной песочницы; `0` выключает |
+| `MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES` | `67108864` (64 МиБ) | сумма байт JSON всех песочниц рантайма, включая `default`; `0` выключает |
+
+Значения задаются в целых байтах. Пусто сохраняет дефолты. Квота per-sandbox
+не ограничивает память контейнера; общий бюджет меньше `mem_limit: 128m`, но
+не равен RSS. Превышение глобального бюджета на записи или байтовых квот при
+импорте `/mock/state` → HTTP 400, `errorCode: 400`, `kind: 'bytes'`,
+`code: sandbox_state_budget_exceeded` / `sandbox_state_quota_exceeded`,
+с откатом отклонённого состояния. Правила/история/журнал остаются volatile.
+Подробности и границы — [документация ядра](../../packages/core/README.md#байтовые-квоты-песочниц-pd-02-74).
