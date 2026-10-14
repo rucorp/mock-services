@@ -694,22 +694,37 @@ async function main() {
       check('#22: operator-токен не открывает /admin', operatorOnAdmin.status === 401);
       const adminOnAdmin = await requestOn(child.port, 'GET', '/admin/journal', null, { Authorization: 'Bearer adm-secret' });
       check('#22: админ-токен открывает /admin/journal', adminOnAdmin.status === 200);
-      const adminPage = await requestOn(child.port, 'GET', '/admin?admin_token=adm-secret');
-      const csrfToken = /name="_csrf" value="([^"]+)"/.exec(adminPage.text)?.[1];
-      const actionUrl = /<form method="POST" action="([^"]+)"/.exec(adminPage.text)?.[1];
-      check('#5 A-20: admin_token сохраняется в action URL вместе с CSRF-полем',
-        adminPage.status === 200 && Boolean(csrfToken) && actionUrl === '/admin/action?admin_token=adm-secret');
+      const loginRes = await requestOn(child.port, 'POST', '/admin/login', new URLSearchParams({ admin_token: 'adm-secret' }).toString(), { 'Content-Type': 'application/x-www-form-urlencoded' });
+      check('#5 A-20: POST login устанавливает cookie', loginRes.status === 302 && (loginRes.headers['set-cookie'] || []).some(c => c.includes('mock_admin_token=')));
+      const sessionCookie = loginRes.headers['set-cookie'][0].split(';')[0];
+      
+      const adminPage = await requestOn(child.port, 'GET', '/admin', '', { 'Cookie': sessionCookie });
+      const html = String(adminPage.text || adminPage.body);
+      const actionStart = html.indexOf('action="') + 8;
+      const actionEnd = html.indexOf('"', actionStart);
+      const actionUrl = actionStart > 7 ? html.slice(actionStart, actionEnd) : '/admin/action';
+      const csrfStart = html.indexOf('name="_csrf" value="') + 20;
+      const csrfEnd = html.indexOf('"', csrfStart);
+      const csrfToken = csrfStart > 19 ? html.slice(csrfStart, csrfEnd) : 'missing';
+      
+      check('#5 A-20: cookie доступ работает, токенов в action URL нет',
+        adminPage.status === 200 && Boolean(csrfToken) && !actionUrl.includes('admin_token'));
       const form = (fields) => new URLSearchParams(fields).toString();
-      const deniedNoCsrf = await requestOn(child.port, 'POST', '/admin/action?admin_token=adm-secret', form({ action: 'ofd-offline' }), { 'Content-Type': 'application/x-www-form-urlencoded' });
+      const deniedNoCsrf = await requestOn(child.port, 'POST', actionUrl, form({ action: 'ofd-offline' }), { 'Cookie': sessionCookie, 'Content-Type': 'application/x-www-form-urlencoded' });
       check('#5 A-20: действие без CSRF-токена отклоняется', deniedNoCsrf.status === 403);
-      const deniedCrossOrigin = await requestOn(child.port, 'POST', '/admin/action?admin_token=adm-secret', form({ action: 'ofd-offline', _csrf: csrfToken }), {
-        'Content-Type': 'application/x-www-form-urlencoded', Origin: 'http://attacker.invalid',
+      const deniedCrossOrigin = await requestOn(child.port, 'POST', actionUrl, form({ action: 'ofd-offline', _csrf: csrfToken }), {
+        'Cookie': sessionCookie, 'Content-Type': 'application/x-www-form-urlencoded', Origin: 'http://attacker.invalid',
       });
       check('#5 A-20: same-origin проверка отклоняет cross-site форму', deniedCrossOrigin.status === 403);
-      const validAction = await requestOn(child.port, 'POST', actionUrl, form({ action: 'ofd-offline', _csrf: csrfToken }), { 'Content-Type': 'application/x-www-form-urlencoded' });
+      
+      const portForOrigin = await child.port;
+      const validAction = await requestOn(child.port, 'POST', actionUrl, form({ action: 'ofd-offline', _csrf: csrfToken }), { 
+        'Cookie': sessionCookie, 'Content-Type': 'application/x-www-form-urlencoded',
+        'Origin': 'http://127.0.0.1:' + portForOrigin
+      });
       check('#5 A-20: CSRF-форма работает, redirect сохраняет admin_token',
-        validAction.status === 302 && validAction.headers.location === '/admin?admin_token=adm-secret');
-      const redirectedAdmin = await requestOn(child.port, 'GET', validAction.headers.location);
+        validAction.status === 302 && validAction.headers.location === '/admin');
+      const redirectedAdmin = await requestOn(child.port, 'GET', validAction.headers.location || '/admin', '', { 'Cookie': sessionCookie });
       check('#5 A-20: redirect с admin_token снова открывает консоль', redirectedAdmin.status === 200);
       const tk = (await requestOn(child.port, 'POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' })).json().token;
       check('#22: getToken (контракт Ferma) не требует operator-токена', Boolean(tk));
@@ -908,7 +923,9 @@ async function main() {
       check('#8 F-12: POST /sandboxes отдаёт id, ownerToken и креды песочницы',
         Boolean(created.id && created.ownerToken && created.creds && created.creds.fermaPassword), JSON.stringify(created).slice(0, 180));
       const owner = { Authorization: `Bearer ${created.ownerToken}` };
-      const ownerAdminPage = await requestOn(child.port, 'GET', `/admin?sandbox=${encodeURIComponent(created.id)}`, null, owner);
+      const loginRes12 = await requestOn(child.port, 'POST', '/admin/login', new URLSearchParams({ sandbox_token: created.ownerToken }).toString(), { 'Content-Type': 'application/x-www-form-urlencoded' });
+      const ownerCookie = loginRes12.headers['set-cookie'][0].split(';')[0];
+      const ownerAdminPage = await requestOn(child.port, 'GET', `/admin?sandbox=${encodeURIComponent(created.id)}`, null, { Cookie: ownerCookie });
       const actionMatch = /<form method="POST" action="([^"]*\/admin\/action[^"]*)"/.exec(ownerAdminPage.text);
       const csrfMatch = /name="_csrf" value="([^"]+)"/.exec(ownerAdminPage.text);
       let ownerAdminActionWorks = false;
@@ -918,13 +935,13 @@ async function main() {
           `_csrf=${encodeURIComponent(csrfMatch[1])}&action=ofd-offline`, {
             'Content-Type': 'application/x-www-form-urlencoded',
             Origin: `http://127.0.0.1:${child.port}`,
+            Cookie: ownerCookie
           });
         const returnedPage = adminPost.headers.location
-          ? await requestOn(child.port, 'GET', adminPost.headers.location)
+          ? await requestOn(child.port, 'GET', adminPost.headers.location, null, { Cookie: ownerCookie })
           : null;
-        ownerAdminActionWorks = actionUrl.searchParams.get('sandbox_token') === created.ownerToken
+        ownerAdminActionWorks = !actionUrl.searchParams.has('sandbox_token')
           && adminPost.status === 302
-          && new URLSearchParams(new URL(adminPost.headers.location || '/', `http://127.0.0.1:${child.port}`).search).get('sandbox_token') === created.ownerToken
           && returnedPage && returnedPage.status === 200;
       }
       check('#8 F-12: native admin-form передаёт owner-token, CSRF и сохраняет токен после redirect',

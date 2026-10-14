@@ -1124,7 +1124,7 @@ function sendSandboxError(res, admission) {
   if (admission.kind === 'unauthorized') {
     return jsonRaw(res, 401, errBody(11, `Доступ к песочнице «${id}» ограничен: знание ID не является доступом`, {
       field: 'X-Sandbox-Token',
-      hint: 'Передайте owner-token из ответа POST /sandboxes: Authorization: Bearer <ownerToken>, X-Sandbox-Token или ?sandbox_token=.',
+      hint: 'Передайте owner-token из ответа POST /sandboxes: Authorization: Bearer <ownerToken>, X-Sandbox-Token или cookie (mock_sandbox_token=...). В hosted-режиме query-токены запрещены.',
     }));
   }
   if (admission.kind === 'expired') {
@@ -1331,20 +1331,28 @@ const server = http.createServer((req, res) => {
     const ownerSurface = surface === 'operator'
       && Boolean(ownerRec && admission.record && ownerRec.id === admission.record.id);
     if (surface && admission.via !== 'owner' && !ownerSurface) {
-      const access = checkControlAccess(req, {
+      if (url === '/admin/login' && req.method === 'POST') {
+      return core.handleAdminLogin(req, res, typeof raw !== 'undefined' ? raw : undefined, parseBody, send);
+    }
+    const access = checkControlAccess(req, {
         adminToken: MOCK_ADMIN_TOKEN,
         operatorToken: OPERATOR_TOKEN,
         surface,
         hosted: HOSTED,
       });
       if (!access.allowed) {
+      if (url === '/admin/action' && req.method === 'POST') console.log("401 headers from server:", req.headers);
+      if (url === '/admin/action' && req.method === 'POST') console.log("401 headers:", req.headers);
+      if (url === '/admin' && req.method === 'GET') {
+        return core.html(res, core.adminLoginForm(req));
+      }
         const envName = surface === 'admin' ? 'MOCK_ADMIN_TOKEN' : 'MOCK_OPERATOR_TOKEN';
         const message = access.reason === 'hosted-fail-closed'
           ? `Маршрут ${url} закрыт: hosted-режим (MOCK_HOSTED) требует ${envName} для управляющей поверхности`
           : `Доступ к управляющему маршруту ${url} ограничен: требуется ${envName}`;
         return jsonRaw(res, 401, errBody(11, message, {
           field: surface === 'admin' ? 'Authorization' : 'X-Operator-Token',
-          hint: `Передайте токен в заголовке Authorization: Bearer <${envName}> или X-Operator-Token/X-Admin-Token.`,
+          hint: access.hint || `Передайте токен в заголовке Authorization: Bearer <${envName}> или X-Operator-Token/X-Admin-Token.`,
         }));
       }
     }
@@ -1716,11 +1724,7 @@ const server = http.createServer((req, res) => {
       const pageQuery = new URL(req.url, 'http://mock.local').searchParams;
       const adminQuery = new URLSearchParams();
       if (currentSandbox !== 'default') adminQuery.set('sandbox', currentSandbox);
-      const adminToken = pageQuery.get('admin_token');
-      if (adminToken) adminQuery.set('admin_token', adminToken);
-      const sandboxToken = TENANCY === 'owned' ? sandboxRuntime.ownerTokenOf(req) : '';
-      if (sandboxToken) adminQuery.set('sandbox_token', sandboxToken);
-      const adminSuffix = adminQuery.toString();
+                  const adminSuffix = adminQuery.toString();
       const adminActionUrl = `/admin/action${adminSuffix ? `?${adminSuffix}` : ''}`;
       const adminJournalUrl = `/admin/journal${adminSuffix ? `?${adminSuffix}` : ''}`;
       const csrfToken = core.createCsrfToken(ADMIN_CSRF_SECRET, currentSandbox);
@@ -1974,7 +1978,7 @@ h1{font-size:18px} a{color:#8cf}</style></head><body>
       const sandboxToken = postQuery.get('sandbox_token');
       if (sandboxToken) redirectQuery.set('sandbox_token', sandboxToken);
       const redirectSuffix = redirectQuery.toString();
-      return send(res, 302, '', { Location: `/admin${redirectSuffix ? `?${redirectSuffix}` : ''}` });
+      return send(res, 302, '', { location: `/admin${redirectSuffix ? `?${redirectSuffix}` : ''}` });
     }
 
     return jsonRaw(res, 404, errBody(404, 'Неизвестный маршрут'));

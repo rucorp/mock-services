@@ -1569,7 +1569,7 @@ function sendSandboxError(res, admission) {
   if (admission.kind === 'unauthorized') {
     return sendJson(res, yerr('invalid_credentials', {
       description: `Access to sandbox "${id}" is limited: knowing the id is not enough`,
-      hint: 'Передайте owner-token: Authorization: Bearer <ownerToken>, X-Sandbox-Token или ?sandbox_token=.',
+      hint: 'Передайте owner-token: Authorization: Bearer <ownerToken>, X-Sandbox-Token или cookie (mock_sandbox_token=...). В hosted-режиме query-токены запрещены.',
     }), 401);
   }
   if (admission.kind === 'expired') {
@@ -1600,11 +1600,7 @@ function adminPage(req) {
   const pageQuery = new URL(req.url, 'http://mock.local').searchParams;
   const adminQuery = new URLSearchParams();
   if (currentSandbox !== 'default') adminQuery.set('sandbox', currentSandbox);
-  const adminToken = pageQuery.get('admin_token');
-  if (adminToken) adminQuery.set('admin_token', adminToken);
-  const sandboxToken = TENANCY === 'owned' ? sandboxRuntime.ownerTokenOf(req) : '';
-  if (sandboxToken) adminQuery.set('sandbox_token', sandboxToken);
-  const adminSuffix = adminQuery.toString();
+      const adminSuffix = adminQuery.toString();
   const adminActionUrl = `/admin/action${adminSuffix ? `?${adminSuffix}` : ''}`;
   const adminJournalUrl = `/admin/journal${adminSuffix ? `?${adminSuffix}` : ''}`;
   const csrfToken = core.createCsrfToken(ADMIN_CSRF_SECRET, currentSandbox);
@@ -1739,6 +1735,9 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
   const ownerSurface = surface === 'operator'
     && Boolean(ownerRec && admission.record && ownerRec.id === admission.record.id);
   if (surface && admission.via !== 'owner' && !ownerSurface) {
+    if (p === '/admin/login' && req.method === 'POST') {
+      return core.handleAdminLogin(req, res, typeof raw !== 'undefined' ? raw : undefined, parseBody, send);
+    }
     const access = checkControlAccess(req, {
       adminToken: MOCK_ADMIN_TOKEN,
       operatorToken: OPERATOR_TOKEN,
@@ -1746,13 +1745,16 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
       hosted: HOSTED,
     });
     if (!access.allowed) {
+      if (p === '/admin' && req.method === 'GET') {
+        return core.html(res, core.adminLoginForm(req));
+      }
       const envName = surface === 'admin' ? 'MOCK_ADMIN_TOKEN' : 'MOCK_OPERATOR_TOKEN';
       const message = access.reason === 'hosted-fail-closed'
         ? `Route ${p} is closed: hosted mode (MOCK_HOSTED) requires ${envName} for the control surface`
         : `Access to the control route ${p} is restricted: ${envName} is required`;
       return sendJson(res, yerr('invalid_credentials', {
         description: message,
-        hint: `Передайте токен: Authorization: Bearer <${envName}> или X-Operator-Token/X-Admin-Token.`,
+        hint: access.hint || `Передайте токен: Authorization: Bearer <${envName}> или X-Operator-Token/X-Admin-Token.`,
       }), 401);
     }
   }

@@ -787,6 +787,9 @@ async function main() {
     // Operator-поверхность: неверный и верный токен
     const opts = { adminToken: 'adm-secret', operatorToken: 'op-secret', surface: 'operator' };
     assert.strictEqual(core.checkControlAccess(req({ authorization: 'Bearer wrong' }), opts).allowed, false);
+    assert.strictEqual(core.checkControlAccess(req({}, '/mock/time?operator_token=op-secret'), { ...opts, hosted: true }).allowed, false, 'query token rejected in hosted');
+    assert.strictEqual(core.checkControlAccess(req({ cookie: 'mock_operator_token=op-secret' }), opts).allowed, true, 'cookie token allowed');
+    
     assert.strictEqual(core.checkControlAccess(req({ authorization: 'Bearer op-secret' }), opts).allowed, true);
     assert.strictEqual(core.checkControlAccess(req({ 'x-operator-token': 'op-secret' }), opts).allowed, true);
     assert.strictEqual(core.checkControlAccess(req({}, '/mock/time?operator_token=op-secret'), opts).allowed, true);
@@ -1075,7 +1078,9 @@ async function main() {
       'business-token',
       'Authorization: Bearer — fallback для клиентов без явных заголовков',
     );
-    assert.strictEqual(of({}, '/x?sandbox_token=query-token'), 'query-token', 'query sandbox_token — последний источник');
+    assert.strictEqual(of({}, '/x?sandbox_token=query-token'), 'FAIL_QUERY_TOKEN_REJECTED', 'query sandbox_token reject in owned');
+    const rtNs = core.createSandboxRuntime({ state: {}, initialStateFactory: () => ({}), mode: 'namespaces', log: () => {} });
+    assert.strictEqual(rtNs.ownerTokenOf({ headers: {}, url: '/x?sandbox_token=query-token' }), 'query-token', 'query sandbox_token allowed in namespaces');
     assert.strictEqual(of({}, '/x'), '', 'без токенов — пустая строка');
     // Регистр схемы значения не имеет (как и раньше)
     assert.strictEqual(of({ authorization: 'bearer business-token', 'x-owner-token': 'owner-header' }), 'owner-header');
@@ -1087,8 +1092,8 @@ async function main() {
     );
     assert.strictEqual(
       of({ authorization: 'Bearer   ' }, '/x?sandbox_token=query-token'),
-      'query-token',
-      'Bearer без токена не перекрывает query',
+      'FAIL_QUERY_TOKEN_REJECTED',
+      'Bearer без токена не перекрывает query'
     );
   });
 
