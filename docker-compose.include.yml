@@ -10,11 +10,11 @@
 #      в production (без COMPOSE_PROFILES=mock или `--profile mock`) ни один мок-контейнер
 #      не создаётся и не запускается.
 #   2. Имена сервисов фиксированы (`tbank-mock`, `kassa-mock`, `yookassa-mock`, `atol-mock`,
-#      `alfa-mock`, `sber-mock`, `vtb-mock`) — внутренние URL `http://tbank-mock:3100/v2`,
-#      `http://kassa-mock:3101`, `http://yookassa-mock:3102/v3`,
+#      `alfa-mock`, `sber-mock`, `vtb-mock`, `first-ofd-mock`, `kontur-ofd-mock`) — внутренние
+#      URL `http://tbank-mock:3100/v2`, `http://kassa-mock:3101`, `http://yookassa-mock:3102/v3`,
 #      `http://atol-mock:3103/possystem/v4`, `http://alfa-mock:3104/payment/rest`,
-#      `http://sber-mock:3105/ecomm/gw/partner/api/v1/` и
-#      `http://vtb-mock:3106/openapi/smb/efcp/e-commerce/v1/` не меняются.
+#      `http://sber-mock:3105/ecomm/gw/partner/api/v1/`, `http://vtb-mock:3106/openapi/smb/efcp/e-commerce/v1/`,
+#      `http://first-ofd-mock:3107`, `http://kontur-ofd-mock:3108` не меняются.
 #   3. Никакие домены потребителя не зашиты: Caddy-лейблы и публичные URL задаются
 #      переменными окружения (по умолчанию пустые / localhost).
 #   4. Релиз закреплён дайджестом (F-37): `MOCK_IMAGE_DIGEST` по умолчанию —
@@ -22,6 +22,10 @@
 #      (reproducible deployment). Обновление — только контролируемым bump
 #      (см. «Обновление базового образа» в CONTRIBUTING.md); пустое значение
 #      `MOCK_IMAGE_DIGEST=` снимает pin (например, для своего образа/тега).
+#   5. Креды/значения по умолчанию — синтетические; переопределяются только `MOCK_*`-
+#      переменными контура. Переменные окружения потребителя (`TBANK_*`, `FERMA_*`,
+#      `YOOKASSA_*`, `ATOL_*`, `ALFA_*`) сознательно НЕ подхватываются (MS-02):
+#      исключены коллизии с env реальных интеграций потребителя.
 #
 # Подключение в docker-compose.staging-extras.yml / docker-compose.dev.yml:
 #   include:
@@ -44,10 +48,10 @@ services:
       MOCK_ACQAPI_CLIENT_SECRET: "${MOCK_ACQAPI_CLIENT_SECRET:-partner}"
       MOCK_ACQAPI_TOKEN_TTL_MS: "${MOCK_ACQAPI_TOKEN_TTL_MS:-1h}"
       MOCK_PROFILE: "${MOCK_TBANK_PROFILE:-plain}"
-      MOCK_TERMINAL_KEY: "${MOCK_TERMINAL_KEY:-${TBANK_TERMINAL_KEY:-TBANKMOCKTEST}}"
-      MOCK_TERMINAL_PASSWORD: "${MOCK_TERMINAL_PASSWORD:-${TBANK_TERMINAL_PASSWORD:-mockpass123}}"
+      MOCK_TERMINAL_KEY: "${MOCK_TERMINAL_KEY:-TBANKMOCKTEST}"
+      MOCK_TERMINAL_PASSWORD: "${MOCK_TERMINAL_PASSWORD:-mockpass123}"
       MOCK_PUBLIC_BASE_URL: "${MOCK_TBANK_PUBLIC_BASE_URL:-${MOCK_PUBLIC_BASE_URL:-http://localhost:${MOCK_TBANK_HOST_PORT:-3100}}}"
-      MOCK_DEFAULT_NOTIFICATION_URL: "${MOCK_DEFAULT_NOTIFICATION_URL:-${TBANK_NOTIFICATION_URL:-}}"
+      MOCK_DEFAULT_NOTIFICATION_URL: "${MOCK_DEFAULT_NOTIFICATION_URL:-}"
       MOCK_RETRY_MS: "${MOCK_RETRY_MS:-60000}"
       MOCK_MAX_ATTEMPTS: "${MOCK_MAX_ATTEMPTS:-24}"
       MOCK_AUTO_CONFIRM_MS: "${MOCK_AUTO_CONFIRM_MS:-0}"
@@ -95,14 +99,14 @@ services:
       MOCK_HOST: "0.0.0.0"
       MOCK_PORT: "3101"
       MOCK_HEALTH_PATH: "/healthz"
-      MOCK_FERMA_LOGIN: "${MOCK_FERMA_LOGIN:-${FERMA_LOGIN:-loviitest}}"
-      MOCK_FERMA_PASSWORD: "${MOCK_FERMA_PASSWORD:-${FERMA_PASSWORD:-mockpass123}}"
+      MOCK_FERMA_LOGIN: "${MOCK_FERMA_LOGIN:-loviitest}"
+      MOCK_FERMA_PASSWORD: "${MOCK_FERMA_PASSWORD:-mockpass123}"
       MOCK_PROCESS_MS: "${MOCK_PROCESS_MS:-4000}"
       MOCK_CALLBACK_RETRY_MS: "${MOCK_CALLBACK_RETRY_MS:-10000}"
       MOCK_CALLBACK_MAX_ATTEMPTS: "${MOCK_CALLBACK_MAX_ATTEMPTS:-24}"
       MOCK_TOKEN_TTL_MS: "${MOCK_TOKEN_TTL_MS:-43200000}"
       MOCK_VALIDATE_RECEIPTS: "${MOCK_VALIDATE_RECEIPTS:-true}"
-      MOCK_GROUPS: "${MOCK_GROUPS:-${FERMA_GROUP:-Main}}"
+      MOCK_GROUPS: "${MOCK_GROUPS:-Main}"
       MOCK_AGENT_LINE: "${MOCK_AGENT_LINE:-ТЕСТОВАЯ КАССА (МОК)}"
       MOCK_AGENT_INN: "${MOCK_AGENT_INN:-7800000000}"
       MOCK_PUBLIC_BASE_URL: "${MOCK_KASSA_PUBLIC_BASE_URL:-http://localhost:${MOCK_KASSA_HOST_PORT:-3101}}"
@@ -147,8 +151,8 @@ services:
       MOCK_HOST: "0.0.0.0"
       MOCK_PORT: "3102"
       MOCK_HEALTH_PATH: "/health"
-      MOCK_SHOP_ID: "${MOCK_SHOP_ID:-${YOOKASSA_SHOP_ID:-YOOKASSAMOCKTEST}}"
-      MOCK_SECRET_KEY: "${MOCK_SECRET_KEY:-${YOOKASSA_SECRET_KEY:-mockpass123}}"
+      MOCK_SHOP_ID: "${MOCK_SHOP_ID:-YOOKASSAMOCKTEST}"
+      MOCK_SECRET_KEY: "${MOCK_SECRET_KEY:-mockpass123}"
       MOCK_PUBLIC_BASE_URL: "${MOCK_YOOKASSA_PUBLIC_BASE_URL:-http://localhost:${MOCK_YOOKASSA_HOST_PORT:-3102}}"
       MOCK_DEFAULT_WEBHOOK_URL: "${MOCK_DEFAULT_WEBHOOK_URL:-}"
       MOCK_RETRY_MS: "${MOCK_RETRY_MS:-60000}"
@@ -198,10 +202,10 @@ services:
       MOCK_PORT: "3103"
       MOCK_HEALTH_PATH: "/health"
       # Публичные тестовые реквизиты v4 — дефолты образа; свои — через эти env.
-      MOCK_ATOL_LOGIN: "${MOCK_ATOL_LOGIN:-${ATOL_LOGIN:-v4-online-atol-ru}}"
-      MOCK_ATOL_PASSWORD: "${MOCK_ATOL_PASSWORD:-${ATOL_PASSWORD:-iGFFuihss}}"
-      MOCK_ATOL_GROUP: "${MOCK_ATOL_GROUP:-${ATOL_GROUP:-v4-online-atol-ru_4179}}"
-      MOCK_GROUPS: "${MOCK_ATOL_GROUPS:-}"
+      MOCK_ATOL_LOGIN: "${MOCK_ATOL_LOGIN:-v4-online-atol-ru}"
+      MOCK_ATOL_PASSWORD: "${MOCK_ATOL_PASSWORD:-iGFFuihss}"
+      MOCK_ATOL_GROUP: "${MOCK_ATOL_GROUP:-v4-online-atol-ru_4179}"
+      MOCK_GROUPS: "${MOCK_GROUPS:-${MOCK_ATOL_GROUPS:-}}"
       MOCK_TOKEN_TTL_MS: "${MOCK_ATOL_TOKEN_TTL_MS:-86400000}"
       MOCK_PROCESS_MS: "${MOCK_ATOL_PROCESS_MS:-4000}"
       MOCK_CALLBACK_RETRY_MS: "${MOCK_CALLBACK_RETRY_MS:-10000}"
@@ -253,9 +257,9 @@ services:
       # Дефолты — СИНТЕТИЧЕСКИЕ креды мока (ALFAMOCKTEST/mockpass123, по образцу
       # TBANKMOCKTEST); реальные тестовые креды Альфа-Банка выдаёт индивидуально,
       # в конфиг они не зашиваются. Свои — через эти env.
-      MOCK_ALFA_USERNAME: "${MOCK_ALFA_USERNAME:-${ALFA_USERNAME:-ALFAMOCKTEST}}"
-      MOCK_ALFA_PASSWORD: "${MOCK_ALFA_PASSWORD:-${ALFA_PASSWORD:-mockpass123}}"
-      MOCK_ALFA_CALLBACK_SECRET: "${MOCK_ALFA_CALLBACK_SECRET:-${ALFA_CALLBACK_SECRET:-mocksecret123}}"
+      MOCK_ALFA_USERNAME: "${MOCK_ALFA_USERNAME:-ALFAMOCKTEST}"
+      MOCK_ALFA_PASSWORD: "${MOCK_ALFA_PASSWORD:-mockpass123}"
+      MOCK_ALFA_CALLBACK_SECRET: "${MOCK_ALFA_CALLBACK_SECRET:-mocksecret123}"
       MOCK_TWO_STAGE: "${MOCK_TWO_STAGE:-true}"
       MOCK_PARTIAL_REFUND: "${MOCK_PARTIAL_REFUND:-true}"
       MOCK_SSL_PERMITTED: "${MOCK_SSL_PERMITTED:-false}"
