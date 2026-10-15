@@ -29,7 +29,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Документация
 
-Полный сайт: **<https://rucorp.github.io/mock-services/>** (статический HTML из Markdown, контент доступен без JavaScript).
+Полный сайт: **<https://axiiom.ru/mock-services/>** (статический HTML из Markdown, контент доступен без JavaScript).
 
 | Что нужно | Где |
 |---|---|
@@ -44,7 +44,6 @@ SPDX-License-Identifier: Apache-2.0
 | Контрибуция, безопасность, агенты | [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`SECURITY.md`](SECURITY.md) · [`AGENTS.md`](AGENTS.md) |
 | История изменений | [`CHANGELOG.md`](CHANGELOG.md) |
 
-Навигация — [`_sidebar.md`](_sidebar.md), проверка — `npm run check:site`.
 Пометки `[VERIFY]`/`[FORK]` — см. [легенду в overview](docs/overview.md#пометки-verify-и-fork).
 
 ## Зачем
@@ -133,7 +132,7 @@ services/
   taxcom-mock/           — Такском read-only API v2 (Login + Integrator-ID → Session-Token 300s, AccountList/NewDocuments)
 scripts/
   compose-selftest.js    — black-box selftest против compose-стенда
-  check-site.js          — проверка сайта документации и упоминания services/* в README
+  check-guides.js        — шаблон гайдов интеграции и упоминания services/* в README
   check-docs-links.js    — проверка относительных ссылок
   check-protocol-drift.js— детектор дрейфа protocols/*.json ↔ server.js ↔ OpenAPI
 docs/
@@ -144,10 +143,8 @@ docs/
   rfc/                   — проектные решения (RFC-001 песочницы)
   integration/           — гайды «за 10 минут»
   openapi/               — OpenAPI 3.1 спецификации
-site/                    — сайт документации (docsify без сборки)
-index.html               — точка входа сайта (GitHub Pages)
-_sidebar.md              — навигация сайта
-.github/workflows/ci.yml — CI: selftest Node 18/20/22 + compose + GHCR
+.github/workflows/ci.yml — CI: тесты Node 20/22/24 + docker (полный гейт — код и теги);
+.github/workflows/docs-checks.yml — лёгкие док-проверки для docs-only PR
 Dockerfile               — образ для всех сервисов
 docker-compose.yml       — root compose (10 сервисов, из исходников)
 docker-compose.include.yml — внешний compose-модуль (профиль mock, 10 сервисов)
@@ -180,7 +177,7 @@ graceful shutdown с синхронным сбросом состояния (150
 ## Тестирование
 
 ```bash
-npm test              # всё: core + 10 адаптеров + check:links + check:site + check:drift
+npm test              # всё: core + 10 адаптеров + links/guides/tables/env/copyright/drift
 npm run test:core     # ядро: restore/очередь/ошибки/часы/сценарии/песочницы/SSRF/CSRF
 npm run test:tbank    # Т-Банк: E2C, чарджбэки, СБП, рекурренты, песочницы
 npm run test:kassa    # Ferma: 54-ФЗ, ОФД/ФН, смены, маркировка, песочницы

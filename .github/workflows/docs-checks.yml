@@ -1,0 +1,32 @@
+# © 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
+name: Docs checks
+
+# Лёгкая проверка для PR, меняющих только документацию (md/docs): без матрицы Node
+# и без docker. Полный гейт — в ci.yml (для изменений кода и для тегов).
+on:
+  pull_request:
+    paths:
+      - '**.md'
+      - 'docs/**'
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    name: Docs checks (links, guides, tables, copyright)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Проверка относительных ссылок
+        run: npm run check:links
+      - name: Шаблон гайдов интеграции и README ↔ services/*
+        run: npm run check:guides
+      - name: Реестр markdown-таблиц
+        run: npm run check:tables
+      - name: Лицензионные шапки документов (R-01)
+        run: npm run check:copyright

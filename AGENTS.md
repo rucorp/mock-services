@@ -34,19 +34,21 @@
 | **до** правок (зафиксировать зелёную базу) и **после** каждого PR | `npm test` |
 | тронуты `protocols/*.json`, маршруты/коды/статусы в `services/*/server.js`, конспекты провайдеров (приватный `mock-services-docs`) | `npm run check:drift` |
 | тронуты `.md` в корне, `docs/`, `services/*/README.md`, `packages/core/README.md` | `npm run check:links` |
-| тронуты `index.html`, `_sidebar.md`, `site/**` или добавлен документ в `docs/` | `npm run check:site` |
+| добавлен/изменён документ в `docs/` (в т.ч. гайд интеграции) | `npm run check:guides`, `npm run check:links` |
 | тронуты env-переменные, `docker-compose*.yml`, `Dockerfile` | `npm run check:env`, `npm run test:compose` и `node scripts/docker-smoke.js` |
 `npm test` = одиннадцать selftest-скриптов (`test:core` + десять `test:<сервис>`) +
-`check:links` + `check:site` + `check:tables` + `check:env` + `check:copyright` + `check:drift`
+`check:links` + `check:guides` + `check:tables` + `check:env` + `check:copyright` + `check:drift`
 ([`package.json:8`](package.json)).
 **`test:compose` и `test:docker` в `npm test` НЕ входят** — их прогоняет job `docker` в
 CI ([`.github/workflows/ci.yml:69-184`](.github/workflows/ci.yml)); локально они требуют Docker.
 Отчёт в PR обязан перечислить, какие прогоны выполнены и их финальные строки.
 
-Отдельной «документационной» job в CI нет: `check:links`, `check:site`, `check:tables`,
-`check:env` и `check:drift` — шаги внутри job `test`
-([`.github/workflows/ci.yml:58-67`](.github/workflows/ci.yml)), то есть битая
-ссылка или сломанная навигация сайта краснит весь matrix `test` на трёх версиях Node.
+Документационные проверки идут двумя путями: полный набор (`check:links`, `check:guides`,
+`check:tables`, `check:env`, `check:copyright`, `check:drift`) — шаги внутри job `test`
+(для PR с кодом и тегов); при изменениях только документации запускается лёгкая job
+«Docs checks» ([`.github/workflows/docs-checks.yml`](.github/workflows/docs-checks.yml)).
+**CI-политика (2026-10-15):** полная матрица Node 20/22/24 + docker — на PR с кодом
+и на теги `v*`; push в `main` — один Node (smoke); публикация образа — только по тегам.
 
 Тесты: без `sleep`-ожиданий и без фиксированных портов (`:0`), новые сценарии — новым
 пунктом selftest'а соответствующего сервиса, дефекты — регресс-тестом.
@@ -60,10 +62,10 @@ CI ([`.github/workflows/ci.yml:69-184`](.github/workflows/ci.yml)); локаль
 | Тесты | `services/<name>-mock/selftest.js`, [`packages/core/selftest.js`](packages/core/selftest.js) | self-contained, поднимают сервер на эфемерном порту |
 | Манифесты протоколов | `protocols/*.json` | ЮKасса намеренно без манифеста и OpenAPI — см. `services/yookassa-mock/README.md:209` |
 | OpenAPI 3.1 | `docs/openapi/*.openapi.json` | 3 файла |
-| Проверки | `scripts/*.js` | `check-protocol-drift.js`, `check-docs-links.js`, `compose-selftest.js`, `docker-smoke.js` |
+| Проверки | `scripts/*.js` | `check-protocol-drift.js`, `check-docs-links.js`, `check-guides.js`, `check-tables.js`, `check-env-parity.js`, `check-copyright.js`, `compose-selftest.js`, `docker-smoke.js` |
 | Контейнеры | `Dockerfile`, `docker-compose.yml`, `docker-compose.include.yml` | include — artifact потребителей, менять осторожно |
 | Документация продукта | `README.md`, `SECURITY.md`, `CHANGELOG.md`, `docs/{overview.md,integration,rfc,reference,openapi}` | внутренние документы — в закрытом `mock-services-docs` (§10) |
-| Сайт документации (GitHub Pages) | `_sidebar.md`, `site-build/.vitepress/`, `site-build/scripts/` | VitePress генерирует самостоятельные HTML-страницы; build-зависимости изолированы в `site-build/` |
+| Сайт документации | вне репозитория: <https://axiiom.ru/mock-services/> | сборка — `mock-services-docs/site-build/`; публикация — репозиторий `rucorp/axiiom`; в этом репозитории site-инфраструктуры нет |
 
 ## 4. Формальные требования к файлам
 
@@ -79,7 +81,7 @@ CI ([`.github/workflows/ci.yml:69-184`](.github/workflows/ci.yml)); локаль
    строку в новые служебные файлы, не требуемые стандартом (пример — `CONTRIBUTING.md`, `AGENTS.md`).
 3. **Ссылки — только относительные** между доками (их проверяет `check:links`). Учитывайте
    область проверки: `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `docs/**`, `services/**`,
-   `packages/**` ([`scripts/check-docs-links.js:23,54-58`](scripts/check-docs-links.js)) —
+   `packages/**` ([`scripts/check-docs-links.js`](scripts/check-docs-links.js)) —
    `CHANGELOG.md` и новые корневые файлы проверяются вручную.
 4. **Стиль:** CommonJS, 2 пробела, одинарные кавычки, комментарии по делу на русском с
    английскими терминами. Никакого «мусора» из других языков и случайных символов.
