@@ -275,9 +275,17 @@ async function route(req, res) {
     const surface = p.startsWith('/admin') ? 'admin' : p.startsWith('/mock/') ? 'operator' : null;
     const owner = sandboxRuntime.recordByOwnerToken(req);
     if (surface && !(surface === 'operator' && owner?.id === admission.record.id)) {
-      const access = core.checkControlAccess(req, { adminToken: env.MOCK_ADMIN_TOKEN,
+      if (p === '/admin/login' && req.method === 'POST') {
+      return core.handleAdminLogin(req, res, typeof raw !== 'undefined' ? raw : undefined, parseBody, send);
+    }
+    const access = core.checkControlAccess(req, { adminToken: env.MOCK_ADMIN_TOKEN,
         operatorToken: env.MOCK_OPERATOR_TOKEN, surface, hosted: HOSTED });
-      if (!access.allowed) return error(res, 401, `Control access: ${access.reason}`);
+      if (!access.allowed) {
+        if (p === '/admin' && req.method === 'GET') {
+          return core.html(res, core.adminLoginForm(req));
+        }
+        return error(res, 401, `Control access: ${access.reason}`);
+      }
     }
     const matched = matchRoute(p);
     const methods = matched ? [matched.method] : MOCK_ROUTES[p];

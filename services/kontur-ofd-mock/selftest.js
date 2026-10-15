@@ -172,7 +172,9 @@ async function main() {
   try {
     const r = (route, opts) => request(hosted.base, route, opts);
     ok((await r('/health')).status === 200, 'hosted public health');
-    for (const route of ['/admin', '/mock/time', '/mock/state']) ok((await r(route)).status === 401, `hosted fail-closed ${route}`);
+    const adminRes = await r('/admin');
+    ok(adminRes.status === 200 && String(adminRes.data).includes('name="admin_token"'), 'hosted fail-closed /admin (returns form)');
+    for (const route of ['/mock/time', '/mock/state']) ok((await r(route)).status === 401, `hosted fail-closed ${route}`);
     const a = (await r('/sandboxes', { method: 'POST', body: { id: 'owned-a' } })).data;
     const b = (await r('/sandboxes', { method: 'POST', body: { id: 'owned-b' } })).data;
     ok(a.ownerToken && a.creds.apiKey && a.creds.password && b.ownerToken !== a.ownerToken, 'owned sandbox provisioning generates private credentials');

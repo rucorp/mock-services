@@ -595,7 +595,7 @@ async function main() {
       children.push(hostedChild);
       const hostedPort = await hostedChild.port;
       const adminNoToken = await request(hostedPort, 'GET', '/admin');
-      check('hosted: /admin без токена закрыт', adminNoToken.statusCode === 401);
+      check('hosted: /admin без токена отдает форму входа', adminNoToken.statusCode === 200 && String(adminNoToken.body).includes('name="admin_token"'));
       const timeNoToken = await request(hostedPort, 'GET', '/mock/time');
       check('hosted: /mock/time без токена закрыт, /health открыт', timeNoToken.statusCode === 401 && (await request(hostedPort, 'GET', '/health')).statusCode === 200);
     }

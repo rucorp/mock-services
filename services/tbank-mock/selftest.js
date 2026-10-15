@@ -1293,21 +1293,35 @@ process.env.MOCK_RETRY_MS = '1000';
         ...adminInitPayload, Token: tokenOf(adminInitPayload),
       })).body);
       assert.strictEqual(adminInit.Success, true, 'тестовая операция для admin-формы создаётся');
-      const adminPageWithQueryToken = await request(childPort, 'GET', '/admin?admin_token=adm-secret');
-      const csrfToken = /name="_csrf" value="([^"]+)"/.exec(adminPageWithQueryToken.body)?.[1];
-      const actionUrl = /<form method="POST" action="([^"]+)"/.exec(adminPageWithQueryToken.body)?.[1];
-      assert.strictEqual(adminPageWithQueryToken.statusCode, 200);
-      assert.ok(csrfToken && actionUrl === '/admin/action?admin_token=adm-secret', 'GET query-token сохраняется в CSRF-форме');
+      
+      // HOSTED-режим отказ query
+      const hostedChild = startChild({ MOCK_HOSTED: '1', MOCK_ADMIN_TOKEN: 'adm-secret' });
+      const hostedPort = await hostedChild.port;
+      const hostedQueryFail = await request(hostedPort, 'GET', '/mock/time?admin_token=adm-secret');
+      assert.strictEqual(hostedQueryFail.statusCode, 401, 'hosted-режим отвергает query-токен');
+      hostedChild.proc.kill();
+      
       const form = (fields) => new URLSearchParams(fields).toString();
-      const deniedNoCsrf = await request(childPort, 'POST', '/admin/action?admin_token=adm-secret', form({ action: 'cancel-new', id: adminInit.PaymentId }), { 'Content-Type': 'application/x-www-form-urlencoded' });
+      const adminLogin = await request(childPort, 'POST', '/admin/login', form({ admin_token: 'adm-secret' }), { 'Content-Type': 'application/x-www-form-urlencoded' });
+      assert.strictEqual(adminLogin.statusCode, 302, 'Успешный вход через форму');
+      const sessionCookie = (adminLogin.headers['set-cookie'] || []).find(c => c.startsWith('mock_admin_token=adm-secret'));
+      assert.ok(sessionCookie, 'Cookie устанавливается');
+      
+      const adminPageWithQueryToken = await request(childPort, 'GET', '/admin', '', { 'Cookie': sessionCookie.split(';')[0] });
+      assert.strictEqual(adminPageWithQueryToken.statusCode, 200, 'Доступ к /admin по cookie');
+      const csrfToken = (adminPageWithQueryToken.body.match(/name="_csrf" value="([^"]+)"/) || [])[1];
+      const actionStart = adminPageWithQueryToken.body.indexOf('action="/admin/action');
+   const actionUrl = actionStart > -1 ? adminPageWithQueryToken.body.slice(actionStart + 8).split('"')[0] : '';
+      assert.ok(csrfToken && actionUrl === '/admin/action', 'URL не содержит токенов');
+            const deniedNoCsrf = await request(childPort, 'POST', '/admin/action', form({ action: 'cancel-new', id: adminInit.PaymentId }), { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': sessionCookie.split(';')[0] });
       assert.strictEqual(deniedNoCsrf.statusCode, 403, 'POST без CSRF-токена запрещён');
-      const deniedCrossOrigin = await request(childPort, 'POST', '/admin/action?admin_token=adm-secret', form({ action: 'cancel-new', id: adminInit.PaymentId, _csrf: csrfToken }), {
+      const deniedCrossOrigin = await request(childPort, 'POST', '/admin/action', form({ action: 'cancel-new', id: adminInit.PaymentId, _csrf: csrfToken }), { 'Cookie': sessionCookie.split(';')[0],
         'Content-Type': 'application/x-www-form-urlencoded', Origin: 'http://attacker.invalid',
       });
       assert.strictEqual(deniedCrossOrigin.statusCode, 403, 'cross-site POST запрещён даже с действующим токеном');
-      const validAction = await request(childPort, 'POST', actionUrl, form({ action: 'cancel-new', id: adminInit.PaymentId, _csrf: csrfToken }), { 'Content-Type': 'application/x-www-form-urlencoded' });
+      const validAction = await request(childPort, 'POST', actionUrl, form({ action: 'cancel-new', id: adminInit.PaymentId, _csrf: csrfToken }), { 'Cookie': sessionCookie.split(';')[0], 'Content-Type': 'application/x-www-form-urlencoded' });
       assert.strictEqual(validAction.statusCode, 302, 'CSRF-форма принимается');
-      assert.strictEqual(validAction.headers.location, '/admin?admin_token=adm-secret', 'redirect сохраняет admin_token из GET');
+      assert.strictEqual(validAction.headers.location, '/admin', 'redirect без токенов в URL');
       const getStatePayload = { TerminalKey: TERMINAL, PaymentId: adminInit.PaymentId };
       const adminActionState = JSON.parse((await request(childPort, 'POST', '/v2/GetState', {
         ...getStatePayload, Token: tokenOf(getStatePayload),
@@ -1834,15 +1848,12 @@ process.env.MOCK_RETRY_MS = '1000';
         const adminPost = await request(childPort, 'POST', `${actionUrl.pathname}${actionUrl.search}`,
           `_csrf=${encodeURIComponent(csrfMatch[1])}&action=cancel-new&id=${encodeURIComponent(init.PaymentId)}`, {
             'Content-Type': 'application/x-www-form-urlencoded',
-            Origin: `http://127.0.0.1:${childPort}`,
-          });
-        const returnedPage = adminPost.headers.location
-          ? await request(childPort, 'GET', adminPost.headers.location)
-          : null;
+            Origin: `http://127.0.0.1:${childPort}`, ...owner });
+        const returnedPage = adminPost.headers.location ? await request(childPort, 'GET', adminPost.headers.location, undefined, owner) : null;
         const redirectQuery = new URL(adminPost.headers.location || '/', `http://127.0.0.1:${childPort}`).searchParams;
-        ownerAdminActionWorks = actionUrl.searchParams.get('sandbox_token') === created.ownerToken
+        ownerAdminActionWorks = (actionUrl.pathname + actionUrl.search) === '/admin/action?sandbox=' + created.id
           && adminPost.statusCode === 302
-          && redirectQuery.get('sandbox_token') === created.ownerToken
+          && (new URL(adminPost.headers.location || '/', `http://127.0.0.1:${childPort}`).pathname) === '/admin'
           && returnedPage && returnedPage.statusCode === 200;
       }
       assert.ok(ownerAdminPage.statusCode === 200 && ownerAdminActionWorks,

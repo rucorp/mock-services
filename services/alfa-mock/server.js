@@ -1614,7 +1614,7 @@ function sendSandboxError(res, admission) {
   if (admission.kind === 'unauthorized') {
     return jsonRaw(res, 401, aerrBody(2, `Доступ к песочнице «${id}» ограничен: знание ID не является доступом`, {
       field: 'X-Sandbox-Token',
-      hint: 'Передайте owner-token из ответа POST /sandboxes: Authorization: Bearer <ownerToken>, X-Sandbox-Token или ?sandbox_token=.',
+      hint: 'Передайте owner-token из ответа POST /sandboxes: Authorization: Bearer <ownerToken>, X-Sandbox-Token или cookie (mock_sandbox_token=...). В hosted-режиме query-токены запрещены.',
     }));
   }
   if (admission.kind === 'expired') {
@@ -1647,11 +1647,7 @@ function adminPage(req) {
   const pageQuery = new URL(req.url, 'http://mock.local').searchParams;
   const adminQuery = new URLSearchParams();
   if (currentSandbox !== 'default') adminQuery.set('sandbox', currentSandbox);
-  const adminToken = pageQuery.get('admin_token');
-  if (adminToken) adminQuery.set('admin_token', adminToken);
-  const sandboxToken = TENANCY === 'owned' ? sandboxRuntime.ownerTokenOf(req) : '';
-  if (sandboxToken) adminQuery.set('sandbox_token', sandboxToken);
-  const adminSuffix = adminQuery.toString();
+      const adminSuffix = adminQuery.toString();
   const adminActionUrl = `/admin/action${adminSuffix ? `?${adminSuffix}` : ''}`;
   const adminJournalUrl = `/admin/journal${adminSuffix ? `?${adminSuffix}` : ''}`;
   const csrfToken = core.createCsrfToken(ADMIN_CSRF_SECRET, currentSandbox);
@@ -1780,6 +1776,9 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
   const ownerSurface = surface === 'operator'
     && Boolean(ownerRec && admission.record && ownerRec.id === admission.record.id);
   if (surface && admission.via !== 'owner' && !ownerSurface) {
+    if (p === '/admin/login' && req.method === 'POST') {
+      return core.handleAdminLogin(req, res, typeof raw !== 'undefined' ? raw : undefined, parseBody, send);
+    }
     const access = checkControlAccess(req, {
       adminToken: MOCK_ADMIN_TOKEN,
       operatorToken: OPERATOR_TOKEN,
@@ -1787,13 +1786,16 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
       hosted: HOSTED,
     });
     if (!access.allowed) {
+      if (p === '/admin' && req.method === 'GET') {
+        return core.html(res, core.adminLoginForm(req));
+      }
       const envName = surface === 'admin' ? 'MOCK_ADMIN_TOKEN' : 'MOCK_OPERATOR_TOKEN';
       const message = access.reason === 'hosted-fail-closed'
         ? `Маршрут ${p} закрыт: hosted-режим (MOCK_HOSTED) требует ${envName} для управляющей поверхности`
         : `Доступ к управляющему маршруту ${p} ограничен: требуется ${envName}`;
       return jsonRaw(res, 401, aerrBody(2, message, {
         field: surface === 'admin' ? 'Authorization' : 'X-Operator-Token',
-        hint: `Передайте токен: Authorization: Bearer <${envName}> или X-Operator-Token/X-Admin-Token.`,
+        hint: access.hint || `Передайте токен: Authorization: Bearer <${envName}> или X-Operator-Token/X-Admin-Token.`,
       }));
     }
   }
