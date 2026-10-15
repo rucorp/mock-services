@@ -1078,9 +1078,14 @@ async function main() {
       'business-token',
       'Authorization: Bearer — fallback для клиентов без явных заголовков',
     );
-    assert.strictEqual(of({}, '/x?sandbox_token=query-token'), 'FAIL_QUERY_TOKEN_REJECTED', 'query sandbox_token reject in owned');
+    // Ф-3 (#121): сентинел-значение больше не возвращается (могло попасть в
+    // журнал как «токен»); отказ виден по detail.rejectedQuery.
+    const rejected = {};
+    assert.strictEqual(of({}, '/x?sandbox_token=query-token'), '', 'query sandbox_token не отдаётся в owned');
+    assert.strictEqual(rt.ownerTokenOf({ headers: {}, url: '/x?sandbox_token=query-token' }, rejected), '');
+    assert.strictEqual(rejected.rejectedQuery, true, 'отказ query-токена помечен в detail (для точного DX-хинта)');
     const rtNs = core.createSandboxRuntime({ state: {}, initialStateFactory: () => ({}), mode: 'namespaces', log: () => {} });
-    assert.strictEqual(rtNs.ownerTokenOf({ headers: {}, url: '/x?sandbox_token=query-token' }), 'query-token', 'query sandbox_token allowed in namespaces');
+    assert.strictEqual(rtNs.ownerTokenOf({ headers: {}, url: '/x?sandbox_token=query-token' }), 'query-token', 'query sandbox_token allowed in namespaces (non-hosted)');
     assert.strictEqual(of({}, '/x'), '', 'без токенов — пустая строка');
     // Регистр схемы значения не имеет (как и раньше)
     assert.strictEqual(of({ authorization: 'bearer business-token', 'x-owner-token': 'owner-header' }), 'owner-header');
@@ -1092,8 +1097,8 @@ async function main() {
     );
     assert.strictEqual(
       of({ authorization: 'Bearer   ' }, '/x?sandbox_token=query-token'),
-      'FAIL_QUERY_TOKEN_REJECTED',
-      'Bearer без токена не перекрывает query'
+      '',
+      'Bearer без токена не перекрывает query (owned: отказ без сентинела)'
     );
   });
 
@@ -2141,6 +2146,157 @@ async function main() {
 
   await acheck('MS-04: installGracefulShutdown без server — явная ошибка', async () => {
     assert.throws(() => core.installGracefulShutdown({ flush: () => {} }), /требуется http\.Server/);
+  });
+
+  /* ---------------------- MS-12 + Ф-1…Ф-4 (issue #121, финальная волна SZ) */
+
+  check('#121 MS-12: hosted без MOCK_SANDBOX_TOKEN не отдаёт default; инфра и именованные песочницы работают', () => {
+    const baseState = {};
+    const rt = core.createSandboxRuntime({
+      state: baseState,
+      initialStateFactory: () => ({}),
+      mode: 'owned',
+      hosted: true,
+      log: () => {},
+    });
+    const req = (headers = {}, url = '/v2/Init') => ({ headers, url, socket: { remoteAddress: '127.0.0.1' } });
+    for (const [policy, url] of [['business', '/v2/Init'], ['form', '/payment/PA-1']]) {
+      const rejected = rt.admit(req({}, url), policy);
+      assert.strictEqual(rejected.ok, false, `${policy} без селектора должен быть закрыт (MS-12)`);
+      assert.strictEqual(rejected.kind, 'not-found', 'отказ отдаётся как not-found (адаптеры → 404)');
+      assert.strictEqual(rejected.sandbox, 'default');
+      assert.match(rejected.hint, /MOCK_SANDBOX_TOKEN/, 'hint объясняет, что дело в hosted без токена');
+      assert.match(rejected.hint, /POST \/sandboxes/, 'hint предлагает создать песочницу');
+    }
+    // Управляющая поверхность (policy:'control') остаётся на своём гейте MS-06:
+    // admission её не перекрывает, 401 + DX про hosted отдаёт адаптер.
+    const control = rt.admit(req({}, '/mock/state'), 'control');
+    assert.strictEqual(control.ok, true, 'control в hosted без токена не перекрывается MS-12 (гейт MS-06)');
+    assert.strictEqual(control.record.isDefault, true);
+    assert.strictEqual(control.via, 'default');
+    assert.strictEqual(rt.admit(req({ 'x-mock-sandbox': 'default' }, '/v2/Init'), 'business').ok, false,
+      'явный sandbox=default в hosted без токена тоже закрыт');
+    for (const url of ['/health', '/openapi.json', '/sandboxes']) {
+      const infra = rt.admit(req({}, url), 'public');
+      assert.strictEqual(infra.ok, true, `публичная инфраструктура ${url} остаётся доступной`);
+      assert.strictEqual(infra.via, 'public');
+    }
+    const infra = rt.admit(req({}, '/health'), 'public');
+    rt.run(infra, () => { rt.state.probe = 'detached'; });
+    assert.strictEqual(baseState.probe, undefined, 'инфра-запрос обслуживается detached-записью и не пишет в default');
+    const created = rt.create({ id: '', creds: { terminalKey: 'K' } });
+    const owner = rt.admit(req({ 'x-mock-sandbox': created.id, 'x-sandbox-token': created.ownerToken }), 'business');
+    assert.strictEqual(owner.ok, true, 'именованная песочница с owner-token доступна как раньше');
+    assert.strictEqual(owner.via, 'owner');
+  });
+
+  check('#121 MS-12: self-hosted и hosted с MOCK_SANDBOX_TOKEN — поведение прежнее (BC)', () => {
+    const req = (headers = {}, url = '/v2/Init') => ({ headers, url, socket: { remoteAddress: '127.0.0.1' } });
+    const selfHosted = core.createSandboxRuntime({ state: {}, initialStateFactory: () => ({}), mode: 'namespaces', log: () => {} });
+    assert.strictEqual(selfHosted.admit(req(), 'business').ok, true, 'self-hosted namespaces: default открыт по DX-контракту');
+    const hostedWithToken = core.createSandboxRuntime({
+      state: {}, initialStateFactory: () => ({}), mode: 'owned', hosted: true, defaultOwnerToken: 'root-token', log: () => {},
+    });
+    assert.strictEqual(hostedWithToken.admit(req(), 'business').kind, 'unauthorized', 'hosted с токеном: default закрыт owner-token-ом (401)');
+    assert.strictEqual(hostedWithToken.admit(req({ 'x-sandbox-token': 'root-token' }), 'business').via, 'owner',
+      'hosted с токеном: default открывается owner-token-ом');
+  });
+
+  check('#121 Ф-2: cookie читается с декодированием — токены с «=» работают (tokenMatches и ownerTokenOf)', () => {
+    const req = (headers, url = '/admin/journal') => ({ headers, url, socket: {} });
+    const token = 'adm.eq=3x&more';
+    const encoded = `mock_admin_token=${encodeURIComponent(token)}`;
+    assert.strictEqual(core.checkControlAccess(req({ cookie: encoded }), { adminToken: token, surface: 'admin' }).allowed, true,
+      'закодированная cookie (как пишет POST /admin/login) авторизует');
+    assert.strictEqual(core.checkControlAccess(req({ cookie: `mock_admin_token=${token}` }), { adminToken: token, surface: 'admin' }).allowed, true,
+      'сырая cookie тоже авторизует (асимметрии больше нет)');
+    assert.strictEqual(core.checkControlAccess(req({ cookie: 'mock_admin_token=other' }), { adminToken: token, surface: 'admin' }).allowed, false,
+      'чужая cookie не проходит');
+    const rt = core.createSandboxRuntime({
+      state: {}, initialStateFactory: () => ({}), mode: 'namespaces', defaultOwnerToken: 'own.eq=1', log: () => {},
+    });
+    assert.strictEqual(rt.ownerTokenOf(req({ cookie: 'mock_sandbox_token=own.eq%3D1' }, '/v2/Init')), 'own.eq=1',
+      'owner-token с «=» читается из cookie владельца');
+    assert.strictEqual(rt.admit(req({ cookie: 'mock_sandbox_token=own.eq%3D1' }, '/v2/Init'), 'business').via, 'owner',
+      'закрытая default принимает декодированную cookie владельца');
+  });
+
+  check('#121 Ф-3: hosted отклоняет ?sandbox_token в любой аренде; non-hosted — WARN и приём (без сентинела)', () => {
+    const req = (url) => ({ headers: {}, url, socket: { remoteAddress: '127.0.0.1' } });
+    const hostedWarns = [];
+    const hostedNs = core.createSandboxRuntime({
+      state: {}, initialStateFactory: () => ({}), mode: 'namespaces', hosted: true,
+      defaultOwnerToken: 'root-token', log: (m) => hostedWarns.push(m),
+    });
+    const rejected = hostedNs.admit(req('/v2/Init?sandbox_token=root-token'), 'business');
+    assert.strictEqual(rejected.ok, false, 'hosted-namespaces больше не принимает query sandbox_token');
+    assert.strictEqual(rejected.kind, 'unauthorized');
+    assert.match(rejected.hint, /query-строке/, 'hint говорит именно про query-строку');
+    assert.strictEqual(hostedNs.ownerTokenOf(req('/x?sandbox_token=root-token')), '', 'query-значение не отдаётся как токен');
+    assert.strictEqual(hostedWarns.filter((m) => m.includes('sandbox_token')).length, 0, 'в hosted нет WARN о приёме query');
+    assert.ok(!JSON.stringify(rejected).includes('root-token'), 'отказ не эхо-ит отклонённое значение токена');
+    assert.ok(!JSON.stringify(rejected).includes('FAIL_QUERY_TOKEN_REJECTED'), 'сентинел-значение не возвращается');
+
+    const plainWarns = [];
+    const plainNs = core.createSandboxRuntime({
+      state: {}, initialStateFactory: () => ({}), mode: 'namespaces',
+      defaultOwnerToken: 'root-token', log: (m) => plainWarns.push(m),
+    });
+    assert.strictEqual(plainNs.admit(req('/v2/Init?sandbox_token=root-token'), 'business').ok, true,
+      'non-hosted namespaces сохраняет BC: query-токен принимается');
+    assert.ok(plainWarns.some((m) => m.includes('[WARN] Приём sandbox_token')), 'non-hosted пишет WARN об устаревшем приёме');
+
+    const owned = core.createSandboxRuntime({
+      state: {}, initialStateFactory: () => ({}), mode: 'owned', defaultOwnerToken: 'root-token', log: () => {},
+    });
+    const ownedRejected = owned.admit(req('/v2/Init?sandbox_token=root-token'), 'business');
+    assert.strictEqual(ownedRejected.ok, false, 'owned (non-hosted) отклоняет query-токен как раньше');
+    assert.ok(!JSON.stringify(ownedRejected).includes('FAIL_QUERY_TOKEN_REJECTED'), 'сентинел не попадает в admission/журнал');
+  });
+
+  check('#121 Ф-4: checkAdminAuth выровнен с checkControlAccess (hosted fail-closed, query отклоняется)', () => {
+    const req = (headers = {}, url = '/admin') => ({ headers, url, socket: {} });
+    assert.strictEqual(core.checkAdminAuth(req({}, '/admin?admin_token=sec'), 'sec'), true, 'non-hosted query — прежнее поведение');
+    assert.strictEqual(core.checkAdminAuth(req({}, '/admin?admin_token=sec'), 'sec', { hosted: true }), false,
+      'hosted: query-токен больше не проходит');
+    assert.strictEqual(core.checkAdminAuth(req({ authorization: 'Bearer sec' }), 'sec', { hosted: true }), true, 'hosted: заголовок работает');
+    assert.strictEqual(core.checkAdminAuth(req({ cookie: 'mock_admin_token=sec' }), 'sec', { hosted: true }), true, 'hosted: cookie работает');
+    assert.strictEqual(core.checkAdminAuth(req({}, '/admin'), '', { hosted: true }), false, 'hosted без секрета — fail-closed');
+    assert.strictEqual(core.checkAdminAuth(req({}, '/admin'), ''), true, 'non-hosted без секрета — открыто (DX-контракт)');
+  });
+
+  check('#121 Ф-1: sessionCookiesFromQuery переносит только совпавшие токены и молчит в hosted', () => {
+    const req = { headers: {}, url: '/admin/action?admin_token=adm%3D1&sandbox_token=sbx&operator_token=wrong', socket: {} };
+    const cookies = core.sessionCookiesFromQuery(req, { adminToken: 'adm=1', operatorToken: 'op-1', sandboxToken: 'sbx' });
+    assert.deepStrictEqual(cookies.map((c) => c.split('=')[0]), ['mock_admin_token', 'mock_sandbox_token'],
+      'чужой operator_token сессии не получает');
+    assert.ok(cookies[0].startsWith('mock_admin_token=adm%3D1;'), 'значение кодируется так же, как в форме входа');
+    assert.ok(cookies[0].includes('HttpOnly') && cookies[0].includes('SameSite=Strict'), 'атрибуты сессионной cookie');
+    assert.deepStrictEqual(core.sessionCookiesFromQuery(req, { adminToken: 'adm=1', sandboxToken: 'sbx', hosted: true }), [],
+      'в hosted переносить нечего (query-токены отклоняются)');
+    assert.deepStrictEqual(core.sessionCookiesFromQuery({ headers: {}, url: '/admin', socket: {} }, { adminToken: 'adm' }), [],
+      'без query-токенов список пуст');
+  });
+
+  await acheck('#121 Ф-1: attachResponseCookies переживает writeHead(status, headers) и не дублирует cookie', async () => {
+    const srv = http.createServer((inReq, res) => {
+      core.attachResponseCookies(res, ['mock_admin_token=adm; HttpOnly', 'mock_sandbox_token=sbx; HttpOnly']);
+      core.attachResponseCookies(res, ['mock_admin_token=dup; HttpOnly']);
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('ok');
+    });
+    const port = await listen(srv);
+    try {
+      const response = await new Promise((resolve, reject) => {
+        http.get({ host: '127.0.0.1', port, path: '/' }, resolve).on('error', reject);
+      });
+      response.resume();
+      assert.deepStrictEqual(response.headers['set-cookie'],
+        ['mock_admin_token=adm; HttpOnly', 'mock_sandbox_token=sbx; HttpOnly'],
+        'Set-Cookie на месте и без дубликатов после writeHead(status, headers)');
+    } finally {
+      srv.close();
+    }
   });
 
   hook.close();

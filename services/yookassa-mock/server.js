@@ -156,6 +156,7 @@ const sandboxRuntime = createSandboxRuntime({
   persist: store.persist,
   initialStateFactory: createInitialYookassaState,
   mode: TENANCY,
+  hosted: HOSTED,
   stateFile: MOCK_STATE_FILE,
   sandboxFile: String(process.env.MOCK_SANDBOX_FILE || ''),
   ttlMs: SANDBOX_TTL_MS,
@@ -1562,14 +1563,14 @@ function sendSandboxError(res, admission) {
   const id = admission.sandbox || 'default';
   if (admission.kind === 'not-found') {
     return sendJson(res, yerr('not_found', {
-      description: `Sandbox "${id}" not found`,
-      hint: 'Создайте песочницу: POST /sandboxes — в ответе будут id, creds и ownerToken. Список — GET /mock/sandboxes.',
+      description: admission.message || `Sandbox "${id}" not found`,
+      hint: admission.hint || 'Создайте песочницу: POST /sandboxes — в ответе будут id, creds и ownerToken. Список — GET /mock/sandboxes.',
     }), 404);
   }
   if (admission.kind === 'unauthorized') {
     return sendJson(res, yerr('invalid_credentials', {
-      description: `Access to sandbox "${id}" is limited: knowing the id is not enough`,
-      hint: 'Передайте owner-token: Authorization: Bearer <ownerToken>, X-Sandbox-Token или cookie (mock_sandbox_token=...). В hosted-режиме query-токены запрещены.',
+      description: admission.message || `Access to sandbox "${id}" is limited: knowing the id is not enough`,
+      hint: admission.hint || 'Передайте owner-token: Authorization: Bearer <ownerToken>, X-Sandbox-Token или cookie (mock_sandbox_token=...). Токены из query-строки в hosted/owned-режиме запрещены.',
     }), 401);
   }
   if (admission.kind === 'expired') {
@@ -1597,7 +1598,6 @@ function controlSurface(p) {
 
 function adminPage(req) {
   const currentSandbox = sandboxRuntime.currentId();
-  const pageQuery = new URL(req.url, 'http://mock.local').searchParams;
   const adminQuery = new URLSearchParams();
   if (currentSandbox !== 'default') adminQuery.set('sandbox', currentSandbox);
       const adminSuffix = adminQuery.toString();
@@ -1757,7 +1757,17 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
         hint: access.hint || `Передайте токен: Authorization: Bearer <${envName}> или X-Operator-Token/X-Admin-Token.`,
       }), 401);
     }
-  }
+
+      }
+
+  // Ф-1 (#121): принятый из query управляющий токен переносим в сессионную
+  // cookie — дальше консоль, ссылки и формы работают без токенов в URL.
+  core.attachResponseCookies(res, core.sessionCookiesFromQuery(req, {
+    adminToken: MOCK_ADMIN_TOKEN,
+    operatorToken: OPERATOR_TOKEN,
+    sandboxToken: sandboxRuntime.recordByOwnerToken(req) ? sandboxRuntime.ownerTokenOf(req) : '',
+    hosted: HOSTED,
+  }));
 
   const isV3 = p.startsWith('/v3');
 
@@ -1958,14 +1968,11 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
       });
     }
     const result = adminAction(body);
-    const postQuery = new URL(req.url, 'http://mock.local').searchParams;
     const redirectQuery = new URLSearchParams();
     const currentSandbox = sandboxRuntime.currentId();
     if (currentSandbox !== 'default') redirectQuery.set('sandbox', currentSandbox);
-    const adminToken = postQuery.get('admin_token');
-    if (adminToken) redirectQuery.set('admin_token', adminToken);
-    const sandboxToken = postQuery.get('sandbox_token');
-    if (sandboxToken) redirectQuery.set('sandbox_token', sandboxToken);
+    // Ф-1 (#121): токены НЕ возвращаются в URL — навигацию держит сессионная
+    // cookie (control-блок выше), заголовок или cookie клиента.
     const redirectSuffix = redirectQuery.toString();
     return send(res, 302, '', { Location: `${result.redirect}${redirectSuffix ? `?${redirectSuffix}` : ''}` });
   }
@@ -2158,7 +2165,7 @@ if (require.main === module) {
     console.log(`[yookassa-mock] webhooks: retry ${RETRY_MS}ms x${MAX_ATTEMPTS}${process.env.MOCK_DEFAULT_WEBHOOK_URL ? `, default ${process.env.MOCK_DEFAULT_WEBHOOK_URL}` : ', default none'} (ACK=200)`);
     console.log(`[yookassa-mock] ttls: hold=${CAPTURE_TTL_MS}ms pending=${PENDING_TTL_MS}ms refund_delay=${REFUND_DELAY_MS}ms`);
     console.log(`[yookassa-mock] control-plane: admin_token=${MOCK_ADMIN_TOKEN ? 'on' : 'off'} operator_token=${OPERATOR_TOKEN ? 'on' : 'off'} hosted=${HOSTED} block_private_webhooks=${BLOCK_PRIVATE_WEBHOOKS}`);
-    console.log(`[yookassa-mock] sandboxes: mode=${TENANCY} ttl_ms=${SANDBOX_TTL_MS} max=${SANDBOX_MAX} max_documents=${SANDBOX_MAX_DOCUMENTS} host_suffix=${SANDBOX_HOST_SUFFIX || '-'} registry=${sandboxRuntime.stats().file || 'memory'}${TENANCY === 'owned' && !SANDBOX_OWNER_TOKEN ? ' (default-песочница открыта: задайте MOCK_SANDBOX_TOKEN, чтобы закрыть)' : ''}`);
+    console.log(`[yookassa-mock] sandboxes: mode=${TENANCY} ttl_ms=${SANDBOX_TTL_MS} max=${SANDBOX_MAX} max_documents=${SANDBOX_MAX_DOCUMENTS} host_suffix=${SANDBOX_HOST_SUFFIX || '-'} registry=${sandboxRuntime.stats().file || 'memory'} ${core.defaultSandboxStatus({ ownerToken: SANDBOX_OWNER_TOKEN, hosted: HOSTED, tenancy: TENANCY })}`);
   });
 }
 

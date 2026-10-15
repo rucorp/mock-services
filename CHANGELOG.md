@@ -77,6 +77,47 @@ SPDX-License-Identifier: Apache-2.0
   transaction/{requestId}` отдаёт тело заявки «как принято» для всех типов
   (receipt/receiptCorrection/смены/отчёт), как обещает README; регресс в selftest.
 
+### Security
+- **MS-12: hosted без `MOCK_SANDBOX_TOKEN` больше не отдаёт `default` (#121).**
+  `createSandboxRuntime` получил опцию `hosted`: при `MOCK_HOSTED=1` и пустом
+  `MOCK_SANDBOX_TOKEN` бизнес- и form-маршруты без селектора (и явный
+  `sandbox=default`) получают отказ песочницы (404 `not-found` с точной причиной
+  MS-12 и подсказкой), публичная инфраструктура (`/health`, `/openapi.json`,
+  `/sandboxes`) отдаётся detached public record, именованные песочницы
+  (`POST /sandboxes` + owner-token) работают как раньше. Управляющая поверхность
+  (`/admin*`, `/mock/*`) намеренно остаётся на fail-closed гейте MS-06 (401 без
+  `MOCK_ADMIN_TOKEN`/`MOCK_OPERATOR_TOKEN`) — решение зафиксировано в `SECURITY.md`.
+  Self-hosted без `MOCK_HOSTED` не меняется. Стартовый статус унифицирован:
+  `core.defaultSandboxStatus(...)` → `default=owner-token | default=closed (MS-12: …) |
+  default=open`; адаптеры печатают его в логе песочниц.
+- **Ф-1: токены не возвращаются в URL/HTML (#121).** Во всех 10 адаптерах
+  `POST /admin/action` редиректит без `admin_token`/`sandbox_token` в `Location`
+  (в `?sandbox=` остаётся только селектор), ссылки и формы консоли токенов не
+  содержат, а `adminPage` не подставляет owner-token в ссылки. Принятый из
+  query управляющий токен переносится в HttpOnly-cookie
+  (`mock_admin_token`/`mock_operator_token`/`mock_sandbox_token`,
+  `SameSite=Strict`, `Path=/`) через `core.sessionCookiesFromQuery` +
+  `attachResponseCookies` — в hosted не выдаётся (query там отклоняется).
+  Регрессии: ядро (`#121`) + selftest'ы всех сервисов (Ф-1-блок в 10/10).
+- **Ф-2: cookie encode/decode (#121).** `POST /admin/login` пишет cookie через
+  `encodeURIComponent`, а `tokenMatches`/`ownerTokenOf` читают значение через
+  `core.readCookieValue` с декодированием (`%3D` → `=`) и разделением по первому
+  `=` — токены с `=`, `;`, `&` снова работают через форму входа (регресс-тест в
+  `packages/core/selftest.js`).
+- **Ф-3: `?sandbox_token=` в hosted — fail-closed (#121).** Отклонение больше не
+  зависит от режима аренды: hosted (включая `namespaces`) отвечает 401 с точным
+  хинтом «передайте заголовком/cookie», WARN об устаревании остался в non-hosted;
+  сентинел `FAIL_QUERY_TOKEN_REJECTED` больше не возвращается как значение токена
+  (не попадает в журналы) — причина отказа видна в `detail.rejectedQuery`.
+- **Ф-4: `core.checkAdminAuth` выровнен с fail-closed (#121).** Функция делегирует
+  `checkControlAccess` (surface `admin`, опция `hosted`): в hosted query-токен не
+  проходит, поведение non-hosted сохранено. API остаётся латентным (адаптеры
+  используют `checkControlAccess` напрямую), удаление/deprecation — решение
+  владельца.
+- **taxcom/kontur-ofd: диагностика песочниц не заглушена (#121).**
+  `createSandboxRuntime` в обоих адаптерах получил tagged `log:` — WARN о
+  query-токенах и сбои persist/restore песочниц больше не теряются.
+
 ## [0.7.0] — 2026-10-14
 
 ### Added

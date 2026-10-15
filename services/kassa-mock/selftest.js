@@ -722,10 +722,26 @@ async function main() {
         'Cookie': sessionCookie, 'Content-Type': 'application/x-www-form-urlencoded',
         'Origin': 'http://127.0.0.1:' + portForOrigin
       });
-      check('#5 A-20: CSRF-форма работает, redirect сохраняет admin_token',
+      check('#5 A-20/Ф-1: CSRF-форма работает, redirect без токенов в URL (Location=/admin)',
         validAction.status === 302 && validAction.headers.location === '/admin');
       const redirectedAdmin = await requestOn(child.port, 'GET', validAction.headers.location || '/admin', '', { 'Cookie': sessionCookie });
-      check('#5 A-20: redirect с admin_token снова открывает консоль', redirectedAdmin.status === 200);
+      check('#5 A-20/Ф-1: redirect возвращает в консоль по cookie-сессии', redirectedAdmin.status === 200);
+
+      // Ф-1 (#121): вход в консоль по query-токену (non-hosted DX) переносит токен
+      // в HttpOnly-cookie, а HTML/Location токенов больше не содержат.
+      const adminByQuery = await requestOn(child.port, 'GET', '/admin?admin_token=adm-secret');
+      check('Ф-1: GET /admin?admin_token=… в non-hosted доступен и не эхо-ит токен',
+        adminByQuery.status === 200 && !String(adminByQuery.text).includes('adm-secret'));
+      const queryCookie = (adminByQuery.headers['set-cookie'] || []).find((c) => c.startsWith('mock_admin_token=adm-secret'));
+      check('Ф-1: принятый из query токен перенесён в HttpOnly-cookie', Boolean(queryCookie));
+      const actionByQuery = await requestOn(child.port, 'POST', '/admin/action?admin_token=adm-secret',
+        form({ action: 'ofd-online', _csrf: csrfToken }),
+        { 'Cookie': queryCookie.split(';')[0], 'Content-Type': 'application/x-www-form-urlencoded' });
+      check('Ф-1: Location действия не содержит admin_token/sandbox_token',
+        actionByQuery.status === 302
+          && !String(actionByQuery.headers.location || '').includes('adm-secret')
+          && !String(actionByQuery.headers.location || '').includes('sandbox_token'),
+        `location=${actionByQuery.headers.location}`);
       const tk = (await requestOn(child.port, 'POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' })).json().token;
       check('#22: getToken (контракт Ferma) не требует operator-токена', Boolean(tk));
       const sell = await requestOn(child.port, 'POST', `/possystem/v1/Main/sell?token=${tk}`, validBody('auth-check-1'));
@@ -765,19 +781,45 @@ async function main() {
     }
   }
 
-  // 25. Hosted-режим без секрета: управляющая поверхность fail-closed,
-  //     публичные маршруты (healthz, контракт Ferma) работают
+  // 25. Hosted-режим без секрета: управляющая поверхность fail-closed (MS-06),
+  //     default не отдаётся бизнес-API (MS-12, #121), /healthz публичный
   {
     const child = await startKassaChild({ MOCK_HOSTED: '1' });
     try {
       const st = await requestOn(child.port, 'GET', '/mock/state');
       check('#22: hosted без секрета: /mock/state закрыт (fail-closed)', st.status === 401 && st.text.includes('hosted'));
       const fn = await requestOn(child.port, 'GET', '/possystem/v1/fn/state');
-      check('#22: hosted без секрета: /fn/state закрыт', fn.status === 401);
+      check('#22: hosted без секрета: /fn/state (управляющая поверхность) закрыт', fn.status === 401);
       const health = await requestOn(child.port, 'GET', '/healthz');
       check('#22: hosted: /healthz публичный', health.status === 200);
-      const tk = (await requestOn(child.port, 'POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' })).json().token;
-      check('#22: hosted: контракт Ferma (getToken) работает', Boolean(tk));
+      const tk = await requestOn(child.port, 'POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' });
+      check('#22/MS-12: hosted без секрета: контракт Ferma закрыт до появления песочницы',
+        tk.status === 404 && tk.text.includes('MOCK_SANDBOX_TOKEN'), `status=${tk.status}`);
+      const queryOnBiz = await requestOn(child.port, 'POST', '/possystem/v1/getToken?sandbox_token=owner-secret', { login: 'loviitest', pass: 'mockpass123' });
+      check('Ф-3: hosted отвергает ?sandbox_token на бизнес-маршруте', queryOnBiz.status === 401 && queryOnBiz.text.includes('X-Sandbox-Token'));
+      const createNamed = await requestOn(child.port, 'POST', '/sandboxes', { sandbox: 'ms12-named' });
+      check('MS-12: при закрытой default именованная песочница создаётся', createNamed.status === 201 && Boolean(createNamed.json().ownerToken));
+      const named = createNamed.json();
+      const namedTk = await requestOn(child.port, 'POST', `/possystem/v1/getToken?sandbox=${encodeURIComponent(named.id)}`,
+        { login: named.creds.fermaLogin, pass: named.creds.fermaPassword }, { 'X-Sandbox-Token': named.ownerToken });
+      check('MS-12: именованная песочница обслуживает контракт Ferma по owner-token и своим кредам',
+        Boolean(namedTk.json() && namedTk.json().token), namedTk.text.slice(0, 160));
+    } finally {
+      await stopChild(child);
+    }
+  }
+
+  // 25b. MS-12 BC: с MOCK_SANDBOX_TOKEN поведение hosted-стенда прежнее —
+  //      default требует owner-token, с ним контракт Ferma работает
+  {
+    const child = await startKassaChild({ MOCK_HOSTED: '1', MOCK_SANDBOX_TOKEN: 'default-owner-secret' });
+    try {
+      const noToken = await requestOn(child.port, 'POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' });
+      check('MS-12 BC: hosted с токеном требует owner-token (401)', noToken.status === 401);
+      const tk = await requestOn(child.port, 'POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' },
+        { 'X-Sandbox-Token': 'default-owner-secret' });
+      check('MS-12 BC: owner-token открывает default (контракт Ferma работает)', Boolean(tk.json().token));
+      check('MS-12: стартовый статус сообщает про owner-token', child.getOutput().includes('default=owner-token'), child.getOutput());
     } finally {
       await stopChild(child);
     }
@@ -836,7 +878,10 @@ async function main() {
       catcher.once('error', reject);
       catcher.listen(0, '127.0.0.1', () => resolve(catcher.address().port));
     });
-    const child = await startKassaChild({ MOCK_HOSTED: '1', MOCK_OPERATOR_TOKEN: 'op-secret' });
+    // MS-12 (#121): default в hosted без MOCK_SANDBOX_TOKEN бизнес-API не
+    // обслуживает, поэтому сценарий даёт стенду песочницу с owner-token —
+    // SSRF-политика при этом проверяется ровно так же.
+    const child = await startKassaChild({ MOCK_HOSTED: '1', MOCK_OPERATOR_TOKEN: 'op-secret', MOCK_SANDBOX_TOKEN: 'default-owner-secret' });
     const auth = { Authorization: 'Bearer op-secret' };
     try {
       const v4 = await requestOn(child.port, 'POST', '/mock/verify-merchant', { url: `http://127.0.0.1:${catchPort}/callback` }, auth);
@@ -845,10 +890,10 @@ async function main() {
       check('#51 PF-01: MOCK_HOSTED=1 по умолчанию блокирует private IPv4 в /mock/verify-merchant (403 + SSRF)',
         v4.status === 403 && v4.text.includes('SSRF') && hostedHits === 0, `status=${v4.status}, hits=${hostedHits}`);
 
-      const tk = (await requestOn(child.port, 'POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' })).json().token;
+      const tk = (await requestOn(child.port, 'POST', '/possystem/v1/getToken', { login: 'loviitest', pass: 'mockpass123' }, auth)).json().token;
       const body = validBody('pf01-hosted-ssrf-1');
       body.receipt.receipts = { service: { callback_url: `http://127.0.0.1:${catchPort}/callback` } };
-      await requestOn(child.port, 'POST', `/possystem/v1/Main/sell?token=${tk}`, body);
+      await requestOn(child.port, 'POST', `/possystem/v1/Main/sell?token=${tk}`, body, auth);
       const cb = await waitForCondition(async () => {
         const exported = (await requestOn(child.port, 'GET', '/mock/state', null, auth)).json();
         const stateSlice = (exported && exported.state) || exported || {};

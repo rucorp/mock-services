@@ -141,7 +141,7 @@ SSRF-проверка исходящих callback включена по умол
 | `MOCK_ADMIN_TOKEN` / `MOCK_OPERATOR_TOKEN` | пусто | защита управляющих `/admin*` и `/mock/*` |
 | `MOCK_HOSTED` | `false` | `true` включает hosted fail-closed для управляющих поверхностей и default SSRF-защиту |
 | `MOCK_TENANCY` | авто | sandbox-модель RFC-001 (`off`, `namespaces`, `owned`) |
-| `MOCK_SANDBOX_TOKEN` | пусто | owner-token default sandbox в `owned`-модели |
+| `MOCK_SANDBOX_TOKEN` | пусто | owner-token default sandbox в `owned`-модели; при `MOCK_HOSTED=1` без него `default` не обслуживается (MS-12) |
 | `MOCK_SANDBOX_TTL_MS` / `MOCK_SANDBOX_MAX` | `owned: 24h` / `owned: 100` | аренда и число песочниц |
 | `MOCK_SANDBOX_MAX_DOCUMENTS` | `owned: 5000` | квота ордеров + возвратов + callback-документов на sandbox |
 | `MOCK_SANDBOX_RETENTION_MS` | `0` | retention терминальных callback-записей; ордеры не удаляются |

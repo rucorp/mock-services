@@ -1251,8 +1251,24 @@ async function main() {
     check('hosted: сообщение объясняет fail-closed', String((hostedTime.json() || {}).errorMessage).includes('hosted'));
     const hostedHealth = await request(portHosted, 'GET', '/health');
     check('hosted: /health открыт', hostedHealth.statusCode === 200);
+    // MS-12 (#121): default в hosted без MOCK_SANDBOX_TOKEN бизнес-API не
+    // обслуживает; именованные песочницы остаются рабочим путём.
     const hostedReg = await rest(portHosted, 'register.do', { ...CREDS, orderNumber: nextOrderNumber('hosted'), amount: '100', returnUrl: 'https://shop.test/ok' });
-    check('hosted: бизнес-регистрация работает', (hostedReg.json() || {}).errorCode === 0);
+    const hostedRegJson = hostedReg.json() || {};
+    check('MS-12: hosted без MOCK_SANDBOX_TOKEN не отдаёт default бизнес-API (404 + хинт)',
+      hostedReg.statusCode === 404
+        && String(hostedRegJson.message || hostedRegJson.errorMessage || '').includes('MS-12')
+        && String(hostedRegJson.hint || '').includes('MOCK_SANDBOX_TOKEN'),
+      `${hostedReg.statusCode} ${String(hostedReg.body).slice(0, 160)}`);
+    const hostedCreate = await request(portHosted, 'POST', '/sandboxes', { sandbox: 'ms12-named' });
+    check('MS-12: именованная песочница создаётся при закрытой default', hostedCreate.statusCode === 201 && Boolean(hostedCreate.json().ownerToken));
+    const hostedNamed = hostedCreate.json();
+    const hostedNamedReg = await rest(portHosted, 'register.do', {
+      userName: hostedNamed.creds.userName, password: hostedNamed.creds.password,
+      orderNumber: nextOrderNumber('hosted-named'), amount: '100', returnUrl: 'https://shop.test/ok',
+    }, { 'X-Sandbox-Token': hostedNamed.ownerToken });
+    check('MS-12: именованная песочница обслуживает бизнес-API по owner-token',
+      (hostedNamedReg.json() || {}).errorCode === 0, String(hostedNamedReg.body).slice(0, 160));
     await childHosted.stop();
 
     /* --------------------------------------- персистентность (MOCK_STATE_FILE) */
@@ -1392,6 +1408,9 @@ async function main() {
         MOCK_HOSTED: '1',
         MOCK_OPERATOR_TOKEN: 'op-ssrf',
         MOCK_CALLBACK_RETRY_MS: '1000',
+        // MS-12 (#121): hosted без MOCK_SANDBOX_TOKEN не отдаёт default, а
+        // сценарий проверяет именно SSRF-политику бизнес-потока.
+        MOCK_SANDBOX_TOKEN: 'default-owner-secret',
       };
       delete rebindEnv.MOCK_BLOCK_PRIVATE_WEBHOOKS;
       const rebindProc = spawn('node', ['--max-old-space-size=48', '-r', preloadFile, path.join(__dirname, 'server.js')], {
@@ -1414,6 +1433,8 @@ async function main() {
           pan: CARD_3DS2_FRICTIONLESS,
           callbackUrl: `http://rebind.audit.test:${receiverPort}/rebind-pg11`,
           amount: 2000,
+          headers: { 'X-Operator-Token': 'op-ssrf' },
+          payHeaders: { 'X-Operator-Token': 'op-ssrf' },
         });
         check('#51 PF-01: MOCK_HOSTED=1 в alfa-mock включает block_private_webhooks=true по умолчанию',
           rebindLog.includes('hosted=true block_private_webhooks=true'));
@@ -1546,6 +1567,42 @@ async function main() {
       check('PB-14: POST /admin/action без CSRF -> 403 + errorCode=2, field=_csrf',
         csrfNeg.statusCode === 403 && csrfNegBody.errorCode === 2 && csrfNegBody.field === '_csrf',
         `HTTP ${csrfNeg.statusCode} ${csrfNeg.body.slice(0, 160)}`);
+
+    const formBody = (fields) => Object.entries(fields)
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+
+    // Ф-1 (#121): query-токен консоли переносится в HttpOnly-cookie, а HTML и
+    // Location больше не несут токенов (MS-06 довёл миграцию не до конца).
+    {
+      const adminConn = startChild({ MOCK_ADMIN_TOKEN: 'adm-secret', MOCK_OPERATOR_TOKEN: 'op-secret' });
+      const adminPort = await adminConn.port;
+      try {
+        // Сид: платёж, чтобы в консоли появилась кнопка действия с CSRF-токеном.
+        await fullFlow(adminPort, { pan: CARD_3DS2_FRICTIONLESS, orderNumber: nextOrderNumber('f1'), amount: 100 });
+        const pageByQuery = await request(adminPort, 'GET', '/admin?admin_token=adm-secret');
+        check('Ф-1: консоль по query-токену (non-hosted DX) -> 200 и токена нет в HTML',
+          pageByQuery.statusCode === 200 && !String(pageByQuery.body).includes('adm-secret'));
+        check('Ф-1: формы/ссылки консоли без токенов',
+          !/action="[^"]*(admin_token|sandbox_token)=/.test(String(pageByQuery.body))
+            && !/href="[^"]*(admin_token|sandbox_token)=/.test(String(pageByQuery.body)));
+        const queryCookie = (pageByQuery.headers['set-cookie'] || []).find((c) => c.startsWith('mock_admin_token=adm-secret'));
+        check('Ф-1: принятый из query токен перенесён в HttpOnly-cookie', Boolean(queryCookie));
+        const csrf = (String(pageByQuery.body).match(/name="_csrf" value="([^"]+)"/) || [])[1];
+        const actionUrl = (String(pageByQuery.body).match(/action="([^"]*\/admin\/action[^"]*)"/) || [])[1] || '/admin/action';
+        const actionBody = formBody({ action: 'duplicate-callback', id: 'missing-id', _csrf: csrf });
+        const action = await request(adminPort, 'POST',
+          `${actionUrl}${actionUrl.includes('?') ? '&' : '?'}admin_token=adm-secret`, actionBody,
+          { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: queryCookie.split(';')[0] });
+        check('Ф-1: действие по cookie-сессии, Location без admin_token/sandbox_token',
+          action.statusCode === 302
+            && !String(action.headers.location || '').includes('adm-secret')
+            && !String(action.headers.location || '').includes('sandbox_token'),
+          `HTTP ${action.statusCode} location=${action.headers.location}`);
+      } finally {
+        await adminConn.stop();
+      }
+    }
+
 
       const stateBeforeProto = JSON.stringify(state);
       const protoEvil = JSON.parse('{"__proto__":{"sandbox":"polluted"}}');

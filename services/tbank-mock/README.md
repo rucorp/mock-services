@@ -175,7 +175,7 @@ Owner-token принимается в `Authorization: Bearer`, `X-Sandbox-Token`
 | `MOCK_ADMIN_TOKEN` | — | токен админки `/admin*`; query-токен из страницы сохраняется в action URL, POST дополнительно требует CSRF-токен и same-origin |
 | `MOCK_HOSTED` | `false` | hosted-режим: управляющая поверхность fail-closed без токена, SSRF-политика по умолчанию |
 | `MOCK_TENANCY` | `owned` при `MOCK_HOSTED=1`, иначе `namespaces` | `owned`/`namespaces`/`off`; legacy `1`/`on`/`true`/`yes` → `owned`, `0`/`false`/`no` → `off`; неизвестное непустое значение пишет WARN и безопасно возвращается к default |
-| `MOCK_SANDBOX_TOKEN` | — | owner-token default-песочницы в hosted; без него `default` открыт (при старте пишется предупреждение) |
+| `MOCK_SANDBOX_TOKEN` | — | owner-token default-песочницы. При `MOCK_HOSTED=1` без него `default` не обслуживается (MS-12: бизнес/form → 404, стартовый лог `default=closed`); в self-hosted `default` открыта с предупреждением при старте |
 | `MOCK_SANDBOX_TTL_MS` | 24 ч в hosted, иначе 0 (бессрочно) | TTL именованной песочницы; истёкшие удаляет sweep-воркер |
 | `MOCK_SANDBOX_MAX` | `100` в hosted, иначе `256` | максимум именованных песочниц |
 | `MOCK_SANDBOX_MAX_DOCUMENTS` | `5000` в hosted, иначе `0` (без лимита) | квота документов песочницы (F-15) |

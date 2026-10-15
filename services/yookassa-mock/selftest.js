@@ -762,6 +762,42 @@ async function main() {
     const adminPage = await request(port, 'GET', '/admin');
     check('admin: HTML-консоль', adminPage.statusCode === 200 && adminPage.body.includes('Консоль стенда'));
 
+    const formBody = (fields) => Object.entries(fields)
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+
+    // Ф-1 (#121): query-токен консоли переносится в HttpOnly-cookie, а HTML и
+    // Location больше не несут токенов (MS-06 довёл миграцию не до конца).
+    {
+      const adminConn = startChild({ MOCK_ADMIN_TOKEN: 'adm-secret', MOCK_OPERATOR_TOKEN: 'op-secret' });
+      const adminPort = await adminConn.port;
+      try {
+        // Сид: платёж, чтобы в консоли появилась кнопка действия с CSRF-токеном.
+        await api(adminPort, 'POST', '/v3/payments', payload());
+        const pageByQuery = await request(adminPort, 'GET', '/admin?admin_token=adm-secret');
+        check('Ф-1: консоль по query-токену (non-hosted DX) -> 200 и токена нет в HTML',
+          pageByQuery.statusCode === 200 && !String(pageByQuery.body).includes('adm-secret'));
+        check('Ф-1: формы/ссылки консоли без токенов',
+          !/action="[^"]*(admin_token|sandbox_token)=/.test(String(pageByQuery.body))
+            && !/href="[^"]*(admin_token|sandbox_token)=/.test(String(pageByQuery.body)));
+        const queryCookie = (pageByQuery.headers['set-cookie'] || []).find((c) => c.startsWith('mock_admin_token=adm-secret'));
+        check('Ф-1: принятый из query токен перенесён в HttpOnly-cookie', Boolean(queryCookie));
+        const csrf = (String(pageByQuery.body).match(/name="_csrf" value="([^"]+)"/) || [])[1];
+        const actionUrl = (String(pageByQuery.body).match(/action="([^"]*\/admin\/action[^"]*)"/) || [])[1] || '/admin/action';
+        const actionBody = formBody({ action: 'duplicate-notification', id: 'missing-id', _csrf: csrf });
+        const action = await request(adminPort, 'POST',
+          `${actionUrl}${actionUrl.includes('?') ? '&' : '?'}admin_token=adm-secret`, actionBody,
+          { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: queryCookie.split(';')[0] });
+        check('Ф-1: действие по cookie-сессии, Location без admin_token/sandbox_token',
+          action.statusCode === 302
+            && !String(action.headers.location || '').includes('adm-secret')
+            && !String(action.headers.location || '').includes('sandbox_token'),
+          `HTTP ${action.statusCode} location=${action.headers.location}`);
+      } finally {
+        await adminConn.stop();
+      }
+    }
+
+
     // Песочницы: изоляция state (PA-55: POST /sandboxes создаёт песочницу, но без селектора запрос идёт в default).
     const sw = await request(port, 'POST', '/sandboxes', { sandbox: 'iso-a' }, { 'Content-Type': 'application/json' });
     check('создание/выбор песочницы iso-a', sw.statusCode === 200 && sw.json().current === 'iso-a');
