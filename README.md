@@ -110,7 +110,6 @@ URL: `http://<хост>:3100/v2` и `http://<хост>:3101/possystem/v1`.
 | Первый ОФД OKassa | `first-ofd-mock` | 3107 | [first-ofd](docs/integration/first-ofd.md) | [README](services/first-ofd-mock/README.md) |
 | Контур.ОФД read | `kontur-ofd-mock` | 3108 | [kontur-ofd](docs/integration/kontur-ofd.md) | [README](services/kontur-ofd-mock/README.md) |
 | Такском API v2 read | `taxcom-mock` | 3109 | [taxcom](docs/integration/taxcom.md) | [README](services/taxcom-mock/README.md) |
-| Lovii платформа | — | — | [lovii](docs/integration/lovii.md) | — |
 
 Креды всех моков синтетические: `alfa-mock` (`ALFAMOCKTEST`/`mockpass123`),
 `sber-mock` (`SBERMOCKTEST`/`mockpass123`), `vtb-mock` (`vtbmocktest`/`mockpass123`),
@@ -144,7 +143,7 @@ docs/
   hardening.md           — контейнерный харденинг и graceful shutdown
   roadmap.md             — дорожная карта
   rfc/                   — проектные решения (RFC-001 песочницы)
-  integration/           — гайды «за 10 минут» + Lovii
+  integration/           — гайды «за 10 минут»
   openapi/               — OpenAPI 3.1 спецификации
 site/                    — сайт документации (docsify без сборки)
 index.html               — точка входа сайта (GitHub Pages)

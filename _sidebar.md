@@ -20,7 +20,6 @@
     - [Первый ОФД (OKassa)](/docs/integration/first-ofd.md)
     - [Контур.ОФД](/docs/integration/kontur-ofd.md)
     - [Такском](/docs/integration/taxcom.md)
-  - [Подключение к платформе Lovii](/docs/integration/lovii.md)
 
 - **OpenAPI 3.1**
   - Банки

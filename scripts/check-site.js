@@ -202,18 +202,11 @@ for (const match of sidebar.matchAll(/\]\(([^)]+)\)/g)) {
  *   2. раздел «Что мок проверяет за вас» (или «Известные отличия …»);
  *   3. раздел «Ссылки» — контракт сервиса, OpenAPI, манифест протокола;
  *   4. ссылку на README сервиса (`services/<name>-mock/README.md`).
- * Материалы, которые не описывают протокол провайдера, перечислены в
- * GUIDE_EXEMPT с причиной (у каждого — свой трек).
+ * Все гайды в `docs/integration/` описывают протокол провайдера и следуют
+ * шаблону; исключений нет.
  */
 
-const GUIDE_EXEMPT = new Map([
-  ['docs/integration/lovii.md',
-    'гайд по подключению платформы Lovii (внешний мок-контур), а не по протоколу провайдера; '
-    + 'перенос в docs/platform/ — отдельной задачей'],
-]);
-
 for (const guide of mdFiles(path.join(ROOT, 'docs/integration')).map((f) => f.split(path.sep).join('/'))) {
-  if (GUIDE_EXEMPT.has(guide)) continue;
   const text = read(guide);
 
   const numbers = [];
