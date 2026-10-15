@@ -1,5 +1,4 @@
-© 2026 ООО «Аксиома» ИНН:7842223709 · https://github.com/rucorp/mock-services · все права защищены
-Документ проекта mock-services (оригинал: rucorp/mock-services).
+© 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0
 SPDX-License-Identifier: Apache-2.0
 
 # mock-services — тестовые моки банков и касс по официальным протоколам

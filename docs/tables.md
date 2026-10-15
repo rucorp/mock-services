@@ -42,21 +42,21 @@
 |---:|---|---:|---|---:|---:|---|
 | 1 | [`AGENTS.md`](/AGENTS.md) | 32 | 2. Обязательные прогоны | 2 | 5 | ✅ |
 | 2 | [`AGENTS.md`](/AGENTS.md) | 56 | 3. Структура и где что менять | 3 | 9 | ✅ |
-| 3 | [`AGENTS.md`](/AGENTS.md) | 148 | 9. Что читать перед работой | 2 | 5 | ✅ |
+| 3 | [`AGENTS.md`](/AGENTS.md) | 149 | 9. Что читать перед работой | 2 | 5 | ✅ |
 | 4 | [`CONTRIBUTING.md`](/CONTRIBUTING.md) | 16 | Чем можно помочь | 2 | 5 | ✅ |
 | 5 | [`CONTRIBUTING.md`](/CONTRIBUTING.md) | 80 | Гайды интеграции: шаблон | 3 | 9 | ✅ |
-| 6 | [`README.md`](/README.md) | 35 | Документация | 2 | 10 | ✅ |
-| 7 | [`README.md`](/README.md) | 101 | Рецепты «за 10 минут» | 5 | 10 | ✅ |
-| 8 | [`SECURITY.md`](/SECURITY.md) | 21 | Что делать, если вы разворачиваете стенд | 2 | 4 | ✅ |
-| 9 | [`docs/hardening.md`](/docs/hardening.md) | 15 | Флаги | 3 | 6 | ✅ |
+| 6 | [`README.md`](/README.md) | 34 | Документация | 2 | 10 | ✅ |
+| 7 | [`README.md`](/README.md) | 100 | Рецепты «за 10 минут» | 5 | 10 | ✅ |
+| 8 | [`SECURITY.md`](/SECURITY.md) | 20 | Что делать, если вы разворачиваете стенд | 2 | 4 | ✅ |
+| 9 | [`docs/hardening.md`](/docs/hardening.md) | 14 | Флаги | 3 | 6 | ✅ |
 | 10 | [`docs/integration/atol.md`](/docs/integration/atol.md) | 138 | 7. Что мок проверяет за вас | 2 | 13 | ✅ |
 | 11 | [`docs/integration/first-ofd.md`](/docs/integration/first-ofd.md) | 98 | 3. Создать заявку на чек | 2 | 7 | ✅ |
 | 12 | [`docs/integration/first-ofd.md`](/docs/integration/first-ofd.md) | 132 | 4. Статус, результат и сверка | 2 | 4 | ✅ |
 | 13 | [`docs/integration/first-ofd.md`](/docs/integration/first-ofd.md) | 239 | 8. Что мок проверяет за вас: негативы и DX | 2 | 10 | ✅ |
-| 14 | [`docs/integration/kontur-ofd.md`](/docs/integration/kontur-ofd.md) | 19 | 1. Адреса и запуск | 2 | 4 | ✅ |
+| 14 | [`docs/integration/kontur-ofd.md`](/docs/integration/kontur-ofd.md) | 18 | 1. Адреса и запуск | 2 | 4 | ✅ |
 | 15 | [`docs/integration/sber.md`](/docs/integration/sber.md) | 105 | 4. Сверить статус заказа | 3 | 7 | ✅ |
-| 16 | [`docs/integration/taxcom.md`](/docs/integration/taxcom.md) | 21 | 1. Адреса и запуск | 2 | 3 | ✅ |
-| 17 | [`docs/integration/taxcom.md`](/docs/integration/taxcom.md) | 173 | 4. NewDocuments — 10 суток, 10 000, курсор по id | 3 | 2 | ✅ |
+| 16 | [`docs/integration/taxcom.md`](/docs/integration/taxcom.md) | 20 | 1. Адреса и запуск | 2 | 3 | ✅ |
+| 17 | [`docs/integration/taxcom.md`](/docs/integration/taxcom.md) | 172 | 4. NewDocuments — 10 суток, 10 000, курсор по id | 3 | 2 | ✅ |
 | 18 | [`docs/integration/tbank-eacq.md`](/docs/integration/tbank-eacq.md) | 52 | 4. Что мок проверяет за вас (важно для отладки) | 2 | 6 | ✅ |
 | 19 | [`docs/integration/vtb.md`](/docs/integration/vtb.md) | 62 | 3. Заголовки бизнес-запросов | 2 | 4 | ✅ |
 | 20 | [`docs/integration/vtb.md`](/docs/integration/vtb.md) | 132 | 5. Сверить статус: status.value на своём уровне | 3 | 7 | ✅ |
@@ -66,7 +66,7 @@
 | 24 | [`docs/overview.md`](/docs/overview.md) | 69 | Как устроена документация | 3 | 7 | ✅ |
 | 25 | [`docs/rfc/RFC-001-multi-tenant-sandboxes.md`](/docs/rfc/RFC-001-multi-tenant-sandboxes.md) | 51 | 3. Ключевая развилка: как клиент идентифицирует песочницу | 4 | 4 | ✅ |
 | 26 | [`docs/rfc/RFC-001-multi-tenant-sandboxes.md`](/docs/rfc/RFC-001-multi-tenant-sandboxes.md) | 128 | 7. Безопасность | 2 | 7 | ✅ |
-| 27 | [`docs/roadmap.md`](/docs/roadmap.md) | 11 | Дорожная карта | 3 | 15 | ✅ |
+| 27 | [`docs/roadmap.md`](/docs/roadmap.md) | 10 | Дорожная карта | 3 | 15 | ✅ |
 | 28 | [`packages/core/README.md`](/packages/core/README.md) | 118 | Песочницы (RFC-001): источники owner-token | 3 | 5 | ✅ |
 | 29 | [`packages/core/README.md`](/packages/core/README.md) | 172 | Байтовые квоты песочниц (PD-02, #74) | 3 | 2 | ✅ |
 | 30 | [`services/alfa-mock/README.md`](/services/alfa-mock/README.md) | 44 | API | 2 | 14 | ✅ |
@@ -89,15 +89,15 @@
 | 47 | [`services/kassa-mock/README.md`](/services/kassa-mock/README.md) | 155 | Песочницы и hosted tenancy (RFC-001, A-21) | 3 | 3 | ✅ |
 | 48 | [`services/kassa-mock/README.md`](/services/kassa-mock/README.md) | 164 | Песочницы и hosted tenancy (RFC-001, A-21) | 2 | 4 | ✅ |
 | 49 | [`services/kassa-mock/README.md`](/services/kassa-mock/README.md) | 198 | Байтовые квоты состояния (PD-02) | 3 | 2 | ✅ |
-| 50 | [`services/kontur-ofd-mock/README.md`](/services/kontur-ofd-mock/README.md) | 36 | Контракт | 2 | 10 | ✅ |
-| 51 | [`services/kontur-ofd-mock/README.md`](/services/kontur-ofd-mock/README.md) | 71 | Env | 2 | 23 | ✅ |
-| 52 | [`services/kontur-ofd-mock/README.md`](/services/kontur-ofd-mock/README.md) | 122 | Байтовые квоты состояния (PD-02) | 3 | 2 | ✅ |
+| 50 | [`services/kontur-ofd-mock/README.md`](/services/kontur-ofd-mock/README.md) | 35 | Контракт | 2 | 10 | ✅ |
+| 51 | [`services/kontur-ofd-mock/README.md`](/services/kontur-ofd-mock/README.md) | 70 | Env | 2 | 23 | ✅ |
+| 52 | [`services/kontur-ofd-mock/README.md`](/services/kontur-ofd-mock/README.md) | 121 | Байтовые квоты состояния (PD-02) | 3 | 2 | ✅ |
 | 53 | [`services/sber-mock/README.md`](/services/sber-mock/README.md) | 29 | Поддерживаемый Ecom-поток | 2 | 13 | ✅ |
 | 54 | [`services/sber-mock/README.md`](/services/sber-mock/README.md) | 110 | Переменные окружения | 3 | 23 | ✅ |
 | 55 | [`services/sber-mock/README.md`](/services/sber-mock/README.md) | 145 | Байтовые квоты состояния (PD-02) | 3 | 2 | ✅ |
-| 56 | [`services/taxcom-mock/README.md`](/services/taxcom-mock/README.md) | 46 | Контракт | 2 | 7 | ✅ |
-| 57 | [`services/taxcom-mock/README.md`](/services/taxcom-mock/README.md) | 88 | Env | 2 | 23 | ✅ |
-| 58 | [`services/taxcom-mock/README.md`](/services/taxcom-mock/README.md) | 141 | Байтовые квоты состояния (PD-02) | 3 | 2 | ✅ |
+| 56 | [`services/taxcom-mock/README.md`](/services/taxcom-mock/README.md) | 45 | Контракт | 2 | 7 | ✅ |
+| 57 | [`services/taxcom-mock/README.md`](/services/taxcom-mock/README.md) | 87 | Env | 2 | 23 | ✅ |
+| 58 | [`services/taxcom-mock/README.md`](/services/taxcom-mock/README.md) | 140 | Байтовые квоты состояния (PD-02) | 3 | 2 | ✅ |
 | 59 | [`services/tbank-mock/README.md`](/services/tbank-mock/README.md) | 56 | API мока | 2 | 14 | ✅ |
 | 60 | [`services/tbank-mock/README.md`](/services/tbank-mock/README.md) | 121 | Песочницы и hosted tenancy (RFC-001, A-21) | 3 | 3 | ✅ |
 | 61 | [`services/tbank-mock/README.md`](/services/tbank-mock/README.md) | 130 | Песочницы и hosted tenancy (RFC-001, A-21) | 2 | 4 | ✅ |
