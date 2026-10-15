@@ -37,7 +37,7 @@
 | тронуты `index.html`, `_sidebar.md`, `site/**` или добавлен документ в `docs/` | `npm run check:site` |
 | тронуты env-переменные, `docker-compose*.yml`, `Dockerfile` | `npm run check:env`, `npm run test:compose` и `node scripts/docker-smoke.js` |
 `npm test` = одиннадцать selftest-скриптов (`test:core` + десять `test:<сервис>`) +
-`check:links` + `check:site` + `check:tables` + `check:env` + `check:drift`
+`check:links` + `check:site` + `check:tables` + `check:env` + `check:copyright` + `check:drift`
 ([`package.json:8`](package.json)).
 **`test:compose` и `test:docker` в `npm test` НЕ входят** — их прогоняет job `docker` в
 CI ([`.github/workflows/ci.yml:69-184`](.github/workflows/ci.yml)); локально они требуют Docker.
@@ -71,11 +71,12 @@ CI ([`.github/workflows/ci.yml:69-184`](.github/workflows/ci.yml)); локаль
    mock-services · Apache-2.0`, вторая — `// SPDX-License-Identifier: Apache-2.0`, затем
    `'use strict';`. Сейчас 17/17 `.js` соответствуют; новый файл без шапки — дефект.
 2. **Markdown-доки в `docs/**` и корневые публичные доки** начинаются со стандартной
-   шапки проекта (`© 2026 … · все права защищены` + «Документ проекта mock-services
-   (оригинал: …)»). Формулировка «все права защищены» — **действующий стандарт владельца**;
-   её изменение — исключительное решение владельца (задача MS-05, `[DECISION]`).
-   **Агент не «исправляет» шапки по своей инициативе** и не добавляет эту строку в новые
-   служебные файлы, не требуемые стандартом (пример — `CONTRIBUTING.md`, `AGENTS.md`).
+   шапки проекта: `© 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0` +
+   строка `SPDX-License-Identifier: Apache-2.0`. Правоустанавливающая формулировка про
+   «все права» (all-rights-reserved) не используется — проект под Apache-2.0 (решение
+   владельца 15.10, MS-05); проверка — `npm run check:copyright`.
+   **Агент не «исправляет» шапки по своей инициативе** и не добавляет правоустанавливающую
+   строку в новые служебные файлы, не требуемые стандартом (пример — `CONTRIBUTING.md`, `AGENTS.md`).
 3. **Ссылки — только относительные** между доками (их проверяет `check:links`). Учитывайте
    область проверки: `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `docs/**`, `services/**`,
    `packages/**` ([`scripts/check-docs-links.js:23,54-58`](scripts/check-docs-links.js)) —
