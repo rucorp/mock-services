@@ -192,7 +192,22 @@ for (const match of sidebar.matchAll(/\]\(([^)]+)\)/g)) {
   }
 }
 
-/* ---------- 5. Вендоренные файлы и лицензии ---------- */
+/* ---------- 5. README упоминает все services/* ---------- */
+
+if (exists('README.md') && exists('services')) {
+  const readme = read('README.md');
+  const servicesDir = path.join(ROOT, 'services');
+  const serviceDirs = fs.readdirSync(servicesDir, { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .map((d) => d.name);
+  for (const svc of serviceDirs) {
+    if (!readme.includes(svc)) {
+      problems.push(`README.md не упоминает сервис ${svc} (services/${svc}) — структура устарела`);
+    }
+  }
+}
+
+/* ---------- 6. Вендоренные файлы и лицензии ---------- */
 
 const vendorReadme = 'site/vendor/README-LICENSE.md';
 for (const rel of ['site/vendor/docsify.min.js', 'site/vendor/docsify-search.min.js', vendorReadme]) {
