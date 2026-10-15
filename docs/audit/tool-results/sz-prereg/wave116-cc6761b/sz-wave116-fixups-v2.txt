@@ -1,0 +1,20 @@
+SZ wave116 fixups @ cc6761b — start
+
+инстансы подняты
+
+  [Ф-5] в owned /admin без кредов закрыт admission-слоем (401), форма входа не показывается
+PASS Ф-5 (наблюдение) owned: GET /admin без кредов → 401 admission (форма недостижима; fail-closed)
+PASS A1b hosted-namespaces: GET /admin без кредов → 200 форма входа (не консоль)
+PASS A2b hosted-namespaces: GET /admin?admin_token=<верный> → форма (query отклонён)
+PASS A8b hosted-namespaces: POST /admin/login → 302 + Set-Cookie HttpOnly/SameSite=Strict/Path=/ → cookie дают консоль
+PASS D6 owned (tbank): POST /v2/Init (валидная подпись) + X-Sandbox-Token → 200, платёж создан
+  [B2v2] action с валидным CSRF → 302 (контур жив)
+PASS B2v2 hosted-owned: POST /admin/action c _csrf из консоли (реальная запись) + same-origin → НЕ 403
+FAIL Ф-1a-v2 tbank: POST /admin/action?admin_token=… → 302 Location несёт admin_token (утечка в URL)
+      нет _csrf
+  [Ф-3-v2] status=200, WARN-sandbox_token=true
+PASS Ф-3-v2 hosted-namespaces: /v2/Init?sandbox_token=<любой> → НЕ 401 + WARN в stderr (нюанс fail-closed)
+
+ИТОГ: 7 passed, 1 failed
+  FAILED: Ф-1a-v2 tbank: POST /admin/action?admin_token=… → 302 Location несёт admin_token (утечка в URL): нет _csrf
+EXIT=1

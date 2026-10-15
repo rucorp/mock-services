@@ -1,0 +1,4 @@
+[mock] sandboxes restored from /tmp/w-ms06/evidence/tbank-ns-state-fix.json.sandboxes.records: 0
+[WARN] Приём admin_token/operator_token из query-строки устарел. Используйте заголовки X-Mock-Admin-Token, X-Operator-Token, Authorization или cookie.
+[mock] [WARN] Приём sandbox_token из query-строки устарел. Используйте заголовки X-Sandbox-Token, Authorization: Bearer или куки.
+[mock] [WARN] Приём sandbox_token из query-строки устарел. Используйте заголовки X-Sandbox-Token, Authorization: Bearer или куки.
