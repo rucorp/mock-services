@@ -119,8 +119,9 @@ Zero dependencies, Node >= 18. Self-test: `npm run test:core`.
 |---|---|---|
 | 1 | `X-Sandbox-Token: <токен>` | явный заголовок владельца — самый приоритетный |
 | 2 | `X-Owner-Token: <токен>` | синоним; уступает `X-Sandbox-Token` |
-| 3 | `Authorization: Bearer <токен>` | fallback для клиентов, знающих только Bearer |
-| 4 | `?sandbox_token=<токен>` | последний источник |
+| 3 | cookie `mock_sandbox_token=<токен>` | сессионная cookie консоли; читается с декодированием (Ф-2, #121) |
+| 4 | `Authorization: Bearer <токен>` | fallback для клиентов, знающих только Bearer |
+| 5 | `?sandbox_token=<токен>` | только non-hosted `namespaces` (WARN об устаревании); в `owned` и в hosted отклоняется fail-closed (Ф-3, #121) |
 
 Порядок важен: у адаптеров, чей бизнес-контракт сам ходит по
 `Authorization: Bearer <токен>` (first-ofd — токен очереди, vtb — OAuth
@@ -142,6 +143,26 @@ Zero dependencies, Node >= 18. Self-test: `npm run test:core`.
   узнаётся даже когда owner-заголовок занят чужим токеном;
 - при `mode` `namespaces`/`off` (self-hosted) owner-token не требуется вовсе, и
   бизнес-заголовки адаптера не трактуются как owner-token.
+
+Опция `hosted` (`MOCK_HOSTED=1`, MS-12, #121): при пустом `defaultOwnerToken`
+песочница `default` **не обслуживается** — бизнес- и form-маршруты без селектора
+получают `kind: 'not-found'` (адаптеры отдают 404 с точной причиной и хинтом),
+публичная инфраструктура (`/health`, `/openapi.json`, `/sandboxes`) отдаётся
+detached public record, именованные песочницы работают по owner-token.
+Управляющая поверхность (`policy: 'control'`) MS-12 не перекрывает: у неё свой
+fail-closed гейт MS-06. Без `MOCK_HOSTED` поведение `default` не меняется.
+
+Диагностика `hosted`/self-hosted вынесена в `defaultSandboxStatus({ownerToken,
+hosted, tenancy})` → `default=owner-token | default=closed (MS-12: …) |
+default=open` — этой строкой адаптеры печатают статус при старте.
+
+Сессионные cookie консоли (Ф-1, #121): `sessionCookieHeader(name, value)` (HttpOnly,
+`SameSite=Strict`, `Path=/`, `Max-Age`), `sessionCookiesFromQuery(req, {...})`
+(переносит принятые из query `admin_token`/`operator_token`/`sandbox_token` в
+cookie; в hosted возвращает пустой список) и
+`attachResponseCookies(res, cookies)` (добавляет `Set-Cookie`, не перетирая
+собственные cookie ответа). `readCookieValue(req, name)` — чтение cookie с
+декодированием (`%3D` → `=`, разделение по первому `=`).
 
 ## Байтовые квоты песочниц (PD-02, #74)
 

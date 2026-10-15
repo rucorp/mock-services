@@ -289,6 +289,7 @@ const sandboxRuntime = createSandboxRuntime({
   persist: store.persist,
   initialStateFactory: createInitialAlfaState,
   mode: TENANCY,
+  hosted: HOSTED,
   stateFile: MOCK_STATE_FILE,
   sandboxFile: String(process.env.MOCK_SANDBOX_FILE || ''),
   ttlMs: SANDBOX_TTL_MS,
@@ -1607,14 +1608,14 @@ function alfaSandboxPolicy(p) {
 function sendSandboxError(res, admission) {
   const id = admission.sandbox || 'default';
   if (admission.kind === 'not-found') {
-    return jsonRaw(res, 404, aerrBody(3, `Песочница «${id}» не найдена`, {
-      hint: 'Создайте песочницу: POST /sandboxes — в ответе будут id, creds (userName/password/callbackSecret) и ownerToken. Список — GET /mock/sandboxes.',
+    return jsonRaw(res, 404, aerrBody(3, admission.message || `Песочница «${id}» не найдена`, {
+      hint: admission.hint || 'Создайте песочницу: POST /sandboxes — в ответе будут id, creds (userName/password/callbackSecret) и ownerToken. Список — GET /mock/sandboxes.',
     }));
   }
   if (admission.kind === 'unauthorized') {
     return jsonRaw(res, 401, aerrBody(2, `Доступ к песочнице «${id}» ограничен: знание ID не является доступом`, {
       field: 'X-Sandbox-Token',
-      hint: 'Передайте owner-token из ответа POST /sandboxes: Authorization: Bearer <ownerToken>, X-Sandbox-Token или cookie (mock_sandbox_token=...). В hosted-режиме query-токены запрещены.',
+      hint: admission.hint || 'Передайте owner-token из ответа POST /sandboxes: Authorization: Bearer <ownerToken>, X-Sandbox-Token или cookie (mock_sandbox_token=...). Токены из query-строки в hosted/owned-режиме запрещены.',
     }));
   }
   if (admission.kind === 'expired') {
@@ -1644,7 +1645,6 @@ function btn(action, id, label, csrfToken, actionUrl) {
 
 function adminPage(req) {
   const currentSandbox = sandboxRuntime.currentId();
-  const pageQuery = new URL(req.url, 'http://mock.local').searchParams;
   const adminQuery = new URLSearchParams();
   if (currentSandbox !== 'default') adminQuery.set('sandbox', currentSandbox);
       const adminSuffix = adminQuery.toString();
@@ -1798,7 +1798,17 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
         hint: access.hint || `Передайте токен: Authorization: Bearer <${envName}> или X-Operator-Token/X-Admin-Token.`,
       }));
     }
-  }
+
+      }
+
+  // Ф-1 (#121): принятый из query управляющий токен переносим в сессионную
+  // cookie — дальше консоль, ссылки и формы работают без токенов в URL.
+  core.attachResponseCookies(res, core.sessionCookiesFromQuery(req, {
+    adminToken: MOCK_ADMIN_TOKEN,
+    operatorToken: OPERATOR_TOKEN,
+    sandboxToken: sandboxRuntime.recordByOwnerToken(req) ? sandboxRuntime.ownerTokenOf(req) : '',
+    hosted: HOSTED,
+  }));
 
   const isRest = p.startsWith('/payment/rest/');
 
@@ -1976,14 +1986,11 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
       }));
     }
     const result = adminAction(body);
-    const postQuery = new URL(req.url, 'http://mock.local').searchParams;
     const redirectQuery = new URLSearchParams();
     const currentSandbox = sandboxRuntime.currentId();
     if (currentSandbox !== 'default') redirectQuery.set('sandbox', currentSandbox);
-    const adminToken = postQuery.get('admin_token');
-    if (adminToken) redirectQuery.set('admin_token', adminToken);
-    const sandboxToken = postQuery.get('sandbox_token');
-    if (sandboxToken) redirectQuery.set('sandbox_token', sandboxToken);
+    // Ф-1 (#121): токены НЕ возвращаются в URL — навигацию держит сессионная
+    // cookie (control-блок выше), заголовок или cookie клиента.
     const redirectSuffix = redirectQuery.toString();
     return send(res, 302, '', { Location: `${result.redirect}${redirectSuffix ? `?${redirectSuffix}` : ''}` });
   }
@@ -2178,7 +2185,7 @@ if (require.main === module) {
     log(`two-stage=${TWO_STAGE} (MOCK_TWO_STAGE) partial-refund=${PARTIAL_REFUND} ssl-permitted=${SSL_PERMITTED} session_timeout=${SESSION_TIMEOUT_SECS}s terminal=${TERMINAL_ID}`);
     log(`tenancy=${TENANCY} public_base=${PUBLIC_BASE_URL} state=${MOCK_STATE_FILE || 'memory'}`);
     log(`control-plane: admin_token=${MOCK_ADMIN_TOKEN ? 'on' : 'off'} operator_token=${OPERATOR_TOKEN ? 'on' : 'off'} hosted=${HOSTED} block_private_webhooks=${BLOCK_PRIVATE_WEBHOOKS}`);
-    log(`sandboxes: mode=${TENANCY} ttl_ms=${SANDBOX_TTL_MS} max=${SANDBOX_MAX} max_documents=${SANDBOX_MAX_DOCUMENTS} host_suffix=${SANDBOX_HOST_SUFFIX || '-'} registry=${sandboxRuntime.stats().file || 'memory'}${TENANCY === 'owned' && !SANDBOX_OWNER_TOKEN ? ' (default-песочница открыта: задайте MOCK_SANDBOX_TOKEN, чтобы закрыть)' : ''}`);
+    log(`sandboxes: mode=${TENANCY} ttl_ms=${SANDBOX_TTL_MS} max=${SANDBOX_MAX} max_documents=${SANDBOX_MAX_DOCUMENTS} host_suffix=${SANDBOX_HOST_SUFFIX || '-'} registry=${sandboxRuntime.stats().file || 'memory'} ${core.defaultSandboxStatus({ ownerToken: SANDBOX_OWNER_TOKEN, hosted: HOSTED, tenancy: TENANCY })}`);
     log('вне области: асимметричный checksum (SHA-256/SHA-512 в PDF неоднозначны), привязки карт, моделирование orderBundle');
   });
 }

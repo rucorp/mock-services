@@ -174,7 +174,7 @@ store.restore();
 let clearChild = () => {};
 const sandboxRuntime = core.createSandboxRuntime({
   state: store.state, persist: store.persist, initialStateFactory: initialState,
-  mode: TENANCY, stateFile: env.MOCK_STATE_FILE || '', sandboxFile: env.MOCK_SANDBOX_FILE || '',
+  mode: TENANCY, hosted: HOSTED, stateFile: env.MOCK_STATE_FILE || '', sandboxFile: env.MOCK_SANDBOX_FILE || '',
   ttlMs: core.parseMsOr(env.MOCK_SANDBOX_TTL_MS, TENANCY === 'owned' ? 86400000 : 0),
   maxSandboxes: core.parseMsOr(env.MOCK_SANDBOX_MAX, 100),
   maxDocuments: core.parseMsOr(env.MOCK_SANDBOX_MAX_DOCUMENTS, TENANCY === 'owned' ? 5000 : 0),
@@ -184,6 +184,9 @@ const sandboxRuntime = core.createSandboxRuntime({
   defaultOwnerToken: env.MOCK_SANDBOX_TOKEN || '', hostSuffix: env.MOCK_SANDBOX_HOST_SUFFIX || '',
   operatorTokens: [env.MOCK_ADMIN_TOKEN, env.MOCK_OPERATOR_TOKEN],
   createLimit: core.parseMsOr(env.MOCK_SANDBOX_CREATE_LIMIT, 20),
+  // #121: диагностика ядра (WARN query-токенов, сбои persist/restore) не
+  // должна быть заглушена — тегированный лог, как у остальных адаптеров.
+  log: (msg) => console.error(`[taxcom-mock] ${msg}`),
   onSandboxRemoved: (record) => clearChild(record),
 });
 const state = sandboxRuntime.state;
@@ -224,8 +227,11 @@ function error(res, status, message, errorCodeId = status, extra = {}) {
 }
 function sandboxError(res, result) {
   const kind = result.kind || result.error;
-  return error(res, kind === 'expired' ? 410 : kind === 'not-found' ? 404 : 401,
-    `Sandbox: ${kind}; знание ID не является доступом`);
+  const status = kind === 'expired' ? 410 : kind === 'not-found' ? 404 : 401;
+  // MS-12 (#121): отказ может нести точную причину и хинт от ядра
+  // (закрытая default в hosted и т.п.) — не подменяем их общей формулировкой.
+  return error(res, status, result.message || `Sandbox: ${kind}; знание ID не является доступом`, status,
+    result.hint ? { hint: result.hint } : {});
 }
 function publicObject(o) {
   const { accessible, ...rest } = o;

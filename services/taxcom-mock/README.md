@@ -100,7 +100,7 @@ MOCK_IMAGE=mock-services MOCK_IMAGE_TAG=taxcom-local MOCK_IMAGE_DIGEST='' \
 | `MOCK_TENANCY` | `namespaces`, при hosted → `owned`; поддерживается `off` |
 | `MOCK_ADMIN_TOKEN` | пусто; защита `/admin*`, также operator access |
 | `MOCK_OPERATOR_TOKEN` | пусто; защита `/mock/*` |
-| `MOCK_SANDBOX_TOKEN` | пусто; owner-token default-песочницы |
+| `MOCK_SANDBOX_TOKEN` | пусто; owner-token default-песочницы; при `MOCK_HOSTED=1` без него `default` не обслуживается (MS-12) |
 | `MOCK_SANDBOX_TTL_MS` | owned: `86400000`, иначе `0`; wall-clock TTL песочницы |
 | `MOCK_SANDBOX_MAX` | `100`; максимум именованных песочниц |
 | `MOCK_SANDBOX_MAX_DOCUMENTS` | owned: `5000`, иначе `0`; число ФД + живых сессий (квота ядра) |

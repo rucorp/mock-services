@@ -1294,11 +1294,21 @@ process.env.MOCK_RETRY_MS = '1000';
       })).body);
       assert.strictEqual(adminInit.Success, true, 'тестовая операция для admin-формы создаётся');
       
-      // HOSTED-режим отказ query
+      // HOSTED-режим: query-токен отвергается (MS-06/Ф-4), а default без
+      // MOCK_SANDBOX_TOKEN больше не отдаётся бизнес-API (MS-12, #121).
       const hostedChild = startChild({ MOCK_HOSTED: '1', MOCK_ADMIN_TOKEN: 'adm-secret' });
       const hostedPort = await hostedChild.port;
       const hostedQueryFail = await request(hostedPort, 'GET', '/mock/time?admin_token=adm-secret');
       assert.strictEqual(hostedQueryFail.statusCode, 401, 'hosted-режим отвергает query-токен');
+      const hostedClosedPayload = { TerminalKey: TERMINAL, Amount: '100', OrderId: 'ms12-closed-1' };
+      const hostedClosedBiz = await request(hostedPort, 'POST', '/v2/Init', {
+        ...hostedClosedPayload, Token: tokenOf(hostedClosedPayload),
+      });
+      assert.strictEqual(hostedClosedBiz.statusCode, 404, 'MS-12: hosted без MOCK_SANDBOX_TOKEN не обслуживает бизнес-API default-песочницы');
+      assert.ok(String(hostedClosedBiz.body).includes('MOCK_SANDBOX_TOKEN'), 'MS-12: 404-ответ объясняет, как открыть песочницу');
+      const hostedQueryOnBiz = await request(hostedPort, 'GET', '/v2/GetState?sandbox_token=owner-secret');
+      assert.strictEqual(hostedQueryOnBiz.statusCode, 401, 'Ф-3: hosted отвергает ?sandbox_token и на бизнес-маршрутах');
+      assert.ok(!String(hostedQueryOnBiz.body).includes('FAIL_QUERY_TOKEN_REJECTED'), 'Ф-3: сентинел-значение не попадает в ответы/журналы');
       hostedChild.proc.kill();
       
       const form = (fields) => new URLSearchParams(fields).toString();
@@ -1313,6 +1323,24 @@ process.env.MOCK_RETRY_MS = '1000';
       const actionStart = adminPageWithQueryToken.body.indexOf('action="/admin/action');
    const actionUrl = actionStart > -1 ? adminPageWithQueryToken.body.slice(actionStart + 8).split('"')[0] : '';
       assert.ok(csrfToken && actionUrl === '/admin/action', 'URL не содержит токенов');
+
+      // Ф-1 (#121): query-токен non-hosted переносится в сессионную cookie, а
+      // HTML/Location больше не несут токенов.
+      const adminByQuery = await request(childPort, 'GET', '/admin?admin_token=adm-secret');
+      assert.strictEqual(adminByQuery.statusCode, 200, 'non-hosted: вход в консоль по query-токену работает (DX)');
+      assert.ok(!String(adminByQuery.body).includes('adm-secret'), 'Ф-1: HTML консоли не содержит управляющего токена');
+      assert.ok(!String(adminByQuery.body).includes('admin_token='), 'Ф-1: HTML консоли не содержит токен в URL');
+      const mintedCookie = (adminByQuery.headers['set-cookie'] || []).find((c) => c.startsWith('mock_admin_token=adm-secret'));
+      assert.ok(mintedCookie, 'Ф-1: принятый из query токен перенесён в HttpOnly-cookie');
+      const queryPayload = { TerminalKey: TERMINAL, Amount: '200', OrderId: 'csrf-admin-query' };
+      const queryInit = JSON.parse((await request(childPort, 'POST', '/v2/Init', {
+        ...queryPayload, Token: tokenOf(queryPayload),
+      })).body);
+      const actionByQuery = await request(childPort, 'POST', '/admin/action?admin_token=adm-secret', form({
+        action: 'cancel-new', id: queryInit.PaymentId, _csrf: csrfToken,
+      }), { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: mintedCookie.split(';')[0] });
+      assert.strictEqual(actionByQuery.statusCode, 302, 'Ф-1: действие принимается по cookie-сессии (токен в POST-URL не нужен)');
+      assert.strictEqual(actionByQuery.headers.location, '/admin', 'Ф-1: Location не содержит ни admin_token, ни sandbox_token');
             const deniedNoCsrf = await request(childPort, 'POST', '/admin/action', form({ action: 'cancel-new', id: adminInit.PaymentId }), { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': sessionCookie.split(';')[0] });
       assert.strictEqual(deniedNoCsrf.statusCode, 403, 'POST без CSRF-токена запрещён');
       const deniedCrossOrigin = await request(childPort, 'POST', '/admin/action', form({ action: 'cancel-new', id: adminInit.PaymentId, _csrf: csrfToken }), { 'Cookie': sessionCookie.split(';')[0],
@@ -1352,11 +1380,40 @@ process.env.MOCK_RETRY_MS = '1000';
       }
       const healthHosted = await request(childPort, 'GET', '/health');
       assert.strictEqual(healthHosted.statusCode, 200, 'health в hosted-режиме остаётся публичным');
+      // MS-12 (#121): default в hosted без MOCK_SANDBOX_TOKEN бизнес-API не
+      // обслуживает — это и есть предмет волны (раньше API работал анонимно).
       const initHosted = await request(childPort, 'POST', '/v2/Init', { ...(() => { const p = { TerminalKey: TERMINAL, Amount: '1500', OrderId: 'hosted-1' }; return { ...p, Token: tokenOf(p) }; })() });
-      assert.strictEqual(JSON.parse(initHosted.body).Success, true, 'платёжный API работает и в hosted-режиме');
+      assert.strictEqual(initHosted.statusCode, 404, 'MS-12: hosted без MOCK_SANDBOX_TOKEN не отдаёт default бизнес-API');
+      assert.ok(String(initHosted.body).includes('MOCK_SANDBOX_TOKEN'), 'MS-12: DX-ответ называет MOCK_SANDBOX_TOKEN');
       assert.ok(child.output().includes('hosted=true block_private_webhooks=true'), '#51 PF-01: MOCK_HOSTED=1 включает block_private_webhooks=true по умолчанию');
+      assert.ok(child.output().includes('default=closed'), 'MS-12: стартовый статус сообщает, что default закрыта');
+      // MS-12: при закрытой default именованные песочницы остаются рабочим путём
+      const createNamed = await request(childPort, 'POST', '/sandboxes', { sandbox: 'ms12-named' });
+      assert.strictEqual(createNamed.statusCode, 201, 'MS-12: именованная песочница создаётся при закрытой default');
+      const named = JSON.parse(createNamed.body);
+      const namedPayload = { TerminalKey: named.creds.terminalKey, Amount: '100', OrderId: 'ms12-named-1' };
+      const namedInit = JSON.parse((await request(childPort, 'POST', `/v2/Init?sandbox=${encodeURIComponent(named.id)}`, {
+        ...namedPayload, Token: tokenOf(namedPayload, named.creds.terminalPassword),
+      }, { 'X-Sandbox-Token': named.ownerToken })).body);
+      assert.strictEqual(namedInit.Success, true, 'MS-12: именованная песочница обслуживает бизнес-API по owner-token');
+      assert.ok(!String(createNamed.body).includes('MOCK_SANDBOX_TOKEN'), 'MS-12: owner-token не путается с env-подсказкой');
     } finally {
       await stopChild(child);
+    }
+
+    // MS-12 BC: с MOCK_SANDBOX_TOKEN default остаётся песочницей с owner-token
+    const hostedOwnerChild = startChild({ MOCK_HOSTED: '1', MOCK_SANDBOX_TOKEN: 'default-owner-secret' });
+    const hostedOwnerPort = await hostedOwnerChild.port;
+    try {
+      const ownerPayload = { TerminalKey: TERMINAL, Amount: '500', OrderId: 'hosted-owner-1' };
+      const noToken = await request(hostedOwnerPort, 'POST', '/v2/Init', { ...ownerPayload, Token: tokenOf(ownerPayload) });
+      assert.strictEqual(noToken.statusCode, 401, 'MS-12: hosted с токеном требует owner-token (401)');
+      const withToken = await request(hostedOwnerPort, 'POST', '/v2/Init', { ...ownerPayload, Token: tokenOf(ownerPayload) }, { 'X-Sandbox-Token': 'default-owner-secret' });
+      assert.strictEqual(JSON.parse(withToken.body).Success, true, 'MS-12 BC: owner-token открывает default в hosted');
+      assert.ok(!String(withToken.body).includes('default-owner-secret'), 'MS-12: ответ не эхо-ит owner-token');
+      assert.ok(hostedOwnerChild.output().includes('default=owner-token'), 'MS-12: стартовый статус сообщает про owner-token');
+    } finally {
+      await stopChild(hostedOwnerChild);
     }
   }
 

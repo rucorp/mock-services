@@ -1916,15 +1916,24 @@ function createScenarioRegistry({
 }
 
 /**
- * Опциональная защита /admin* по токену (рекомендация аудита A-20):
- * если задан MOCK_ADMIN_TOKEN, требует заголовок Authorization: Bearer <token>,
- * X-Admin-Token: <token> или query-параметр ?admin_token=<token>.
- * По умолчанию пустой — локальный DX и существующие тесты не меняются.
+ * Опциональная защита /admin* по токену (рекомендация аудита A-20).
+ *
+ * Тонкая обёртка над `checkControlAccess` (surface='admin') — единая политика:
+ * токен принимается из `Authorization: Bearer`, `X-(Mock-)Admin-Token` или
+ * cookie; `?admin_token=` — только в non-hosted (в hosted отклоняется), в
+ * non-hosted пишется WARN об устаревшем приёме. В hosted без настроенного
+ * секрета маршрут закрыт (fail-closed), как и у остальной управляющей
+ * поверхности (Ф-4, issue #121: раньше query-токен проходил независимо от
+ * hosted). Латентный API — адаптеры используют `checkControlAccess`
+ * напрямую; удаление/deprecation — решение владельца.
  */
-function checkAdminAuth(req, adminToken = process.env.MOCK_ADMIN_TOKEN || '') {
-  const expected = String(adminToken || '').trim();
-  if (!expected) return true;
-  return tokenMatches(req, expected).matched;
+function checkAdminAuth(req, adminToken = process.env.MOCK_ADMIN_TOKEN || '', options = {}) {
+  return checkControlAccess(req, {
+    adminToken,
+    surface: 'admin',
+    hosted: Boolean(options.hosted),
+    log: options.log,
+  }).allowed;
 }
 
 /** Сравнение секретов без утечки длины по таймингу (constant-time). */
@@ -2004,7 +2013,118 @@ function isSameOriginRequest(req) {
   }
 }
 
-/** Токен из Authorization: Bearer, X-(Admin|Operator)-Token или query. */
+/**
+ * Значение cookie по имени с декодированием (Ф-2, issue #121).
+ *
+ * `POST /admin/login` пишет cookie через `encodeURIComponent`, поэтому читать
+ * сырое значение нельзя: токены с `=`, `;`, `&` не находили владельца
+ * (асимметрия encode/decode). Имя и значение разделяются по ПЕРВОМУ `=` —
+ * значение само может содержать `=` (`mock_admin_token=adm.eq%3D3x`).
+ * Битый percent-escape отдаём как есть, чтобы не терять сессию.
+ */
+function readCookieValue(req, name) {
+  const cookieHeader = (req && req.headers && req.headers.cookie) || '';
+  if (!cookieHeader) return '';
+  for (const part of String(cookieHeader).split(';')) {
+    const segment = part.trim();
+    if (!segment) continue;
+    const eq = segment.indexOf('=');
+    if (eq < 0) continue;
+    if (segment.slice(0, eq).trim() !== name) continue;
+    const raw = segment.slice(eq + 1);
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  }
+  return '';
+}
+
+/**
+ * Стартовый статус default-песочницы (MS-12, #121) — одна формулировка для
+ * логов всех адаптеров: `owner-token` если задан `MOCK_SANDBOX_TOKEN`,
+ * `closed` в hosted без токена (песочница не отдаётся), иначе `open`
+ * (self-hosted DX-контракт; в owned без токена — с подсказкой).
+ */
+function defaultSandboxStatus({ ownerToken = '', hosted = false, tenancy = 'namespaces' } = {}) {
+  if (String(ownerToken || '').trim()) return 'default=owner-token';
+  if (hosted) return 'default=closed (MS-12: hosted без MOCK_SANDBOX_TOKEN)';
+  if (tenancy === 'owned') return 'default=open (owned без MOCK_SANDBOX_TOKEN — задайте токен, чтобы закрыть)';
+  return 'default=open';
+}
+
+/** Значение query-параметра запроса (без исключений на битом URL). */
+function queryParamValue(req, name) {
+  try {
+    return String(new URL((req && req.url) || '/', 'http://mock.local').searchParams.get(name) || '');
+  } catch {
+    return '';
+  }
+}
+
+/** Сессионная cookie управляющего токена (HttpOnly, SameSite=Strict, Path=/). */
+function sessionCookieHeader(name, value, { maxAge = null } = {}) {
+  const encoded = value ? encodeURIComponent(String(value)) : '';
+  const age = maxAge === null ? '' : `; Max-Age=${Math.max(0, Number(maxAge) || 0)}`;
+  return `${name}=${encoded}; HttpOnly; SameSite=Strict; Path=/${age}`;
+}
+
+/**
+ * Перенос принятых из query управляющих токенов в сессионные cookie (Ф-1, #121).
+ *
+ * Non-hosted DX исторически держится на `?admin_token=`, `?operator_token=` и
+ * `?sandbox_token=`, но токен не должен оставаться в URL (логи прокси,
+ * Referer, история браузера): если запрос принёс РАБОЧИЙ токен в query, ответ
+ * ставит ему cookie-эквивалент, и дальнейшая навигация/формы работают без
+ * токенов в ссылках. В hosted возвращается пустой список — query-токены там
+ * отклоняются (MS-06/Ф-3). Cookie выдаётся только за совпавшее (constant-time)
+ * значение, поэтому подсунутый чужой query-токен сессии не получит.
+ */
+function sessionCookiesFromQuery(req, { adminToken = '', operatorToken = '', sandboxToken = '', hosted = false } = {}) {
+  if (hosted) return [];
+  let search;
+  try {
+    search = new URL((req && req.url) || '/', 'http://mock.local').searchParams;
+  } catch {
+    return [];
+  }
+  const cookies = [];
+  const accept = (queryName, expected, cookieName) => {
+    const value = String(search.get(queryName) || '');
+    const wanted = String(expected || '');
+    if (!value || !wanted || !safeEqual(value, wanted)) return;
+    cookies.push(sessionCookieHeader(cookieName, value));
+  };
+  accept('admin_token', adminToken, 'mock_admin_token');
+  accept('operator_token', operatorToken, 'mock_operator_token');
+  accept('sandbox_token', sandboxToken, 'mock_sandbox_token');
+  return cookies;
+}
+
+/**
+ * Прикрепляет `Set-Cookie` к ответу адаптера, не меняя его `send`: заголовок
+ * ставится через `res.setHeader` и переживает последующий `writeHead(status, …)`
+ * (Node сливает ранее установленные заголовки с переданными). Если адаптер сам
+ * отдаёт `Set-Cookie` в `writeHead` (например, `POST /admin/login`), его
+ * значение приоритетнее; повтор одного имени не дублируется.
+ */
+function attachResponseCookies(res, cookies) {
+  if (!res || !Array.isArray(cookies) || cookies.length === 0) return;
+  if (typeof res.setHeader !== 'function' || typeof res.writeHead !== 'function') return;
+  const existing = typeof res.getHeader === 'function' ? res.getHeader('set-cookie') : undefined;
+  const list = existing === undefined || existing === null ? [] : [].concat(existing);
+  const names = new Set(list.map((entry) => String(entry).split('=')[0].trim()));
+  for (const cookie of cookies) {
+    const name = String(cookie).split('=')[0].trim();
+    if (!name || names.has(name)) continue;
+    list.push(cookie);
+    names.add(name);
+  }
+  res.setHeader('Set-Cookie', list);
+}
+
+/** Токен из Authorization: Bearer, X-(Admin|Operator)-Token, cookie или query. */
 function tokenMatches(req, expected, options = {}) {
   const wanted = String(expected || '');
   if (!wanted) return { matched: false };
@@ -2014,9 +2134,8 @@ function tokenMatches(req, expected, options = {}) {
   if (safeEqual(String(headers['x-mock-admin-token'] || headers['x-admin-token'] || '').trim(), wanted)) return { matched: true };
   if (safeEqual(String(headers['x-operator-token'] || '').trim(), wanted)) return { matched: true };
   if (headers.cookie) {
-    const cookies = String(headers.cookie).split(';').map(s => s.trim());
-    if (cookies.includes('mock_admin_token=' + wanted)) return { matched: true };
-    if (cookies.includes('mock_operator_token=' + wanted)) return { matched: true };
+    if (safeEqual(readCookieValue(req, 'mock_admin_token'), wanted)) return { matched: true };
+    if (safeEqual(readCookieValue(req, 'mock_operator_token'), wanted)) return { matched: true };
   }
   try {
     const u = new URL((req && req.url) || '/', 'http://localhost');
@@ -2323,13 +2442,18 @@ function resolveTenancyMode(value, hosted = false, warn = (message) => console.w
  *     чужие креды/состояние недоступны; в остальных режимах — совместимость;
  *   - экспорт/импорт принимают явный target и не переключают активную песочницу;
  *   - TTL + автоочистка + лимит количества; состояние персистится только JSON-снимком
- *     через `safeStateSnapshot` (null-proto словари, #23).
+ *     через `safeStateSnapshot` (null-proto словари, #23);
+ *   - `hosted: true` (MOCK_HOSTED=1) без `defaultOwnerToken`: `default` не
+ *     отдаётся вовсе — бизнес/form/control без селектора получают отказ
+ *     песочницы, публичная инфраструктура (`/health`, `/openapi.json`,
+ *     `/sandboxes`) и именованные песочницы работают (MS-12, #121).
  */
 function createSandboxRuntime({
   state,
   persist = () => {},
   initialStateFactory,
   mode = 'namespaces',
+  hosted = false,
   stateFile = '',
   sandboxFile = '',
   ttlMs = 0,
@@ -2379,6 +2503,7 @@ function createSandboxRuntime({
     return isPlainObject(fresh) ? fresh : {};
   }
 
+  const QUERY_TOKEN_WARNED = Symbol('sandbox.queryTokenWarned');
   const ADMISSION_REQ = Symbol('sandbox.admission.req');
   const ADMISSION_PUBLIC = Symbol('sandbox.admission.public');
   const VALID_POLICIES = new Set(['business', 'control', 'form', 'public']);
@@ -2736,11 +2861,11 @@ function createSandboxRuntime({
 
   /**
    * Owner-token запроса (#98). Порядок источников — сначала ЯВНЫЕ заголовки
-   * владельца, затем `Authorization: Bearer` (fallback для клиентов, знающих
-   * только его), затем query `?sandbox_token=`:
+   * владельца, затем cookie, затем `Authorization: Bearer` (fallback для
+   * клиентов, знающих только его), затем query `?sandbox_token=`:
    *
-   *   1. `X-Sandbox-Token`   2. `X-Owner-Token`
-   *   3. `Authorization: Bearer <…>`   4. `?sandbox_token=`
+   *   1. `X-Sandbox-Token`   2. `X-Owner-Token`   3. cookie `mock_sandbox_token`
+   *   4. `Authorization: Bearer <…>`   5. `?sandbox_token=` (только вне hosted/owned)
    *
    * Раньше Bearer читался первым и затенял явный owner-заголовок у адаптеров,
    * чей бизнес-контракт сам ходит по `Authorization: Bearer <токен>` (first-ofd —
@@ -2748,36 +2873,42 @@ function createSandboxRuntime({
    * owner-token, владелец не находился и получал 401 «знание ID ≠ доступ».
    * Источник с пустым/пробельным значением считается отсутствующим — он не
    * затеняет следующие источники.
+   *
+   * Ф-2 (#121): cookie читается с декодированием (`%3D` → `=`), иначе значение,
+   * записанное формой входа, не совпадало с ожидаемым токеном.
+   *
+   * Ф-3 (#121): `?sandbox_token=` отклоняется fail-closed не только в `owned`,
+   * но и в hosted (любая аренда) — раньше hosted-namespaces принимали query с
+   * WARN. Сентинел-значение больше не возвращается (оно могло попасть в журнал
+   * как «токен»): при отказе отдаётся пустая строка, а `detail.rejectedQuery`
+   * позволяет ядру и адаптеру построить точный DX-хинт.
    */
-  function ownerTokenOf(req) {
+  function ownerTokenOf(req, detail) {
     const headers = (req && req.headers) || {};
     const direct = String(headers['x-sandbox-token'] || '').trim()
       || String(headers['x-owner-token'] || '').trim();
     if (direct) return direct;
-    if (headers.cookie) {
-      const cookies = String(headers.cookie).split(';').map(s => s.trim());
-      const st = cookies.find(c => c.startsWith('mock_sandbox_token='));
-      if (st) return st.split('=')[1];
-    }
+    const cookieToken = readCookieValue(req, 'mock_sandbox_token');
+    if (cookieToken) return cookieToken;
     const auth = String(headers.authorization || '');
     if (auth.toLowerCase().startsWith('bearer ')) {
       const bearer = auth.slice(7).trim();
       if (bearer) return bearer;
     }
-    try {
-      const u = new URL((req && req.url) || '/', 'http://mock.local');
-      const queryToken = String(u.searchParams.get('sandbox_token') || '').trim();
-      if (queryToken) {
-        if (mode === 'owned') {
-          // fail-closed in owned mode
-          return 'FAIL_QUERY_TOKEN_REJECTED';
-        } else {
-          log('[WARN] Приём sandbox_token из query-строки устарел. Используйте заголовки X-Sandbox-Token, Authorization: Bearer или куки.');
-          return queryToken;
-        }
+    const queryToken = queryParamValue(req, 'sandbox_token').trim();
+    if (queryToken) {
+      if (hosted || mode === 'owned') {
+        // fail-closed: hosted (любая аренда) и owned — знание ID не доступ
+        if (detail) detail.rejectedQuery = true;
+        return '';
       }
-    } catch {
-      // ignore
+      // WARN — один раз на запрос: ownerTokenOf вызывается и из admission, и из
+      // контроля доступа, и из переноса токена в cookie (Ф-1).
+      if (!req || !req[QUERY_TOKEN_WARNED]) {
+        if (req) req[QUERY_TOKEN_WARNED] = true;
+        log('[WARN] Приём sandbox_token из query-строки устарел. Используйте заголовки X-Sandbox-Token, Authorization: Bearer или куки.');
+      }
+      return queryToken;
     }
     return '';
   }
@@ -2799,10 +2930,10 @@ function createSandboxRuntime({
     return operators.some((expected) => tokenMatches(req, expected).matched);
   }
 
-  function recordAuthorized(rec, req) {
+  function recordAuthorized(rec, req, detail) {
     if (!rec.ownerTokenHash) return true;
     if (isOperatorRequest(req)) return true;
-    const token = ownerTokenOf(req);
+    const token = ownerTokenOf(req, detail);
     if (!token) return false;
     return safeEqual(hashSecret(token), rec.ownerTokenHash);
   }
@@ -2973,11 +3104,95 @@ function createSandboxRuntime({
    * policy: 'business' | 'control' | 'form' | 'public' (неизвестная политика
    * трактуется fail-closed как 'business').
    */
+  /**
+   * MS-12 (#121): hosted без `MOCK_SANDBOX_TOKEN` больше не отдаёт `default`.
+   *
+   * Раньше `default` оставалась общей и открытой (сервис писал только
+   * предупреждение при старте), хотя управляющая поверхность уже была
+   * fail-closed — несогласованная модель: опубликованный стенд с
+   * `MOCK_HOSTED=1` без токена обслуживал анонимный общий стейт. Теперь
+   * бизнес- и form-маршруты без селектора (и явный `sandbox=default`) отдают
+   * отказ песочницы; публичная инфраструктура (`/health`, `/openapi.json`,
+   * `/sandboxes`) работает через detached public record — реестр, provisioning
+   * и health стенда не ломаются, а именованные песочницы (`POST /sandboxes` +
+   * owner-token) работают как раньше.
+   *
+   * Управляющая поверхность (`policy: 'control'`) намеренно не перекрывается:
+   * у неё собственный fail-closed гейт MS-06 (401 + DX со словом `hosted`),
+   * и она остаётся доступной владельцу стенда по MOCK_ADMIN_TOKEN/
+   * MOCK_OPERATOR_TOKEN, чтобы закрытый default можно было увидеть и
+   * «раскрыть» через MOCK_SANDBOX_TOKEN или именованную песочницу.
+   *
+   * Self-hosted (`MOCK_HOSTED` не задан) поведение не меняет: там `default`
+   * открыт по DX-контракту, пока не задан `MOCK_SANDBOX_TOKEN`.
+   */
+  const defaultClosed = () => Boolean(hosted) && !defaultRecord.ownerTokenHash;
+
+  /**
+   * Применима ли MS-12-закрытость к конкретному запросу: бизнес- и
+   * form-маршруты (плюс public-пути, не попавшие в PUBLIC_INFRA) закрываются,
+   * управляющая поверхность — нет (см. комментарий выше).
+   */
+  const defaultClosedForRequests = (policy) => defaultClosed() && policy !== 'control';
+
+  const DEFAULT_CLOSED_MESSAGE = 'Hosted-режим (MOCK_HOSTED=1) без MOCK_SANDBOX_TOKEN не обслуживает default-песочницу (fail-closed, MS-12)';
+
+  const DEFAULT_CLOSED_HINT = 'Hosted-режим (MOCK_HOSTED=1) без MOCK_SANDBOX_TOKEN не отдаёт default-песочницу (fail-closed, MS-12). '
+    + 'Создайте песочницу: POST /sandboxes — её owner-token передавайте заголовком X-Sandbox-Token, Authorization: Bearer или cookie; '
+    + 'либо задайте MOCK_SANDBOX_TOKEN, чтобы default стала песочницей с owner-token.';
+
+  const QUERY_TOKEN_HINT = 'Токены в query-строке запрещены в hosted/owned-режиме: передайте owner-token заголовком X-Sandbox-Token, '
+    + 'Authorization: Bearer <ownerToken> или cookie (mock_sandbox_token=...).';
+
+  function defaultClosedRejection(sel, policy) {
+    return {
+      ok: false,
+      kind: 'not-found',
+      sandbox: 'default',
+      selector: sel,
+      policy,
+      message: DEFAULT_CLOSED_MESSAGE,
+      hint: DEFAULT_CLOSED_HINT,
+    };
+  }
+
   function admit(req, policy = 'business') {
     const effectivePolicy = VALID_POLICIES.has(policy) ? policy : 'business';
     const sel = selector(req);
     const pathname = requestPathname(req);
+    const mustCloseDefault = () => defaultClosedForRequests(effectivePolicy);
+
+    // Публичная инфраструктура остаётся доступной и при закрытой default:
+    // health/openapi/реестр песочниц отдают detached public record (свежий
+    // стейт), чтобы hosted-стенд можно было проверить и провизионить.
+    const rejectClosedDefault = () => {
+      if (PUBLIC_INFRA_PATH_RE.test(pathname)) {
+        return attachAdmissionMeta(
+          { ok: true, record: makeDetachedPublicRecord(), selector: sel, via: 'public' },
+          req,
+          { detachedPublic: true }
+        );
+      }
+      return defaultClosedRejection(sel, effectivePolicy);
+    };
+
+    // Ф-3 (#121): в hosted `?sandbox_token=` запрещён как класс — раньше
+    // hosted-namespaces принимали его с WARN, и fail-closed держался только на
+    // owned. Отказ не зависит от того, нашёлся ли другой источник: query-токен
+    // в hosted не используется для доступа вовсе (публичная инфраструктура не
+    // затрагивается).
+    if (hosted && queryParamValue(req, 'sandbox_token').trim() && !PUBLIC_INFRA_PATH_RE.test(pathname)) {
+      return {
+        ok: false,
+        kind: 'unauthorized',
+        sandbox: sel.id || 'default',
+        selector: sel,
+        hint: QUERY_TOKEN_HINT,
+      };
+    }
+
     if (tenancy === 'off') {
+      if (mustCloseDefault()) return rejectClosedDefault();
       return attachAdmissionMeta({ ok: true, record: defaultRecord, selector: sel, via: 'off' }, req);
     }
 
@@ -2997,7 +3212,8 @@ function createSandboxRuntime({
         }
         return { ok: false, kind: targetRec ? 'unauthorized' : 'not-found', sandbox: sel.id, selector: sel };
       }
-      if (recordAuthorized(defaultRecord, req)) {
+      const ownerDetail = {};
+      if (!mustCloseDefault() && recordAuthorized(defaultRecord, req, ownerDetail)) {
         const via = defaultRecord.ownerTokenHash
           ? (isOperatorRequest(req) ? 'operator' : 'owner')
           : 'public';
@@ -3010,7 +3226,14 @@ function createSandboxRuntime({
           { detachedPublic: true }
         );
       }
-      return { ok: false, kind: 'unauthorized', sandbox: 'default', selector: sel };
+      if (mustCloseDefault()) return defaultClosedRejection(sel, effectivePolicy);
+      return {
+        ok: false,
+        kind: 'unauthorized',
+        sandbox: 'default',
+        selector: sel,
+        ...(ownerDetail.rejectedQuery ? { hint: QUERY_TOKEN_HINT } : {}),
+      };
     }
 
     let id = sel.id;
@@ -3046,15 +3269,26 @@ function createSandboxRuntime({
       return { ok: false, kind: 'expired', sandbox: rec.id, selector: sel };
     }
 
+    // MS-12: default, не отдаваемая в hosted без MOCK_SANDBOX_TOKEN, закрыта и
+    // здесь — иначе управляющие маршруты продолжали бы её обслуживать.
+    if (mustCloseDefault() && rec.isDefault) return rejectClosedDefault();
+
     // PA-54: 'form' — capability-ссылки покупателя (/payment/{id}, /receipts/{uuid}).
     // Если default закрыт MOCK_SANDBOX_TOKEN, обход без токена запрещён; для
     // capability-путей именованной песочницы выставляется честный via:'form'.
-    const authorized = recordAuthorized(rec, req);
+    const ownerDetail = {};
+    const authorized = recordAuthorized(rec, req, ownerDetail);
     if (tenancy === 'owned' && !authorized) {
       if (effectivePolicy === 'form' && !rec.isDefault && CAPABILITY_FORM_PATH_RE.test(pathname)) {
         return attachAdmissionMeta({ ok: true, record: rec, selector: sel, via: 'form' }, req);
       }
-      return { ok: false, kind: 'unauthorized', sandbox: rec.id, selector: sel };
+      return {
+        ok: false,
+        kind: 'unauthorized',
+        sandbox: rec.id,
+        selector: sel,
+        ...(ownerDetail.rejectedQuery ? { hint: QUERY_TOKEN_HINT } : {}),
+      };
     }
 
     let via;
@@ -3610,15 +3844,17 @@ async function handleAdminLogin(req, res, raw, parseBody, send) {
   if (raw === undefined) raw = await readBody(req);
   const formData = parseBody(raw, req.headers['content-type'] || '');
   const cookies = [];
-  
-  if (formData.admin_token) cookies.push(`mock_admin_token=${encodeURIComponent(formData.admin_token)}; HttpOnly; SameSite=Strict; Path=/`);
-  else if (formData.admin_token === '') cookies.push(`mock_admin_token=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
-  
-  if (formData.operator_token) cookies.push(`mock_operator_token=${encodeURIComponent(formData.operator_token)}; HttpOnly; SameSite=Strict; Path=/`);
-  else if (formData.operator_token === '') cookies.push(`mock_operator_token=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
-  
-  if (formData.sandbox_token) cookies.push(`mock_sandbox_token=${encodeURIComponent(formData.sandbox_token)}; HttpOnly; SameSite=Strict; Path=/`);
-  else if (formData.sandbox_token === '') cookies.push(`mock_sandbox_token=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
+  const setCookie = (name, value) => cookies.push(sessionCookieHeader(name, value));
+  const clearCookie = (name) => cookies.push(sessionCookieHeader(name, '', { maxAge: 0 }));
+
+  if (formData.admin_token) setCookie('mock_admin_token', formData.admin_token);
+  else if (formData.admin_token === '') clearCookie('mock_admin_token');
+
+  if (formData.operator_token) setCookie('mock_operator_token', formData.operator_token);
+  else if (formData.operator_token === '') clearCookie('mock_operator_token');
+
+  if (formData.sandbox_token) setCookie('mock_sandbox_token', formData.sandbox_token);
+  else if (formData.sandbox_token === '') clearCookie('mock_sandbox_token');
 
   return send(res, 302, '', {
     Location: '/admin',
@@ -3714,6 +3950,11 @@ function installGracefulShutdown({
 module.exports = {
   adminLoginForm,
   handleAdminLogin,
+  readCookieValue,
+  sessionCookieHeader,
+  sessionCookiesFromQuery,
+  attachResponseCookies,
+  defaultSandboxStatus,
   createStore,
   createLog,
   nowIso,

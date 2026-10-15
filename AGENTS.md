@@ -124,9 +124,12 @@ CI ([`.github/workflows/ci.yml:43-93`](.github/workflows/ci.yml)); локаль�
   в комментарии, будет засчитан как реализованный.
 * `readBody` на превышении лимита отвечает 413 и **намеренно дренирует** остаток тела —
   не «закрывать соединение» без задачи.
-* Управляющие токены принимаются из query (`?admin_token=`, `?operator_token=`,
-  `?sandbox_token=`) — это известное поведение, закреплённое тестами
-  (`services/kassa-mock/selftest.js:646-662`); его меняет только волна MS-06.
+* Управляющие токены принимаются из query **только в non-hosted** (MS-06 + хвосты
+  #121/Ф-1…Ф-3): ответ со ссылками на консоль переносит принятый токен в
+  HttpOnly-cookie (`core.sessionCookiesFromQuery`), `Location` и HTML токенов не
+  содержат, а в hosted `?admin_token=`/`?operator_token=`/`?sandbox_token=`
+  отклоняются (`services/kassa-mock/selftest.js`, блок `#5 A-20` + Ф-1/Ф-3;
+  `packages/core/selftest.js`, блок `#121`).
 * `escapeHtml` (`"`, `'`) обязателен и в атрибутах; HTML собирается конкатенацией — никакой
   вставки значений интегратора «как есть».
 * Состояние per-sandbox: `state` — Proxy поверх контекста запроса; новый код, читающий

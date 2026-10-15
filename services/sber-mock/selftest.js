@@ -460,6 +460,30 @@ async function main() {
     const csrf = await request(port, 'POST', '/admin/action', { action: 'expire-order', id: 'x' });
     check('admin action: POST без CSRF/Origin получает 403', csrf.statusCode === 403);
     const admin = await request(port, 'GET', '/admin');
+
+    // Ф-1 (#121): query-токен консоли переносится в HttpOnly-cookie, а HTML и
+    // Location больше не несут токенов (MS-06 довёл миграцию не до конца).
+    {
+      const adminConn = startChild({ MOCK_ADMIN_TOKEN: 'adm-secret', MOCK_OPERATOR_TOKEN: 'op-secret' });
+      children.push(adminConn);
+      const adminPort = await adminConn.port;
+      try {
+        const pageByQuery = await request(adminPort, 'GET', '/admin?admin_token=adm-secret');
+        check('Ф-1: консоль по query-токену (non-hosted DX) -> 200 и токена нет в HTML',
+          pageByQuery.statusCode === 200 && !String(pageByQuery.body).includes('adm-secret'));
+        check('Ф-1: формы/ссылки консоли без токенов',
+          !/action="[^"]*(admin_token|sandbox_token)=/.test(String(pageByQuery.body))
+            && !/href="[^"]*(admin_token|sandbox_token)=/.test(String(pageByQuery.body)));
+        const queryCookie = (pageByQuery.headers['set-cookie'] || []).find((c) => c.startsWith('mock_admin_token=adm-secret'));
+        check('Ф-1: принятый из query токен перенесён в HttpOnly-cookie', Boolean(queryCookie));
+        // Навигация/формы дальше работают cookie-сессией: токенов в URL нет.
+        const pageByCookie = await request(adminPort, 'GET', '/admin', null, { Cookie: queryCookie.split(';')[0] });
+        check('Ф-1: консоль открывается по cookie-сессии без токенов в URL', pageByCookie.statusCode === 200);
+      } finally {
+        /* остановит общий finally */
+      }
+    }
+
     check('GET /admin отдаёт HTML-консоль', admin.statusCode === 200 && admin.body.includes('Сбер Ecom'));
 
     console.log('— callback targeted URL и статусный контракт операций');

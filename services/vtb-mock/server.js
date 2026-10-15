@@ -230,6 +230,7 @@ const sandboxRuntime = createSandboxRuntime({
   persist: store.persist,
   initialStateFactory: createInitialVtbState,
   mode: TENANCY,
+  hosted: HOSTED,
   stateFile: MOCK_STATE_FILE,
   sandboxFile: String(process.env.MOCK_SANDBOX_FILE || ''),
   ttlMs: SANDBOX_TTL_MS,
@@ -1252,7 +1253,7 @@ function sandboxPolicy(p) {
 
 function sendSandboxError(res, admission) {
   const id = admission.sandbox || 'default';
-  if (admission.kind === 'not-found') return jsonRaw(res, 404, vtbError('invalid_request', `Песочница «${id}» не найдена`, { hint: 'Создайте песочницу: POST /sandboxes.' }));
+  if (admission.kind === 'not-found') return jsonRaw(res, 404, vtbError('invalid_request', admission.message || `Песочница «${id}» не найдена`, { hint: admission.hint || 'Создайте песочницу: POST /sandboxes.' }));
   if (admission.kind === 'unauthorized') return jsonRaw(res, 401, vtbError('invalid_client', `Доступ к песочнице «${id}» ограничен: знание ID не является доступом`, { field: 'X-Sandbox-Token', hint: 'Передайте owner-token из POST /sandboxes: Authorization: Bearer <ownerToken>, X-Sandbox-Token или cookie (mock_sandbox_token=...). В hosted-режиме query-токены запрещены.' }));
   if (admission.kind === 'expired') return jsonRaw(res, 410, vtbError('invalid_request', `Песочница «${id}» истекла по TTL`, { hint: 'Создайте новую песочницу через POST /sandboxes.' }));
   if (admission.kind === 'rate-limit' || admission.kind === 'limit') return jsonRaw(res, 429, vtbError('limit_exceeded', 'Лимит создания песочниц исчерпан'));
@@ -1273,12 +1274,10 @@ function adminButton(action, id, label, csrfToken, actionUrl) {
 
 function adminPage(req) {
   const sandboxId = sandboxRuntime.currentId();
-  const query = new URL(req.url, 'http://mock.local').searchParams;
   const carry = new URLSearchParams();
   if (sandboxId !== 'default') carry.set('sandbox', sandboxId);
-  if (query.get('admin_token')) carry.set('admin_token', query.get('admin_token'));
-  const sandboxToken = TENANCY === 'owned' ? sandboxRuntime.ownerTokenOf(req) : '';
-  if (sandboxToken) carry.set('sandbox_token', sandboxToken);
+  // Ф-1 (#121): токенов в ссылках консоли нет — принятый из query токен уже
+  // перенесён в сессионную cookie (control-блок routeRequest).
   const suffix = carry.toString();
   const actionUrl = `/admin/action${suffix ? `?${suffix}` : ''}`;
   const journalUrl = `/admin/journal${suffix ? `?${suffix}` : ''}`;
@@ -1389,6 +1388,15 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
         : `Для ${p} требуется управляющий токен ${envName}`;
       return jsonRaw(res, 401, vtbError('invalid_token', message, { field: surface === 'admin' ? 'Authorization' : 'X-Operator-Token', hint: access.hint || `Передайте Authorization: Bearer <${envName}> или X-Operator-Token/X-Admin-Token.` }));
     }
+
+    // Ф-1 (#121): принятый из query управляющий токен переносим в сессионную
+    // cookie — дальше консоль, ссылки и формы работают без токенов в URL.
+    core.attachResponseCookies(res, core.sessionCookiesFromQuery(req, {
+      adminToken: MOCK_ADMIN_TOKEN,
+      operatorToken: OPERATOR_TOKEN,
+      sandboxToken: sandboxRuntime.recordByOwnerToken(req) ? sandboxRuntime.ownerTokenOf(req) : '',
+      hosted: HOSTED,
+    }));
   }
 
   const isRest = p.startsWith(REST_BASE);
@@ -1519,12 +1527,10 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
       return jsonRaw(res, 403, vtbError('invalid_token', 'Запрос заблокирован: отсутствует или неверен CSRF-токен', { field: '_csrf', hint: 'Откройте /admin и отправьте действие из формы консоли.' }));
     }
     const result = adminAction(body);
-    const query = new URL(req.url, 'http://mock.local').searchParams;
     const carry = new URLSearchParams();
     const sandboxId = sandboxRuntime.currentId();
     if (sandboxId !== 'default') carry.set('sandbox', sandboxId);
-    if (query.get('admin_token')) carry.set('admin_token', query.get('admin_token'));
-    if (query.get('sandbox_token')) carry.set('sandbox_token', query.get('sandbox_token'));
+    // Ф-1 (#121): токены НЕ возвращаются в URL — навигацию держит сессионная cookie.
     const suffix = carry.toString();
     return send(res, 302, '', { Location: `${result.redirect}${suffix ? `?${suffix}` : ''}` });
   }
