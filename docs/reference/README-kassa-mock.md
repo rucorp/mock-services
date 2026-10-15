@@ -15,7 +15,7 @@ Zero npm dependencies — чистый Node (>= 18), один файл
 | `POST /possystem/v1/getToken` | `{login, pass}` → `{token}` (TTL 12 ч); неверные → `error.code=14` |
 | `POST /possystem/v1/{group}/sell` | чек «Предоплата/Полный расчёт» → `{uuid, status:"wait"}`; дубли external_id → `error.code=12` |
 | `POST /possystem/v1/{group}/sell_refund` | чек возврата — тот же жизненный цикл |
-| `GET /possystem/v1/{group}/report/{uuid}` | `{status: wait|done|fail, payload:{ФД/ФП, ofd_receipt_url,...}}` |
+| `GET /possystem/v1/{group}/report/{uuid}` | `{status: wait\|done\|fail, payload:{ФД/ФП, ofd_receipt_url,...}}` |
 | `GET /possystem/v1/stats/cashboxes/extended` | мониторинг кассы (kktState, тариф, счётчик чеков) |
 | `GET /admin` | текстовая консоль: последние 50 документов, фискальные данные |
 | `GET /healthz` | ok/касса недоступна |
