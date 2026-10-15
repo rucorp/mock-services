@@ -192,7 +192,55 @@ for (const match of sidebar.matchAll(/\]\(([^)]+)\)/g)) {
   }
 }
 
-/* ---------- 5. README упоминает все services/* ---------- */
+/* ---------- 5. Гайды интеграции: единый шаблон ---------- */
+
+/*
+ * Шаблон гайда «Интеграция за 10 минут» зафиксирован в CONTRIBUTING.md
+ * (раздел «Гайды интеграции: шаблон»). Линтер требует от каждого
+ * провайдерского гайда в `docs/integration/`:
+ *   1. нумерованные `## N.`-разделы без пропусков и дублей (1..N);
+ *   2. раздел «Что мок проверяет за вас» (или «Известные отличия …»);
+ *   3. раздел «Ссылки» — контракт сервиса, OpenAPI, манифест протокола;
+ *   4. ссылку на README сервиса (`services/<name>-mock/README.md`).
+ * Материалы, которые не описывают протокол провайдера, перечислены в
+ * GUIDE_EXEMPT с причиной (у каждого — свой трек).
+ */
+
+const GUIDE_EXEMPT = new Map([
+  ['docs/integration/lovii.md',
+    'гайд по подключению платформы Lovii (внешний мок-контур), а не по протоколу провайдера; '
+    + 'перенос в docs/platform/ — отдельной задачей'],
+]);
+
+for (const guide of mdFiles(path.join(ROOT, 'docs/integration')).map((f) => f.split(path.sep).join('/'))) {
+  if (GUIDE_EXEMPT.has(guide)) continue;
+  const text = read(guide);
+
+  const numbers = [];
+  for (const match of text.matchAll(/^##\s+(\d+)\.\s+\S/gm)) numbers.push(Number(match[1]));
+  if (!numbers.length) {
+    problems.push(`${guide}: нет нумерованных разделов «## 1. …» — гайд вне шаблона`);
+  } else {
+    const expected = numbers.map((_, i) => i + 1);
+    if (numbers.join(',') !== expected.join(',')) {
+      problems.push(`${guide}: нумерация разделов «## N.» должна идти 1..N без пропусков `
+        + `и дублей, а идёт ${numbers.join(', ')}`);
+    }
+  }
+
+  if (!/^##\s+(?:\d+\.\s*)?(?:Что мок проверяет за вас|Известные отличия)/m.test(text)) {
+    problems.push(`${guide}: нет раздела «Что мок проверяет за вас» `
+      + '(допустимая альтернатива — «Известные отличия от боевого провайдера»)');
+  }
+  if (!/^##\s+\d+\.\s+Ссылки\s*$/m.test(text)) {
+    problems.push(`${guide}: нет раздела «Ссылки» на контракт сервиса (шаблон гайда)`);
+  }
+  if (!/\]\([^)]*services\/[a-z0-9-]+-mock\/README\.md\)/.test(text)) {
+    problems.push(`${guide}: нет ссылки на README сервиса (services/<name>-mock/README.md)`);
+  }
+}
+
+/* ---------- 6. README упоминает все services/* ---------- */
 
 if (exists('README.md') && exists('services')) {
   const readme = read('README.md');
@@ -207,7 +255,7 @@ if (exists('README.md') && exists('services')) {
   }
 }
 
-/* ---------- 6. Вендоренные файлы и лицензии ---------- */
+/* ---------- 7. Вендоренные файлы и лицензии ---------- */
 
 const vendorReadme = 'site/vendor/README-LICENSE.md';
 for (const rel of ['site/vendor/docsify.min.js', 'site/vendor/docsify-search.min.js', vendorReadme]) {

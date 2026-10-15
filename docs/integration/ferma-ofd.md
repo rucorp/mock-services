@@ -37,13 +37,14 @@ curl -s "http://localhost:3101/possystem/v1/mygroup/sell?token=<TOKEN>" -H 'Cont
 # → { uuid, status: "wait" }
 ```
 
-Через `MOCK_PROCESS_MS` (по умолчанию 15 с; в compose — серверный дефолт)
+Через `MOCK_PROCESS_MS` (дефолт адаптера — 15 с; в `docker-compose.include.yml` и
+staging-стенде — 4 с, чтобы публичный контур отвечал быстрее)
 документ «печатается»: статус → `done`, генерируются ФД/ФП/фискальный
 признак, результат POST'ом уходит на `callback_url` (ретраи как у Ferma),
 покупателю — человекочитаемый чек по ссылке `ofd_receipt_url`
 (`/receipts/{uuid}`). Статус можно и опрашивать: `GET /possystem/v1/mygroup/report/{uuid}`.
 
-## 3. Валидация чека (мок ловит ошибки до боевой кассы)
+## 3. Что мок проверяет за вас (валидация чека до боевой кассы)
 
 Перед «печатью» мок проверяет инварианты, на которых в бою падает ФНС/касса:
 
@@ -107,3 +108,10 @@ external_id), 10 (не найден), 11 (авторизация), 12 (дубл�
 - [ ] чек проходит проверку инвариантов (суммы позиций/оплат/итога, справочники)
 - [ ] callback переживает рестарт стенда (`MOCK_STATE_FILE`) и повтор (кнопка «callback»)
 - [ ] переключение на бой = смена `FERMA_API_URL` и кредов, код не меняется
+
+## 8. Ссылки
+
+- Контракт сервиса, env и `/mock/*`: [`services/kassa-mock/README.md`](../../services/kassa-mock/README.md)
+- OpenAPI 3.1: [`docs/openapi/kassa-mock.openapi.json`](../openapi/kassa-mock.openapi.json)
+- Манифест протокола для `npm run check:drift`: [`protocols/ferma-ofd.json`](../../protocols/ferma-ofd.json)
+- Общая инфраструктура адаптеров (часы, песочницы, вебхуки, SSRF): [`packages/core/README.md`](../../packages/core/README.md)

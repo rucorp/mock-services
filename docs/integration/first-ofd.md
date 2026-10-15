@@ -231,7 +231,7 @@ curl -sS "http://localhost:3107/api/external/queue/v1/statuses?externalId=shop-o
 повтор. При включённой SSRF-политике приватный `callbackUrl` даёт терминальный
 отказ `SSRF_BLOCKED` — без повторов и без утечки во внутреннюю сеть.
 
-## 8. Негативы и DX
+## 8. Что мок проверяет за вас: негативы и DX
 
 Ошибки мока — provider-shaped: `{"error": {"code", "text", "layer"}}` плюс
 `field`, `hint` и `doc` со ссылкой на раздел среза `[FORK]`:
@@ -277,3 +277,10 @@ curl -sS "http://localhost:3107/api/external/queue/v1/statuses?externalId=shop-o
 хранения. Все такие места помечены `[VERIFY]`, а локальные решения мока —
 `[FORK]`. Перед переносом в production сверяйте спецификацию подключённой
 кассы и согласуйте отличия с владельцем проекта.
+
+## 11. Ссылки
+
+- Контракт сервиса, env и `/mock/*`: [`services/first-ofd-mock/README.md`](../../services/first-ofd-mock/README.md)
+- OpenAPI 3.1: [`docs/openapi/first-ofd-mock.openapi.json`](../openapi/first-ofd-mock.openapi.json)
+- Манифест протокола для `npm run check:drift`: [`protocols/first-ofd-okassa.json`](../../protocols/first-ofd-okassa.json)
+- Общая инфраструктура адаптеров (часы, песочницы, вебхуки, SSRF): [`packages/core/README.md`](../../packages/core/README.md)

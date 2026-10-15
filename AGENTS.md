@@ -35,15 +35,17 @@
 | тронуты `protocols/*.json`, маршруты/коды/статусы в `services/*/server.js`, `внутренних конспектов (приватный mock-services-docs)**` | `npm run check:drift` |
 | тронуты `.md` в корне, `docs/`, `services/*/README.md`, `packages/core/README.md` | `npm run check:links` |
 | тронуты `index.html`, `_sidebar.md`, `site/**` или добавлен документ в `docs/` | `npm run check:site` |
-| тронуты env-переменные, `docker-compose*.yml`, `Dockerfile` | `npm run test:compose` и `node scripts/docker-smoke.js` |
-`npm test` = `test:core` + `test:tbank` + `test:kassa` + `test:yookassa` + `test:atol` +
-`check:links` + `check:site` + `check:drift` ([`package.json:8`](package.json)).
+| тронуты env-переменные, `docker-compose*.yml`, `Dockerfile` | `npm run check:env`, `npm run test:compose` и `node scripts/docker-smoke.js` |
+`npm test` = одиннадцать selftest-скриптов (`test:core` + десять `test:<сервис>`) +
+`check:links` + `check:site` + `check:tables` + `check:env` + `check:drift`
+([`package.json:8`](package.json)).
 **`test:compose` и `test:docker` в `npm test` НЕ входят** — их прогоняет job `docker` в
-CI ([`.github/workflows/ci.yml:67-182`](.github/workflows/ci.yml)); локально они требуют Docker.
+CI ([`.github/workflows/ci.yml:69-184`](.github/workflows/ci.yml)); локально они требуют Docker.
 Отчёт в PR обязан перечислить, какие прогоны выполнены и их финальные строки.
 
-Отдельной «документационной» job в CI нет: `check:links`, `check:site` и `check:drift` — шаги
-внутри job `test` ([`.github/workflows/ci.yml:60-65`](.github/workflows/ci.yml)), то есть битая
+Отдельной «документационной» job в CI нет: `check:links`, `check:site`, `check:tables`,
+`check:env` и `check:drift` — шаги внутри job `test`
+([`.github/workflows/ci.yml:58-67`](.github/workflows/ci.yml)), то есть битая
 ссылка или сломанная навигация сайта краснит весь matrix `test` на трёх версиях Node.
 
 Тесты: без `sleep`-ожиданий и без фиксированных портов (`:0`), новые сценарии — новым
@@ -88,9 +90,12 @@ CI ([`.github/workflows/ci.yml:67-182`](.github/workflows/ci.yml)); локаль
 Любое изменение/добавление `MOCK_*` обязано отразиться в:
 `docker-compose.yml` → `docker-compose.include.yml` → `services/<name>-mock/README.md`
 (env-таблица) → `SECURITY.md` (если влияет на модель угроз) → `CHANGELOG.md`.
-Исключений нет. Известная задолженность проверки: 14 переменных читаются сервисами, но
-отсутствуют в include-файле, а `MOCK_VIRTUAL_CLOCK` нет ни в одном README сервиса —
-подробности в пакет подготовки к аудиту (в `mock-services-docs`) §2.6.
+Исключений нет. Правило проверяется скриптом `npm run check:env`
+([`scripts/check-env-parity.js`](scripts/check-env-parity.js)): он сверяет `server.js` с
+README сервиса, тремя compose-файлами и `SECURITY.md`, а также дефолты `MOCK_PORT` и
+`${VAR:-…}`. Незакрытый долг ведётся явно в `KNOWN_INCLUDE_DEBT` (переменные, которые
+адаптеры читают, но которые в include не проброшены, — менять include-набор без решения
+владельца нельзя, §7) и печатается в выводе проверки; новый дрейф валит CI.
 
 ## 6. Process: ветка, коммит, PR
 

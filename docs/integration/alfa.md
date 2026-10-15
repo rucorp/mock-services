@@ -180,7 +180,7 @@ function verifyAlfaCallback(query, secret) {
 (SHA-256 в описании против SHA-512 в примерах кода), а угадывать алгоритм
 подписи нельзя.
 
-## 7. Что мок проверит вместо вас
+## 7. Что мок проверяет за вас
 
 - неверные `userName`/`password` — `errorCode 2` с подсказкой, где взять креды
   стенда (реальные банковские креды в дефолты не зашиты);
@@ -235,3 +235,10 @@ function verifyAlfaCallback(query, secret) {
       `sessionTimeoutSecs`);
 - [ ] нагрузки на тестовый контур не создаётся (нагрузочное тестирование
       договором запрещено).
+
+## 10. Ссылки
+
+- Контракт сервиса, env и `/mock/*`: [`services/alfa-mock/README.md`](../../services/alfa-mock/README.md)
+- OpenAPI 3.1: [`docs/openapi/alfa-mock.openapi.json`](../openapi/alfa-mock.openapi.json)
+- Манифест протокола для `npm run check:drift`: [`protocols/alfa-eacq.json`](../../protocols/alfa-eacq.json)
+- Общая инфраструктура адаптеров (часы, песочницы, вебхуки, SSRF): [`packages/core/README.md`](../../packages/core/README.md)

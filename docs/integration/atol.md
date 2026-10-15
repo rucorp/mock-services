@@ -133,7 +133,7 @@ curl -s -X POST "…/v4-online-atol-ru_4179/sell" -H "Token: $TOKEN" -d '{"exter
 отличие от Ferma**, где дубль — ошибка `code=12`. Область уникальности —
 группа: тот же `external_id` в другой группе — другой документ.
 
-## 7. Что мок проверит вместо вас
+## 7. Что мок проверяет за вас
 
 | Ошибка интегратора | Ответ мока |
 |---|---|
@@ -196,3 +196,10 @@ curl -s -X POST localhost:3103/mock/time -d '{"advance":"+25h"}'   # токен 
       и своих кредов/группы из кабинета; контракт запросов не меняется
 - [ ] если нужны маркированные товары или ФФД 1.2 — это **v5**, другой
       протокол; на этом стенде его нет
+
+## 10. Ссылки
+
+- Контракт сервиса, env и `/mock/*`: [`services/atol-mock/README.md`](../../services/atol-mock/README.md)
+- OpenAPI 3.1: [`docs/openapi/atol-mock.openapi.json`](../openapi/atol-mock.openapi.json)
+- Манифест протокола для `npm run check:drift`: [`protocols/atol-online.json`](../../protocols/atol-online.json)
+- Общая инфраструктура адаптеров (часы, песочницы, вебхуки, SSRF): [`packages/core/README.md`](../../packages/core/README.md)

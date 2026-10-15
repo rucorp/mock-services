@@ -178,7 +178,7 @@ ACK, подписи и расписания повторов (`документ�
 
 | Переменная | Дефолт | Назначение |
 |---|---|---|
-| `MOCK_PORT` | `3103` | порт |
+| `MOCK_HOST` / `MOCK_PORT` | `0.0.0.0` / `3103` | адрес и порт прослушивания |
 | `MOCK_ATOL_LOGIN` / `MOCK_ATOL_PASSWORD` | `v4-online-atol-ru` / `iGFFuihss` | креды стенда (алиасы `ATOL_LOGIN`, `ATOL_PASSWORD`) |
 | `MOCK_ATOL_GROUP` | `v4-online-atol-ru_4179` | группа по умолчанию (алиас `ATOL_GROUP`) |
 | `MOCK_GROUPS` | — | дополнительные разрешённые группы через запятую (алиас: `MOCK_ATOL_GROUPS`) |
@@ -190,9 +190,11 @@ ACK, подписи и расписания повторов (`документ�
 | `MOCK_PUBLIC_BASE_URL` | `http://localhost:${MOCK_ATOL_HOST_PORT:-3103}` | база `ofd_receipt_url` |
 | `MOCK_FN_NUMBER` / `MOCK_ECR_RN` / `MOCK_OFD_INN` / `MOCK_FNS_SITE` | тестовые | реквизиты ФН/ККТ/ОФД в `payload` |
 | `MOCK_AGENT_LINE` / `MOCK_AGENT_INN` | «ТЕСТОВАЯ КАССА АТОЛ (МОК)» / `5544332219` | шапка ленты чека |
+| `MOCK_OPERATOR` | «Кассир-мок» | имя оператора в фискальном снимке чека |
 | `MOCK_STATE_FILE` | — | файл состояния (compose: `/data/atol-state.json`) |
 | `MOCK_BLOCK_PRIVATE_WEBHOOKS` | `false` (`true` при `MOCK_HOSTED=1`) | SSRF-guard исходящих callback |
 | `MOCK_ADMIN_TOKEN`, `MOCK_OPERATOR_TOKEN`, `MOCK_HOSTED`, `MOCK_TENANCY`, `MOCK_SANDBOX_*` | — | общий control-plane и песочницы RFC-001 |
+| `MOCK_VIRTUAL_CLOCK` | — | ISO-старт виртуальных часов стенда (TTL токена 24 ч, задержка очереди, ретраи callback) |
 
 ## Отличия от Ferma (`kassa-mock`) — не drop-in
 

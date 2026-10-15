@@ -174,7 +174,27 @@ Ecom callback из reference **не содержит подписи или check
   callback targets включена по умолчанию и terminal-отказ не ретраится.
 - `npm run test:sber` запускает отдельный end-to-end selftest без Docker.
 
-## 8. Известная неопределённость
+## 8. Что мок проверяет за вас
+
+- креды `userName`/`password` — синтетические дефолты стенда (`SBERMOCKTEST`/`mockpass123`),
+  неверные дают отказ с подсказкой, где взять свои;
+- `amount` — целые копейки, `currency=643`, `orderNumber` уникален для магазина
+  (повтор — ошибка, а не replay первого заказа);
+- переходы: `deposit` не выше холда (частичный поддерживается), `refund` не выше
+  `depositedAmount − refundedAmount`, `reverse` только по авторизации, `decline` —
+  до первой попытки оплаты;
+- ACS: тестовый пароль `111111`, `orderStatus=5` держится до завершения challenge;
+- callback: доставкой считается **только HTTP 200** (`204` — неуспех), по умолчанию
+  3 попытки с интервалом 60 с, ускоряются `POST /mock/time {"advance":"+60s"}`;
+- сценарии `X-Mock-Scenario` (`fail`, `hang`, `latency`, `http-500`/`http-504`,
+  `webhook-drop`, `webhook-duplicate`) и `X-Mock-Sandbox` для изоляции;
+- в hosted (`MOCK_HOSTED=1`) управляющие токены fail-closed, а приватные
+  callback-адреса отсекаются SSRF-политикой (`SSRF_BLOCKED`, без повторов).
+
+Локальные `errorCode` 1…6 — пометки `[VERIFY]/[FORK]`, а не обещание боевого
+каталога ошибок Сбербанка (см. §9).
+
+## 9. Известная неопределённость
 
 Локальные reference-срезы не фиксируют полный merchant-specific каталог
 `errorCode` и полную схему всех ответных полей `getOrderStatusExtended.do`.
@@ -182,3 +202,10 @@ Ecom callback из reference **не содержит подписи или check
 явно помеченная [VERIFY]/[FORK] реализация мока, а не заявление о точной
 таблице production Сбербанка. Перед переносом в production сверяйте исходную спецификацию
 подключённого merchant и согласуйте отличия с владельцем проекта.
+
+## 10. Ссылки
+
+- Контракт сервиса, env и `/mock/*`: [`services/sber-mock/README.md`](../../services/sber-mock/README.md)
+- OpenAPI 3.1: [`docs/openapi/sber-mock.openapi.json`](../openapi/sber-mock.openapi.json)
+- Манифест протокола для `npm run check:drift`: [`protocols/sber-ecom.json`](../../protocols/sber-ecom.json)
+- Общая инфраструктура адаптеров (часы, песочницы, вебхуки, SSRF): [`packages/core/README.md`](../../packages/core/README.md)

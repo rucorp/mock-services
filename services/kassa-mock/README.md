@@ -136,6 +136,11 @@ FERMA_CALLBACK_SECRET=<секрет>
 | `MOCK_SANDBOX_SWEEP_MS` | `60000` | интервал воркера TTL/retention |
 | `MOCK_SANDBOX_RETENTION_MS` | `0` (выкл.) | retention диагностических записей (отправленные ОФД-записи, истёкшие токены) |
 | `MOCK_FERMA_DOWN` / `MOCK_FERMA_DOWN_MS` | `false` / `0` | старт «касса недоступна» и авто-восстановление |
+| `MOCK_FN_NUMBER` / `MOCK_ECR_RN` / `MOCK_OFD_INN` / `MOCK_FNS_SITE` | тестовые | реквизиты ФН/ККТ/ОФД и сайта ФНС в фискальном снимке |
+| `MOCK_FN_CAPACITY` | `250000` | ресурс ФН: исчерпание → ошибка 63 без ожидания реального ФН |
+| `MOCK_OFD_MODE` | `online` | стартовое состояние канала ОФД кассы: `online` / `offline` (очередь растёт) / `reject` |
+| `MOCK_OPERATOR` | «Кассир-мок» | имя оператора в фискальном снимке чека |
+| `MOCK_VIRTUAL_CLOCK` | — | ISO-старт виртуальных часов стенда (TTL токена 12 ч, смена ККТ 24 ч, ресурс ФН, ретраи callback) |
 | `MOCK_STATE_FILE` | — | файл персистентности; без него состояние в памяти |
 
 ## Песочницы и hosted tenancy (RFC-001, A-21)

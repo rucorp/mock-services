@@ -59,6 +59,10 @@ jobs:
         run: npm run check:links
       - name: проверка структуры сайта документации (ссылки сайдбара, самодостаточность)
         run: npm run check:site
+      - name: реестр markdown-таблиц (docs/tables.md)
+        run: npm run check:tables
+      - name: env-контракт сервисов (правило пяти мест, AGENTS.md §5)
+        run: npm run check:env
       - name: детектор дрейфа протоколов и OpenAPI 3.1
         run: npm run check:drift
 

@@ -236,7 +236,7 @@ Session-Token: <token этой песочницы>                # на чте�
 State files содержат маркеры и сгенерированные mock-креды: ограничьте доступ к
 volume. [Модель угроз](../../SECURITY.md).
 
-## 7. Границы и проверка
+## 7. Что мок проверяет за вас: границы и проверка
 
 `npm run test:taxcom` — zero-dep HTTP selftest на эфемерных портах: Login
 (`Integrator-ID`, **[VERIFY]**-форма тела, неверные креды), sliding TTL 300 с и
@@ -253,3 +253,10 @@ volume. [Модель угроз](../../SECURITY.md).
 22%/22-122, права/роли в полном объёме. Write API, печать и callback **не
 моделируются**. Все локальные решения перечислены как `[VERIFY]`/`[FORK]` выше и
 в манифесте; проверка соответствия стенду провайдера не заявляется.
+
+## 8. Ссылки
+
+- Контракт сервиса, env и `/mock/*`: [`services/taxcom-mock/README.md`](../../services/taxcom-mock/README.md)
+- OpenAPI 3.1: [`docs/openapi/taxcom-mock.openapi.json`](../openapi/taxcom-mock.openapi.json)
+- Манифест протокола для `npm run check:drift`: [`protocols/taxcom-ofd.json`](../../protocols/taxcom-ofd.json)
+- Общая инфраструктура адаптеров (часы, песочницы, вебхуки, SSRF): [`packages/core/README.md`](../../packages/core/README.md)
