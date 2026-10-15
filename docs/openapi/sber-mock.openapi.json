@@ -3,7 +3,7 @@
   "info": {
     "title": "sber-mock — Сбербанк Ecom REST v1.1.11.1 (мок-стенд)",
     "version": "0.5.0",
-    "description": "Zero-dependency mock adapter for the Ecom JSON REST slice documented in docs/reference/sber/01-payment-api.md and docs/reference/sber/02-callbacks-and-test.md. This is not legacy Secure Payments. Business methods are POST JSON at /ecomm/gw/partner/api/v1/*.do. errorCode=0 means the REST call was processed, not that payment succeeded; reconcile the numeric orderStatus with getOrderStatusExtended.do. Ecom callback is unsigned JSON POST and accepts exactly HTTP 200 as ACK."
+    "description": "Zero-dependency mock adapter for the Ecom JSON REST slice documented in документации Сбербанк Ecom and документации Сбербанк Ecom This is not legacy Secure Payments. Business methods are POST JSON at /ecomm/gw/partner/api/v1/*.do. errorCode=0 means the REST call was processed, not that payment succeeded; reconcile the numeric orderStatus with getOrderStatusExtended.do. Ecom callback is unsigned JSON POST and accepts exactly HTTP 200 as ACK."
   },
   "servers": [
     { "url": "http://localhost:3105", "description": "Локальный Sber Ecom mock" }

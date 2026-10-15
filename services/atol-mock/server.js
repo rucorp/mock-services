@@ -16,8 +16,8 @@
  *   service.callback_url -> POST результата после обработки (done|fail)
  *
  * Источники (конспекты проекта):
- *   docs/reference/atol-online/01-api-v4-v5.md
- *   docs/reference/atol-online/02-testing-and-callbacks.md
+ *   документации АТОЛ Онлайн v4
+ *   документации АТОЛ Онлайн v4
  *   PDF API v4: https://atol.online/files/API_atol_online_v4.pdf (версия 5.15)
  *
  * ЧЕМ ОТЛИЧАЕТСЯ ОТ kassa-mock (Ferma) — НЕ drop-in, хотя часть имён похожа:
@@ -94,7 +94,7 @@ const {
 } = process.env;
 
 /*
- * Публичные тестовые реквизиты v4 (docs/reference/atol-online/02-testing-and-callbacks.md,
+ * Публичные тестовые реквизиты v4 (документации АТОЛ Онлайн v4,
  * https://atol.online/files/ffd/test_sreda.txt): login/pass/группа общего
  * тестового контура. Они открыты и предназначены только для тестов — поэтому
  * и взяты дефолтами мока; к production не применяются.
@@ -298,7 +298,7 @@ const PAYMENT_OBJECTS = [
  * Ставки НДС v4 (ФФД 1.05). Базовые — vat0/vat5/vat7/vat10/vat20 и `none`;
  * расчётные (НДС в составе суммы) у АТОЛ пишутся БЕЗ подчёркивания:
  * `vat105` (5/105), `vat107` (7/107), `vat110` (10/110), `vat120` (20/120),
- * `vat122` (22/122) — см. docs/reference/atol-online/01-api-v4-v5.md и
+ * `vat122` (22/122) — см. документации АТОЛ Онлайн v4 и
  * https://help.atol.online/article/26152. Синтаксис Ferma (`vat20_120`) в v4
  * не принимается — мок объясняет это в hint.
  */
@@ -452,7 +452,7 @@ const derr = core.createErrorCatalog({
     14: {
       message: 'Неверный логин или пароль',
       field: 'login, pass',
-      hint: 'Тестовые реквизиты v4: login/pass/группа из docs/reference/atol-online/02-testing-and-callbacks.md. Дефолты стенда печатаются в стартовом логе; переопределяются MOCK_ATOL_LOGIN / MOCK_ATOL_PASSWORD.',
+      hint: 'Тестовые реквизиты v4: login/pass/группа из документации АТОЛ Онлайн v4 Дефолты стенда печатаются в стартовом логе; переопределяются MOCK_ATOL_LOGIN / MOCK_ATOL_PASSWORD.',
       doc: '/article/11254',
     },
     57: {
@@ -811,7 +811,7 @@ function customerReceiptText(doc) {
  * Очередь доставки результата на service.callback_url (ядро: ретраи, SSRF-guard).
  *
  * ФОРК (задокументирован): у v4 в публичных руководствах не найдено правила
- * для ACK, подписи и числа/интервалов повторов (docs/reference/atol-online/
+ * для ACK, подписи и числа/интервалов повторов (документации АТОЛ Онлайн v4
  * 02-testing-and-callbacks.md). Мок принимает любой 2xx как ACK и повторяет
  * доставку по своим настройкам; подпись НЕ добавляется — выдумывать её нельзя.
  * Приёмник обязан быть идемпотентным, сверка — через report.

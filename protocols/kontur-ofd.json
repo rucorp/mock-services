@@ -4,8 +4,8 @@
   "title": "Контур.ОФД — read/reconciliation",
   "version": "2026.10",
   "upstreamDocs": [
-    "docs/reference/kontur-ofd/01-auth-and-access.md",
-    "docs/reference/kontur-ofd/02-document-retrieval.md"
+    "mock-services-docs/docs/reference/kontur-ofd/01-auth-and-access.md",
+    "mock-services-docs/docs/reference/kontur-ofd/02-document-retrieval.md"
   ],
   "guide": "docs/integration/kontur-ofd.md",
   "readme": "services/kontur-ofd-mock/README.md",
@@ -187,5 +187,6 @@
     "statistics",
     "Cookie auth.sid",
     "provider schema verification"
-  ]
+  ],
+  "$upstreamNote": "Конспекты upstream-доки живут в приватном репозитории rucorp/mock-services-docs; в публичном репо — только официальные URL в docs/integration."
 }

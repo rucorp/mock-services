@@ -3,8 +3,8 @@
   "title": "Первый ОФД — облачная касса OKassa: асинхронная очередь заявок на чек",
   "version": "2026.10",
   "upstreamDocs": [
-    "docs/reference/first-ofd/01-okassa-api.md",
-    "docs/reference/first-ofd/02-test-and-open-issues.md"
+    "mock-services-docs/docs/reference/first-ofd/01-okassa-api.md",
+    "mock-services-docs/docs/reference/first-ofd/02-test-and-open-issues.md"
   ],
   "guide": "docs/integration/first-ofd.md",
   "readme": "services/first-ofd-mock/README.md",
@@ -40,8 +40,13 @@
     "type": "bearer-from-getToken",
     "tokenRoute": "/getToken",
     "tokenRequestFormat": "application/json; charset=utf-8",
-    "tokenRequestFields": ["login", "pass"],
-    "tokenResponse": ["token"],
+    "tokenRequestFields": [
+      "login",
+      "pass"
+    ],
+    "tokenResponse": [
+      "token"
+    ],
     "businessHeader": "Authorization: Bearer <token>",
     "tokenTtlSecsDefault": 86400,
     "note": "login — идентификатор организации, pass — API-ключ UUID из ЛК. API-ключ UUID НЕ используется как bearer-токен: bearer выдаёт getToken.",
@@ -120,8 +125,14 @@
   },
   "errorLayerNote": "Срез требует сохранять оба слоя ошибок (API и ККТ) раздельно — мок кладёт слой в errorType, код в errorCode, текст в details. Таблица кодов публично не зафиксирована: KKT_ERROR_CODES/API_ERROR_CODES — локальный [FORK] мока.",
   "resultLayerCodes": {
-    "kkt": ["SHIFT_ALREADY_OPEN", "SHIFT_NOT_OPEN", "KKT_UNAVAILABLE"],
-    "api": ["DOCUMENT_REJECTED"]
+    "kkt": [
+      "SHIFT_ALREADY_OPEN",
+      "SHIFT_NOT_OPEN",
+      "KKT_UNAVAILABLE"
+    ],
+    "api": [
+      "DOCUMENT_REJECTED"
+    ]
   },
   "callback": {
     "method": "POST",
@@ -171,7 +182,14 @@
     "system_error"
   ],
   "errorEnvelope": {
-    "shape": ["error.code", "error.text", "error.layer", "field", "hint", "doc"],
+    "shape": [
+      "error.code",
+      "error.text",
+      "error.layer",
+      "field",
+      "hint",
+      "doc"
+    ],
     "note": "[FORK] публичный срез фиксирует поля результата очереди (errorCode/errorType/details), но не envelope HTTP-ошибок; {error:{code,text,layer}} + DX {field,hint,doc} — локальная договорённость мока, не production-каталог Первого ОФД."
   },
   "testCredentials": {
@@ -181,7 +199,10 @@
     "note": "Синтетические дефолты мока. Публичных тестовых login/API-key UUID у Первого ОФД нет: реквизиты берутся в тестовом ЛК. Реальные креды не добавлять в конфиг, тесты или документацию."
   },
   "userGroups": {
-    "defaultCatalog": ["MOCKGROUP", "firstofd-mock"],
+    "defaultCatalog": [
+      "MOCKGROUP",
+      "firstofd-mock"
+    ],
     "env": "MOCK_FIRST_OFD_USER_GROUPS",
     "any": "*",
     "note": "[VERIFY] Значения кассовых групп реального сервиса публично не перечислены: каталог синтетический, «*» отключает проверку, неизвестная группа даёт unknown_user_group."
@@ -200,5 +221,6 @@
     "подпись callback, обязательный ACK и расписание повторов — публично не установлены, не выдумывать",
     "правила сверки сумм, не описанные в схеме (мок только предупреждает в логе)",
     "гарантии порядка доставки callback и точный срок хранения requestId/externalId"
-  ]
+  ],
+  "$upstreamNote": "Конспекты upstream-доки живут в приватном репозитории rucorp/mock-services-docs; в публичном репо — только официальные URL в docs/integration."
 }

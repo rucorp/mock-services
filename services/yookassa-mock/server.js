@@ -211,7 +211,7 @@ const clearSandboxChildState = (record) => {
 /* ------------------------------------------------------------ test cards */
 
 /**
- * Тестовые карты ЮKassa (docs/reference/yookassa/03-testing.md): успех +
+ * Тестовые карты ЮKassa (документации ЮKassa): успех +
  * отказы с честными cancellation_details. Сценарий выбирается по PAN один раз
  * на форме; в state попадают только first6/last4 (F-10, минимизация).
  */

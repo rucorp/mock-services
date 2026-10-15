@@ -109,7 +109,7 @@ const DEFAULT_CALLBACK_URL = String(MOCK_VTB_CALLBACK_URL || '').trim();
 const PREAUTH_ENABLED = core.flagEnabled(MOCK_VTB_PREAUTH, true);
 const REST_BASE = '/openapi/smb/efcp/e-commerce/v1/';
 const TOKEN_PATH = '/passport/oauth2/token';
-const ORDER_TTL_DEFAULT_SECS = 1200; // 20 минут по docs/reference/vtb/01-smb-ecommerce-api.md.
+const ORDER_TTL_DEFAULT_SECS = 1200; // 20 минут по документации ВТБ SMB E-commerce
 const TOKEN_TTL_DEFAULT_SECS = 170; // ≈170 с по тому же срезу.
 const ORDER_ID_MAX = 128; // mock safety cap; точная граница в срезе не зафиксирована.
 const ORDER_NAME_MAX = 256;
@@ -306,7 +306,7 @@ const OPERATION_STATUSES = {
  * {field, hint, doc} — явный [FORK] мока (по образцу errorCode-форка Сбера),
  * не утверждение о production-каталоге ВТБ. OAuth-ошибки token endpoint
  * следуют RFC 6749 §5.2 — это уже не форк. */
-function vtbError(error, description, { field, hint, doc = 'docs/reference/vtb/01-smb-ecommerce-api.md' } = {}) {
+function vtbError(error, description, { field, hint, doc = 'документации ВТБ SMB E-commerce' } = {}) {
   const body = { error, error_description: String(description || '') };
   if (field) body.field = field;
   if (hint) body.hint = hint;

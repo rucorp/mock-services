@@ -40,7 +40,7 @@ process.env.MOCK_PROFILE = 'multisplit';
 process.env.MOCK_RETRY_MS = '1000';
 process.env.MOCK_STATE_FILE = '';
 process.env.MOCK_PUBLIC_BASE_URL = 'http://mock.test';
-// acqapi reference credentials from docs/reference/tbank/03-payouts-and-deals.md.
+// acqapi reference credentials from документации Т-Банка
 process.env.MOCK_ACQAPI_CLIENT_ID = 'partner';
 process.env.MOCK_ACQAPI_CLIENT_SECRET = 'mock-acqapi-secret';
 

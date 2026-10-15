@@ -3,8 +3,8 @@
   "title": "ВТБ — SMB E-commerce API интернет-эквайринга",
   "version": "2026.10",
   "upstreamDocs": [
-    "docs/reference/vtb/01-smb-ecommerce-api.md",
-    "docs/reference/vtb/02-callbacks-and-testing.md"
+    "mock-services-docs/docs/reference/vtb/01-smb-ecommerce-api.md",
+    "mock-services-docs/docs/reference/vtb/02-callbacks-and-testing.md"
   ],
   "guide": "docs/integration/vtb.md",
   "readme": "services/vtb-mock/README.md",
@@ -45,8 +45,16 @@
     "type": "oauth2-client-credentials",
     "tokenGrant": "client_credentials",
     "tokenRequestFormat": "application/x-www-form-urlencoded",
-    "tokenResponse": ["access_token", "token_type", "expires_in"],
-    "businessHeaders": ["Authorization: Bearer", "X-IBM-Client-Id", "Merchant-Authorization"],
+    "tokenResponse": [
+      "access_token",
+      "token_type",
+      "expires_in"
+    ],
+    "businessHeaders": [
+      "Authorization: Bearer",
+      "X-IBM-Client-Id",
+      "Merchant-Authorization"
+    ],
     "clientIdNormalization": "client_id в нижнем регистре, без @ext.vtb.ru; X-IBM-Client-Id и Merchant-Authorization отправляются только на API, не на token endpoint",
     "merchantAuthorization": "опционален (одна политика; обязателен при нескольких ресурсах по настройке банка)",
     "tokenTtlSecsDefault": 170,
@@ -84,9 +92,22 @@
     "/sandboxes/me/reset-creds",
     "/mock/sandboxes"
   ],
-  "createOrderFields": ["orderId", "orderName", "amount"],
-  "createOrderOptionalFields": ["description", "expire", "returnUrl", "twoStageParams"],
-  "refundFields": ["refundId", "paymentId", "amount"],
+  "createOrderFields": [
+    "orderId",
+    "orderName",
+    "amount"
+  ],
+  "createOrderOptionalFields": [
+    "description",
+    "expire",
+    "returnUrl",
+    "twoStageParams"
+  ],
+  "refundFields": [
+    "refundId",
+    "paymentId",
+    "amount"
+  ],
   "orderStatuses": {
     "CREATED": "ордер создан, не оплачен",
     "PAID": "ордер оплачен",
@@ -100,14 +121,39 @@
     "RECONCILED": "операция сверена"
   },
   "statusLevelNote": "status.value строго на своём уровне: ордер CREATED/PAID/REFUNDED/PARTIALLY_REFUNDED/CANCELED, операция (платёж/возврат) NEW/CONFIRMED/RECONCILED. Не смешивать статусы ордера, платежа и возврата.",
-  "statusSourceNote": "Значения сняты в docs/reference/vtb/01-smb-ecommerce-api.md (примеры и модели). Переход CREATED→CANCELED по истечении 20-минутного TTL — интерпретация мока [VERIFY]: явного статуса истечения в срезе нет.",
+  "statusSourceNote": "Значения сняты в документации ВТБ SMB E-commerce (примеры и модели). Переход CREATED→CANCELED по истечении 20-минутного TTL — интерпретация мока [VERIFY]: явного статуса истечения в срезе нет.",
   "callback": {
     "method": "POST",
     "contentType": "application/json",
-    "envelope": ["type", "object"],
-    "types": ["PAYMENT", "REFUND"],
-    "paymentObjectFields": ["paymentId", "paymentCode", "orderId", "orderCode", "createdAt", "description", "amount", "paymentData", "Status"],
-    "refundObjectFields": ["refundId", "paymentId", "paymentCode", "orderId", "orderCode", "createdAt", "amount", "status"],
+    "envelope": [
+      "type",
+      "object"
+    ],
+    "types": [
+      "PAYMENT",
+      "REFUND"
+    ],
+    "paymentObjectFields": [
+      "paymentId",
+      "paymentCode",
+      "orderId",
+      "orderCode",
+      "createdAt",
+      "description",
+      "amount",
+      "paymentData",
+      "Status"
+    ],
+    "refundObjectFields": [
+      "refundId",
+      "paymentId",
+      "paymentCode",
+      "orderId",
+      "orderCode",
+      "createdAt",
+      "amount",
+      "status"
+    ],
     "statusKeyQuirk": "В карточном примере платежа поле статуса — Status (заглавная), в примере возврата — status (строчные); это расхождение публичных примеров. Payload сохраняется и доставляется КАК ЕСТЬ, регистр ключа не нормализуется. Сценарий status-lowercase отдаёт СБП-вариант status у платежа для проверки парсеров.",
     "statusValues": {
       "CONFIRMED": "пример карты",
@@ -155,7 +201,13 @@
     "note": "POST /orders/preauth требует twoStageParams и отдельного разрешения банка; на стене доступность регулируется env-флагом."
   },
   "errorEnvelope": {
-    "shape": ["error", "error_description", "field", "hint", "doc"],
+    "shape": [
+      "error",
+      "error_description",
+      "field",
+      "hint",
+      "doc"
+    ],
     "note": "[FORK] публичный SMB-срез фиксирует HTTP-статусы, но не полную схему тела бизнес-ошибок; envelope {error, error_description} + DX {field, hint, doc} — явный мок-форк (по образцу errorCode-форка Сбера), не production-каталог ВТБ. OAuth-ошибки token endpoint следуют RFC 6749 §5.2."
   },
   "errorCodes": [
@@ -188,5 +240,6 @@
     "callback-подпись/ACK-код/расписание ретраев — в публичных SMB-доках отсутствуют, не выдумывать",
     "мульти-ресурсный Merchant-Authorization (одна политика: заголовок опционален)",
     "production auth URL и реальные тестовые креды банка"
-  ]
+  ],
+  "$upstreamNote": "Конспекты upstream-доки живут в приватном репозитории rucorp/mock-services-docs; в публичном репо — только официальные URL в docs/integration."
 }

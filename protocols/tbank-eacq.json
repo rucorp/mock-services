@@ -3,12 +3,12 @@
   "title": "Т-Банк Интернет-эквайринг (EACQ), Мультирасчёты (E2C), СБП, Рекурренты и acqapi",
   "version": "2026.10",
   "upstreamDocs": [
-    "docs/reference/tbank/01-payment-api.md",
-    "docs/reference/tbank/02-notifications-signature.md",
-    "docs/reference/tbank/03-payouts-and-deals.md",
-    "docs/reference/tbank/04-test-cards.md",
-    "docs/reference/tbank/05-mock-stand.md",
-    "docs/reference/tbank/06-ecosystem.md"
+    "mock-services-docs/docs/reference/tbank/01-payment-api.md",
+    "mock-services-docs/docs/reference/tbank/02-notifications-signature.md",
+    "mock-services-docs/docs/reference/tbank/03-payouts-and-deals.md",
+    "mock-services-docs/docs/reference/tbank/04-test-cards.md",
+    "mock-services-docs/docs/reference/tbank/05-mock-stand.md",
+    "mock-services-docs/docs/reference/tbank/06-ecosystem.md"
   ],
   "v2Methods": [
     "Init",
@@ -101,5 +101,20 @@
     "5586200071492075",
     "5000000000000553"
   ],
-  "errorCodes": ["0", "4", "7", "8", "13", "32", "86", "103", "501", "1051", "1054", "1057", "5000"]
+  "errorCodes": [
+    "0",
+    "4",
+    "7",
+    "8",
+    "13",
+    "32",
+    "86",
+    "103",
+    "501",
+    "1051",
+    "1054",
+    "1057",
+    "5000"
+  ],
+  "$upstreamNote": "Конспекты upstream-доки живут в приватном репозитории rucorp/mock-services-docs; в публичном репо — только официальные URL в docs/integration."
 }

@@ -3,9 +3,7 @@
 
 # Интеграция: ВТБ SMB E-commerce API через mock (10 минут)
 
-Мок воспроизводит **SMB E-commerce API** интернет-эквайринга ВТБ по двум локальным
-срезам: [REST API](../reference/vtb/01-smb-ecommerce-api.md) и
-[callback/тестированию](../reference/vtb/02-callbacks-and-testing.md).
+Мок воспроизводит **SMB E-commerce API** интернет-эквайринга ВТБ по официальной документации REST API и callback/тестирования.
 Это **не legacy RBS**: transport — JSON REST на versioned base
 `/openapi/smb/efcp/e-commerce/v1/`, авторизация — короткоживущий OAuth Bearer +
 `X-IBM-Client-Id`, суммы — десятичные рубли. Legacy-контракт

@@ -3,9 +3,7 @@
 
 # Интеграция: облачная касса OKassa (Первый ОФД) через mock (10 минут)
 
-Мок воспроизводит **облачную кассу OKassa** Первого ОФД по локальным срезам
-[API](../reference/first-ofd/01-okassa-api.md) и
-[тестового стенда/расхождений](../reference/first-ofd/02-test-and-open-issues.md):
+Мок воспроизводит **облачную кассу OKassa** Первого ОФД по официальной документации API и тестового стенда:
 тестовый контур `external-api-farm.1-ofd-test.ru`, `getToken` → `Bearer`-токен,
 **асинхронная очередь заявок на чек** `POST /api/external/queue/v1/transaction/{type}`
 с `requestId` и статусами `IN_PROGRESS`/`COMPLETED`/`ERROR`.

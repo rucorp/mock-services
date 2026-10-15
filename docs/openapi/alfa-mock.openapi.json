@@ -123,7 +123,7 @@
       },
       "OrderStatusExtendedResponse": {
         "type": "object",
-        "description": "getOrderStatusExtended.do: состояние, суммы авторизации/списания/возврата и код шлюза. Состав полей — интерпретация мока по требованию конспекта (docs/reference/alfa/01-payment-api.md).",
+        "description": "getOrderStatusExtended.do: состояние, суммы авторизации/списания/возврата и код шлюза. Состав полей — интерпретация мока по требованию конспекта (документации Альфа-Банк).",
         "allOf": [
           { "$ref": "#/components/schemas/OrderStatusResponse" },
           {

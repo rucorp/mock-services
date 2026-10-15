@@ -3,9 +3,8 @@
 
 # sber-mock — Сбербанк Ecom REST v1.1.11.1
 
-Третий внешний банк-адаптер Stage 2 (issue #81). Реализован по локальным
-конспектам [Ecom REST](../../docs/reference/sber/01-payment-api.md) и
-[callback/тестового контура](../../docs/reference/sber/02-callbacks-and-test.md).
+Третий внешний банк-адаптер Stage 2 (issue #81). Реализован по официальной
+документации Сбербанк Ecom REST и callback/тестового контура.
 Это новый Ecom JSON API, не legacy Secure Payments: `POST
 /ecomm/gw/partner/api/v1/*.do`, `userName`/`password` в теле каждого вызова,
 регистрация → `formUrl` → hosted-форма/ACS → серверная сверка
@@ -55,8 +54,8 @@ REST-тело — JSON UTF-8 (`Content-Type: application/json`), валюта т
 `errorCode=0` означает, что обработан конкретный REST-вызов, а не то, что
 платёж успешен. Источник истины по заказу — числовой `orderStatus` 0…6;
 `actionCode`/`actionCodeDescription` описывают результат/причину операции и не
-подменяют состояние заказа. Состояния и переходы сведены в
-[конспекте протокола](../../docs/reference/sber/01-payment-api.md).
+подменяют состояние заказа. Состояния и переходы — по официальной
+документации протокола.
 
 ## Callback Ecom
 

@@ -8,8 +8,8 @@
 платёжной формой, подписанными нотификациями и админ-консолью. Профиль
 `plain` (по умолчанию) моделирует обычный эквайринг; `multisplit` добавляет
 обязательные поля и балансовые правила Мультирасчётов. Исследовательская база —
-`docs/reference/lovii/RES-007-tbank-multisplit-mock-stand.md`; публичные
-конспекты — `docs/reference/tbank/*`.
+`внутренних материалов lovii (приватный mock-services-docs)`; публичные
+конспекты — `документации Т-Банка*`.
 
 Node.js >= 18; внешние npm-зависимости не нужны. Сервер использует общий модуль
 `packages/core` для HTTP, персистентности, sandbox и защитных helpers.
@@ -84,7 +84,7 @@ TTL 3600 секунд (переопределяется `MOCK_ACQAPI_TOKEN_TTL_M
 на POST/GET/PATCH `/sm-register/register*`; произвольная строка Bearer, истёкший
 токен и запрос без Authorization возвращают 401.
 
-Регистрация требует полную JSON-схему из `docs/reference/tbank/03-payouts-and-deals.md`:
+Регистрация требует полную JSON-схему из `документации Т-Банка`:
 `shopArticleId` (латиница/цифры/`._-`, до 32 символов), `billingDescriptor`,
 `fullName`, `name`, `inn`, `kpp`, `ogrn`, непустые `addresses[]` (`type`, `zip`,
 `country` ISO-3, `city`, `street`), `ceo.phone`/`ceo.citizenship`,

@@ -21,7 +21,7 @@
    Любая новая зависимость — стоп и вопрос владельцу.
 2. **Протокольное поведение адаптеров** (форматы полей, коды ошибок, подписи,
    статусы) — не менять, если задача этого прямо не требует. Эталон:
-   `protocols/*.json` + `docs/reference/**`.
+   `protocols/*.json` + `внутренних конспектов (приватный mock-services-docs)**`.
 3. **Обратная совместимость self-hosted:** поведение без `MOCK_HOSTED`/токенов не
    меняется; `default`-песочница и её креды — тоже.
 4. **Никаких реальных секретов, PAN и ПДн** в коде, тестах, логах, примерах и fixtures.
@@ -32,14 +32,12 @@
 | Когда | Команда |
 |---|---|
 | **до** правок (зафиксировать зелёную базу) и **после** каждого PR | `npm test` |
-| тронуты `protocols/*.json`, маршруты/коды/статусы в `services/*/server.js`, `docs/reference/**` | `npm run check:drift` |
+| тронуты `protocols/*.json`, маршруты/коды/статусы в `services/*/server.js`, `внутренних конспектов (приватный mock-services-docs)**` | `npm run check:drift` |
 | тронуты `.md` в корне, `docs/`, `services/*/README.md`, `packages/core/README.md` | `npm run check:links` |
 | тронуты `index.html`, `_sidebar.md`, `site/**` или добавлен документ в `docs/` | `npm run check:site` |
 | тронуты env-переменные, `docker-compose*.yml`, `Dockerfile` | `npm run test:compose` и `node scripts/docker-smoke.js` |
-| тронут `docs/reference/external-links.md` или upstream-снапшот | `npm run check:upstream` |
-
 `npm test` = `test:core` + `test:tbank` + `test:kassa` + `test:yookassa` + `test:atol` +
-`test:upstream` + `check:links` + `check:site` + `check:drift` ([`package.json:8`](package.json)).
+`check:links` + `check:site` + `check:drift` ([`package.json:8`](package.json)).
 **`test:compose` и `test:docker` в `npm test` НЕ входят** — их прогоняет job `docker` в
 CI ([`.github/workflows/ci.yml:67-182`](.github/workflows/ci.yml)); локально они требуют Docker.
 Отчёт в PR обязан перечислить, какие прогоны выполнены и их финальные строки.
@@ -60,7 +58,7 @@ CI ([`.github/workflows/ci.yml:67-182`](.github/workflows/ci.yml)); локаль
 | Тесты | `services/<name>-mock/selftest.js`, [`packages/core/selftest.js`](packages/core/selftest.js) | self-contained, поднимают сервер на эфемерном порту |
 | Манифесты протоколов | `protocols/*.json` | ЮKасса намеренно без манифеста и OpenAPI — см. `services/yookassa-mock/README.md:209` |
 | OpenAPI 3.1 | `docs/openapi/*.openapi.json` | 3 файла |
-| Проверки | `scripts/*.js` | `check-protocol-drift.js`, `check-docs-links.js`, `compose-selftest.js`, `docker-smoke.js`, `sync-upstream.js` |
+| Проверки | `scripts/*.js` | `check-protocol-drift.js`, `check-docs-links.js`, `compose-selftest.js`, `docker-smoke.js` |
 | Контейнеры | `Dockerfile`, `docker-compose.yml`, `docker-compose.include.yml` | include — artifact потребителей, менять осторожно |
 | Документация продукта | `README.md`, `SECURITY.md`, `CHANGELOG.md`, `docs/{overview.md,integration,rfc,reference,openapi}` | внутренние документы — в закрытом `mock-services-docs` (§10) |
 | Сайт документации (GitHub Pages) | `index.html`, `_sidebar.md`, `site/theme.css`, `site/site.js` | docsify без сборки, вендоренные скрипты в `site/vendor/`; тема и плагины — только свои |
@@ -82,7 +80,7 @@ CI ([`.github/workflows/ci.yml:67-182`](.github/workflows/ci.yml)); локаль
    `CHANGELOG.md` и новые корневые файлы проверяются вручную.
 4. **Стиль:** CommonJS, 2 пробела, одинарные кавычки, комментарии по делу на русском с
    английскими терминами. Никакого «мусора» из других языков и случайных символов.
-5. **Ссылка на источник истины в каждом спорном месте:** `docs/reference/<provider>/…`
+5. **Ссылка на источник истины в каждом спорном месте:** `внутренних конспектов (приватный mock-services-docs)<provider>/…`
    с датой сверки; внутренний вывод помечать явным `[FORK]`/«документированный форк».
 
 ## 5. Env-переменные: правило пяти мест
@@ -102,7 +100,7 @@ CI ([`.github/workflows/ci.yml:67-182`](.github/workflows/ci.yml)); локаль
    принятой (именно так закрываются #8, #12, #15, #22, #33, #37, #43).
 4. Отчёт в описании PR — по схеме: **что сделано / что НЕ сделано / развилки и вопросы
    владельцу / риски и что осталось непроверенным / команды прогонов с их выводом.**
-5. Ссылки на `docs/reference/**` и коды ошибок — с указанием раздела доки.
+5. Ссылки на `внутренних конспектов (приватный mock-services-docs)**` и коды ошибок — с указанием раздела доки.
 6. Если задача `[DECISION]` — PR готовит **варианты**, а не решение владельца.
 7. Docs-only правки не трогают поведение сервисов; `npm test` прогоняется в любом случае.
 
@@ -145,7 +143,7 @@ CI ([`.github/workflows/ci.yml:67-182`](.github/workflows/ci.yml)); локаль
 |---|---|
 | любая правка кода | [`CONTRIBUTING.md`](CONTRIBUTING.md), внутренняя спека проекта[^spec] §2, §6.2 |
 | безопасность/hosted | [`SECURITY.md`](SECURITY.md), [`docs/rfc/RFC-001-multi-tenant-sandboxes.md`](docs/rfc/RFC-001-multi-tenant-sandboxes.md), пакет подготовки к аудиту[^audit-prep] §2, §4D |
-| протокол провайдера | `docs/reference/<provider>/**`, `protocols/<provider>.json`, `docs/integration/<provider>.md` |
+| протокол провайдера | официальная документация провайдера (URL + дата сверки; конспекты — в приватном mock-services-docs), `protocols/<provider>.json`, `docs/integration/<provider>.md` |
 | очередь доработок | «план доработок» — бриф[^brief] §0.1 (статусы), §9 (волны) |
 | аудит-партия | чек-лист аудит-партии[^audit-party] |
 

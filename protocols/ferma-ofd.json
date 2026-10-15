@@ -3,7 +3,7 @@
   "title": "ОФД Ферма (ofd.ru) — Облачная касса 54-ФЗ (ФФД 1.2)",
   "version": "2026.10",
   "upstreamDocs": [
-    "docs/reference/README-kassa-mock.md",
+    "mock-services-docs/docs/reference/README-kassa-mock.md",
     "docs/integration/ferma-ofd.md"
   ],
   "operations": [
@@ -74,12 +74,35 @@
     "marked_commodity",
     "marked_excise"
   ],
-  "paymentTypes": [1, 2, 3, 4, 5],
-  "ofdStatuses": ["pending", "sent", "rejected"],
+  "paymentTypes": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "ofdStatuses": [
+    "pending",
+    "sent",
+    "rejected"
+  ],
   "limits": {
     "tokenTtlHours": 12,
     "shiftMaxDurationHours": 24,
     "externalIdMaxLength": 36
   },
-  "errorCodes": [0, 4, 5, 10, 11, 12, 14, 57, 58, 62, 63]
+  "errorCodes": [
+    0,
+    4,
+    5,
+    10,
+    11,
+    12,
+    14,
+    57,
+    58,
+    62,
+    63
+  ],
+  "$upstreamNote": "Конспекты upstream-доки живут в приватном репозитории rucorp/mock-services-docs; в публичном репо — только официальные URL в docs/integration."
 }
