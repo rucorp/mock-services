@@ -143,7 +143,7 @@ CI ([`.github/workflows/ci.yml:67-182`](.github/workflows/ci.yml)); локаль
 |---|---|
 | любая правка кода | [`CONTRIBUTING.md`](CONTRIBUTING.md), внутренняя спека проекта[^spec] §2, §6.2 |
 | безопасность/hosted | [`SECURITY.md`](SECURITY.md), [`docs/rfc/RFC-001-multi-tenant-sandboxes.md`](docs/rfc/RFC-001-multi-tenant-sandboxes.md), пакет подготовки к аудиту[^audit-prep] §2, §4D |
-| протокол провайдера | `внутренних конспектов (приватный mock-services-docs)<provider>/**`, `protocols/<provider>.json`, `docs/integration/<provider>.md` |
+| протокол провайдера | официальная документация провайдера (URL + дата сверки; конспекты — в приватном mock-services-docs), `protocols/<provider>.json`, `docs/integration/<provider>.md` |
 | очередь доработок | «план доработок» — бриф[^brief] §0.1 (статусы), §9 (волны) |
 | аудит-партия | чек-лист аудит-партии[^audit-party] |
 
