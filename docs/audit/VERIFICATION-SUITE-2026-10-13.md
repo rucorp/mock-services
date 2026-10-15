@@ -33,24 +33,27 @@
 
 Исторические базлайны для сравнения:
 
-| ревизия | core | tbank | kassa | yookassa | atol | alfa | sber | vtb | first-ofd | kontur-ofd | upstream | links | drift |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `f89f76f` (до фиксов, база спец-аудита alfa) | 48 | PASSED | 141 | 227 | 202 | 287 | — | — | — | — | 11 | 69 | 316/316 |
-| `f6e7cf3e` = `4d70201` (волна #50) | **53** | PASSED | **149** | **235** | **210** | **295** | — | — | — | — | 11/0 | **72** | 316/316 |
-| `4edb30a6` (head PR #68, волна #51) | 57 | PASSED | 152 | 236 | 211 | 297 | — | — | — | — | 11/0 | 72 | 316/316 |
-| `97dcb71` (волна #51 смержена: #68 + docs #67/#69) | **57** | PASSED | **152** | **236** | **211** | **297** | — | — | — | — | 11/0 | **74** | 316/316 |
-| `8b3304b` (волна #52 смержена: squash #71) | **60** | PASSED | **161** | **245** | **220** | **305** | — | — | — | — | 11/0 | **74** | 316/316 |
-| `e8d9f93` (волна #53 смержена: squash #72) | **65** | PASSED | **161** | **245** | **220** | **307** | — | — | — | — | 11/0 | **74** | 316/316 |
-| `7471db5` (волна #60 смержена: squash #77) | **65** | PASSED | **161** | **245** | **220** | **337** | — | — | — | — | 11/0 | **74** | 316/316 |
-| `6fe35a4` (волна #58 смержена: squash #78) | **65** | PASSED | **161** | **246** | **220** | **360** | — | — | — | — | 11/0 | **74** | **324/324** |
-| `3f4dea2` (волна #81: sber-mock #84 + CI #85) | **65** | PASSED | **161** | **246** | **220** | **360** | **67** | — | — | — | 11/0 | **76** | **420/420** |
-| `1132955` (волна #87: vtb-mock #89) | **65** | PASSED | **161** | **246** | **220** | **360** | **67** | **72** | — | — | 11/0 | **78** | **521/521** |
-| `6b01501` (волна #92: first-ofd-mock #94) | **65** | PASSED | **161** | **246** | **220** | **360** | **67** | **72** | **94** | — | 11/0 | **80** | **644/644** |
-| `72627cd` (волна #97: kontur-ofd-mock #99) | **65** | PASSED | **161** | **246** | **220** | **360** | **67** | **72** | **94** | **109** | 11/0 | **82** | **732/732** |
-| `c4d5a82` (волна #98: owned-token приоритет #100) | **68** | PASSED | **161** | **246** | **224** | **364** | **67** | **81** | **103** | **109** | 11/0 | **82** | **732/732** |
-| `01254d7` (PD-02: env-квоты + глобальный бюджет #105) | **73** | PASSED | **161** | **246** | **224** | **371** | **67** | **81** | **103** | **109** | 11/0 | **82** | **732/732** |
-| `fcd3b05e` (MS-04: graceful shutdown #115) | **77** | PASSED | **166** | **246** | **224** | **371** | **67** | **81** | **104** | **109** | 11/0 | **82** | **732/732** |
-| `cc6761b` (MS-06: токены из query в заголовки/cookie #116) | **77** | PASSED | **167** | **246** | **224** | **371** | **67** | **81** | **104** | **109** | 11/0 | **82** | **732/732** |
+
+| ревизия | core | tbank | kassa | yookassa | atol | alfa | sber | vtb | first-ofd | kontur-ofd | taxcom | upstream | links | drift |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `f89f76f` (до фиксов, база спец-аудита alfa) | 48 | PASSED | 141 | 227 | 202 | 287 | — | — | — | — | — | 11 | 69 | 316/316 |
+| `f6e7cf3e` = `4d70201` (волна #50) | **53** | PASSED | **149** | **235** | **210** | **295** | — | — | — | — | — | 11/0 | **72** | 316/316 |
+| `4edb30a6` (head PR #68, волна #51) | 57 | PASSED | 152 | 236 | 211 | 297 | — | — | — | — | — | 11/0 | 72 | 316/316 |
+| `97dcb71` (волна #51 смержена: #68 + docs #67/#69) | **57** | PASSED | **152** | **236** | **211** | **297** | — | — | — | — | — | 11/0 | **74** | 316/316 |
+| `8b3304b` (волна #52 смержена: squash #71) | **60** | PASSED | **161** | **245** | **220** | **305** | — | — | — | — | — | 11/0 | **74** | 316/316 |
+| `e8d9f93` (волна #53 смержена: squash #72) | **65** | PASSED | **161** | **245** | **220** | **307** | — | — | — | — | — | 11/0 | **74** | 316/316 |
+| `7471db5` (волна #60 смержена: squash #77) | **65** | PASSED | **161** | **245** | **220** | **337** | — | — | — | — | — | 11/0 | **74** | 316/316 |
+| `6fe35a4` (волна #58 смержена: squash #78) | **65** | PASSED | **161** | **246** | **220** | **360** | — | — | — | — | — | 11/0 | **74** | **324/324** |
+| `3f4dea2` (волна #81: sber-mock #84 + CI #85) | **65** | PASSED | **161** | **246** | **220** | **360** | **67** | — | — | — | — | 11/0 | **76** | **420/420** |
+| `1132955` (волна #87: vtb-mock #89) | **65** | PASSED | **161** | **246** | **220** | **360** | **67** | **72** | — | — | — | 11/0 | **78** | **521/521** |
+| `6b01501` (волна #92: first-ofd-mock #94) | **65** | PASSED | **161** | **246** | **220** | **360** | **67** | **72** | **94** | — | — | 11/0 | **80** | **644/644** |
+| `72627cd` (волна #97: kontur-ofd-mock #99) | **65** | PASSED | **161** | **246** | **220** | **360** | **67** | **72** | **94** | **109** | — | 11/0 | **82** | **732/732** |
+| `c4d5a82` (волна #98: owned-token приоритет #100) | **68** | PASSED | **161** | **246** | **224** | **364** | **67** | **81** | **103** | **109** | — | 11/0 | **82** | **732/732** |
+| `01254d7` (PD-02: env-квоты + глобальный бюджет #105) | **73** | PASSED | **161** | **246** | **224** | **371** | **67** | **81** | **103** | **109** | — | 11/0 | **82** | **732/732** |
+| `fcd3b05e` (MS-04: graceful shutdown #115) | **77** | PASSED | **166** | **246** | **224** | **371** | **67** | **81** | **104** | **109** | — | 11/0 | **82** | **732/732** |
+| `cc6761b` (MS-06: токены из query в заголовки/cookie #116) | **77** | PASSED | **167** | **246** | **224** | **371** | **67** | **81** | **104** | **109** | — | 11/0 | **82** | **732/732** |
+| `822b2a3` (волна #112: taxcom-mock #118) | **77** | PASSED | **167** | **246** | **224** | **371** | **67** | **81** | **104** | **109** | **106** | 11/0 | **84** | **828/828** |
+
 
 Промежуточная `6d13b81` ≡ `e133a6b` (отчёты приняты): npm-срез отдельно не фиксировался (контроль пробами); `check:links` на ней — 71 файл (72 после CHANGELOG #65). Рост 72→74 на `97dcb71` — docs-PR #67/#69 (README prereg-бандла + VERIFICATION-SUITE). При потребности — пересчитать на месте.
 
@@ -70,7 +73,11 @@
 
 Базлайн `fcd3b05e` (MS-04, squash #115 — `installGracefulShutdown` на девяти сервисах (SIGTERM/SIGINT → sync flush → close → closeAllConnections → exit 0, fallback 1 с, идемпотентен) + контейнерный харденинг compose×3 (init/read_only/tmpfs /tmp/cap_drop ALL/no-new-privileges/pids_limit 256); независимый полный прогон SZ, exit 0) — поле-в-поле с сигналом: core **77** · tbank PASSED · kassa **166** · yookassa **246** · atol **224** · alfa **371** · sber **67** · vtb **81** · first-ofd **104** · kontur-ofd **109** · upstream **11/0** · links **82** · drift **732/732**. Между ревизиями PD-02 и MS-04 в main легли merged PR #113 (аудит-материалы SZ — только доки) и батч #114 (эхо request для StateCommandRequest и др.) — прирост selftest'ов (kassa +5, first-ofd +1, core +4) закреплён этим базлайном. Сводка — `wave115-fcd3b05e/` (проба + полный npm-test).
 
+
 Базлайн `cc6761b` (MS-06, squash #116 — миграция управляющих токенов из query в заголовки/cookie: `tokenMatches`/`checkControlAccess` — Bearer / `X-Mock-Admin-Token` (+легаси `X-Admin-Token`) / `X-Operator-Token` / cookie (`mock_admin_token`/`mock_operator_token`/`mock_sandbox_token`); query — non-hosted приём с WARN, hosted admin/operator fail-closed + hint, `sandbox_token` в owned fail-closed; `POST /admin/login` → 302 + `Set-Cookie` HttpOnly/SameSite=Strict; независимый полный прогон SZ, exit 0) — поле-в-поле с сигналом координатора: core **77** · tbank PASSED · kassa **167** · yookassa **246** · atol **224** · alfa **371** · sber **67** · vtb **81** · first-ofd **104** · kontur-ofd **109** · upstream **11/0** · links **82** · drift **732/732**. Дельты к `fcd3b05e`: kassa 166→**167** (+1 — cookie/login-регресс selftest kassa), прочие без изменений. Поверх сигнала в main ушли PR #117 (аудит-материалы SZ — доки) и #118 (Такском) — срез строго на ревизии сигнала `cc6761b`. Сводка — `wave116-cc6761b/` (проба + добивки + полный npm-test).
+
+Базлайн `822b2a3` (волна #112, squash #118 — десятый сервис `taxcom-mock` «Такском» read-only кабинет/ОФД API v2 на :3109: Login (Integrator-ID + [VERIFY]-форма), Session-Token TTL 300 с sliding на виртуальных часах, AccountList/NewDocuments (окно 10 суток, курсор по id, 3106/2203), write-путь не моделируется; независимый полный прогон SZ, exit 0) — базлайн GREEN, поверх сигнала мержей ещё не было: core **77** · tbank PASSED · kassa **167** · yookassa **246** · atol **224** · alfa **371** · sber **67** · vtb **81** · first-ofd **104** · kontur-ofd **109** · **taxcom 106** (новый selftest `services/taxcom-mock`) · upstream **11/0** · links **84** · drift **828/828**. Дельты к `fcd3b05e`: taxcom 0→106 (новый selftest), links 82→84 (`docs/integration/taxcom.md` + `docs/openapi/taxcom-mock.openapi.json`), drift 732→828 (+96 — `protocols/taxcom-ofd.json` в контуре `check:drift`); kassa 166→167 (cookie/login-регресс MS-06, учтён ещё в PR #119). Сводка — `wave118-822b2a3/` (проба + полный npm-test).
+
 
 ---
 
@@ -256,6 +263,7 @@
 
 Итог пробы: **26/26, 0 failed** (лог — `wave115-fcd3b05e/sz-wave115-probe-fcd3b05e.txt`; полный npm-test — `wave115-fcd3b05e/npm-test-fcd3b05e.txt`).
 
+
 ### 2.12. Токены из query в заголовки/cookie (MS-06, `cc6761b`)
 
 Транспорт: `sz-wave116-ms06-token-migration.js` (zero-dep, Node ≥ 18; 5 инстансов: tbank hosted-owned, tbank non-hosted с токеном `adm.eq=3x`, first-ofd owned, tbank hosted-namespaces, sber non-hosted) + добивки `sz-wave116-fixups.js`/`sz-wave116-fixups2.js`. Вердикт — по воспроизведённой пробе на ревизии сигнала `cc6761b` (squash #116). Уроки харнесса v1→v2/v3 (5 позиций переформулированы, не «провалены»; см. §6): в owned admission-слой закрывает `/admin` и `/admin/login` ДО логин-формы (Ф-5); формы с `_csrf` рендерятся только на реальных записях; в namespaces `POST /sandboxes` — switch-active (BC), не create.
@@ -278,6 +286,24 @@
 
 Итог пробы: **37 проверок суммарно: v1 23/28 (5 — причины харнесса, переформулированы в v2/v3), v2 7/8, v3 1/1 — все позиции чек-листа сигнала зелёные** (логи — `wave116-cc6761b/sz-wave116-probe-cc6761b.txt`, `sz-wave116-fixups-v2.txt`, `sz-wave116-fixups-v3.txt`; полный npm-test — `wave116-cc6761b/npm-test-cc6761b.txt`; stderr-срезы WARN — `wave116-cc6761b/stderr-*.txt`).
 
+### 2.13. Taxcom-mock — пробный проход волны #112 (новый 10-й сервис, :3109)
+
+
+Транспорт: `sz-wave118-taxcom-readonly.js` (zero-dep, Node ≥ 18; 4 инстанса: namespaces / hosted-owned c квотой 30 / hosted-namespaces / state-file). Предрегистрация DoD — в шапке пробы, сформулирована по коду `822b2a3` ДО прогона (сигнала в #62 к моменту старта ещё не было — проход по прямой команде оператора, PAT передан в руки). Запуск: `node docs/audit/sz-wave118-taxcom-readonly.js` из корня клона.
+
+| группа (чек-лист предрегистрации) | доказательство на `822b2a3` |
+|---|---|
+| C1. Session-Token header-only, fail-closed | ✅ валидный токен в query `?session-token=` → 401 (тот же токен заголовком — 200); дубликат заголовка → 401; case-вариант query → 401; hosted-owned: `/admin`, `/admin/journal`, `/mock/state`, `/mock/time` без токенов → 401; эха токена в телах/Location нет |
+| C2. Read-only граница | ✅ GET Login → 405, POST NewDocuments → 405, POST `/API/v2/Sell` → 404 «не моделируется»; admin-консоль без форм/действий; исходящих HTTP-вызовов в server.js нет (SSRF-поверхность отсутствует — статика) |
+| C3. [FORK] мульти-сессии и бюджет | ✅ три Login → три разных живых токена; namespaces — 40 логинов без квоты; owned (max=30): fixture 30 документов → Login **429** «Лимит сессий песочницы» (ядро `used>=max` ДО добавления сессии), fixture 29 → 200, вторая сессия → 429; после advance >TTL — reclaim и Login 200 |
+| C4. Секреты | ✅ журнал — шаблоны путей, без query/токенов/пароля/Integrator-ID; логи старта маскируют env-креды; `/mock/state` экспорт вычищает sessions; state-файл содержит живой маркер — по дизайну persist/restore, предупреждают README («Persist files содержат mock-маркеры/креды») и docs/integration («State files содержат маркеры») |
+| C5. Контракты десятого сервиса | ✅ `/openapi.json` = 16 путей (3 provider + 13 mock); compose :3109 с default bind 127.0.0.1 (`MOCK_TAXCOM_BIND_IP`), smoke/healthcheck/package.json включают taxcom; hosted-namespaces: query `sandbox_token` не даёт доступа к provider-API (401 по Session-Token — поведение Ф-3 #116) |
+
+**Находка владельцу — Ф-1 (minor, dx/диагностика): `createSandboxRuntime` в taxcom-mock вызывается без `log` — ядро по умолчанию глушит диагностику рантайма песочниц.** Сюда попадает WARN о приёме `sandbox_token` из query-строки (контракт Ф-3 из MS-06: «hosted-namespaces принимает query с WARN»), сбои persist/restore реестра, очистка child-state. Демонстрация D1: запрос `?sandbox_token=` в hosted-namespaces проходит молча (дельта stderr пуста), в 8/9 прежних адаптерах (tbank/kassa/yookassa/atol/alfa/sber/vtb/first-ofd) `log:` подключён (kassa/first-ofd — тегированный `console.error`, tbank — `ock]`-префикс). Фикс — одна строка `log: (m) => console.error('[taxcom-mock]', m)` в вызове runtime (kontur-ofd-mock вне среза этой волны, но разрыв там тот же — кандидат на отдельный хвост).
+
+Итог пробы: **22/22 (C1–C5 21/21 + демонстрация D1), 0 failed**; полный npm-test — EXIT=0 (§1). Расхождений с предрегистрацией нет.
+
+
 ---
 
 ## 3. Матрица волн — очередь и статусы
@@ -298,6 +324,8 @@
 | **PD-02** (#105) | расширение закрытой в #53 позиции: env-квота `MOCK_SANDBOX_MAX_STATE_BYTES` (9 адаптеров) + глобальный бюджет `MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES`; границы env (пусто/число/0/мусор), отказ на записи и импорте, откат, освобождение (remove/reset/TTL), кэш размеров, дефолт, owned+namespaces | `sz-wave105-pd02-state-bytes.js` (8 ног, 49/49) + npm-базлайн | ✅ **пробный проход** на `01254d7` (базлайн поле-в-поле с сигналом; находки владельцу Ф-1/Ф-2/Ф-3 — §2.10; логи — `docs/audit/tool-results/sz-prereg/wave105-01254d7/`) |
 | **MS-04** (#110/#115) | graceful shutdown (`installGracefulShutdown`: SIGTERM/SIGINT → sync flush → close → closeAllConnections → exit 0, fallback 1 с, идемпотентен) на девяти сервисах + compose-харденинг ×3 (init/read_only/tmpfs/cap_drop/no-new-privileges/pids_limit) | `sz-wave115-ms04-graceful-shutdown.js` (3 ноги, 26/26) + npm-базлайн | ✅ **пробный проход** на `fcd3b05e` (предрегистрация — DoD #110; базлайн поле-в-поле; docker-нога — CI (граница §7); логи — `docs/audit/tool-results/sz-prereg/wave115-fcd3b05e/`) |
 | **MS-06** (#111/#116) | миграция управляющих токенов из query в заголовки/cookie: `tokenMatches` (Bearer / `X-Mock-Admin-Token` / легаси `X-Admin-Token` / `X-Operator-Token` / cookie), hosted fail-closed query + hint, `POST /admin/login` → HttpOnly/SameSite=Strict cookie, `sandbox_token` cookie/owned-отказ, CSRF-контур цел | `sz-wave116-ms06-token-migration.js` (5 ног A–E, 5 инстансов) + добивки `fixups`/`fixups2` + npm-базлайн | ✅ **пробный проход** на `cc6761b` (базлайн поле-в-поле; находки владельцу Ф-1…Ф-5 — §2.12; логи — `docs/audit/tool-results/sz-prereg/wave116-cc6761b/`) |
+| **#112** | taxcom-mock (новый 10-й сервис, :3109): Login (Integrator-ID + [VERIFY]-форма), Session-Token TTL 300 sliding на виртуальных часах, [FORK] мульти-сессии, AccountList/NewDocuments (окно 10 суток, курсор по id, 3106/2203), read-only граница, секреты (журнал/логи/экспорт/диск), бюджет сессий в owned | `sz-wave118-taxcom-readonly.js` (5 групп C1–C5 + демонстрация D1, 22/22) + npm-базлайн | ✅ **пробный проход** на `822b2a3` (по прямой команде оператора — сигнала в #62 ещё не было; находка Ф-1 — runtime-лог заглушен; см. §2.13) |
+
 | core-хвост | PA-01 и не-alfa остаток партии A (PA-02…PA-33, PA-57, PA-59…PA-61) | DoD fix-PR + `npm test` (core) + точечные пробы | ⬜ по очереди владельца (§7 консолидированного отчёта) |
 
 ---
@@ -352,6 +380,7 @@
 - **Owned-проба #98 — уроки харнесса и контракта** (§2.9): (1) в hosted fail-closed owner-заголовок обязателен уже на `/getToken` — бизнес-токен очереди без owner не получить (ожидаемое поведение fail-closed, наблюдение владельцу ИНФО); (2) fallback-угол «только Bearer<owner-token>» проверять на `/mock/state`, не на бизнес-эндпоинте: там Bearer<owner> даёт 401 бизнес-слоя — это не отказ fallback; (3) «пустой/пробельный источник = отсутствует»: `X-Sandbox-Token: '  '` + валидный `X-Owner-Token` → 200; непустой источник затеняет последующие; (4) query-затенение: непустой Bearer затеняет query (401), пустой `Authorization: Bearer` — не затеняет (200, единообразие); (5) кросс-классы: Bearer-класс (first-ofd/vtb) — углы (а)/(h) 200 «после»; не-Bearer (atol) — X-Sandbox-Token без регресса; прирост 29 проверок npm-базлайна = DoD-проверки приоритета (core +3, atol +4, alfa +4, vtb +9, first-ofd +9).
 - **PD-02-проба #105 — уроки харнесса и контракта** (§2.10): (1) учёт байт — `Buffer.byteLength(JSON.stringify(rec.state))` с кэшем по версии записи; в пробах размер снимать по `GET /mock/state` (tbank — двойная обёртка `{sandbox, state:{…,state}}`, first-ofd — одноуровневая `{sandbox, state}`); (2) импорт = replace-снимок (Ф-3): пад добавлять в ПОЛНЫЙ снимок — иначе `mergeValidatedInto` удаляет ключи сервиса и бизнес-путь падает 5000 (counters undefined); (3) пад-арифметика `bytes({…snap, pad:'x'.repeat(n)}) = bytes({…snap, pad:''}) + n`; factory-состояния дрейфуют на ±1 байт (seed в `initialStateFactory`) — пад калибровать от фактического снимка, не переиспользовать между песочницами; границы надёжнее бинпоиском (max-пад → 200, +1 байт → 400 used==limit+1); (4) env-парсер `parseMsOr` — duration-парсер: `'1024'` → 1024 байта, но `'1h'` → 3600000 «байт» (молчаливое принятие единиц времени — наблюдение владельцу DX); пусто/мусор → fallback `null` → дефолт (8 МиБ при `maxDocuments>0`, иначе без лимита); `'-5'` → `Math.max(0,…)` → 0 (выключено); (5) глобальный бюджет — сумма по ВСЕМ песочницам включая default; выселение TTL ленивое (по доступу) + sweep раз в минуту — TTL в пробах держать с запасом к длительности ног.
 - **MS-04-проба #115 — уроки харнесса и контракта** (§2.11): (1) персистентная асимметрия: create песочницы — `persistRecord(rec, true)` немедленно, бизнес-записи — `scheduleRegistrySave(150 мс)`; SIGKILL в окне теряет только отложенные записи состояния — негатив-контроль строить вокруг бизнес-записи, не вокруг create; (2) порты из логов: три формата стартовой строки («on http://host:PORT», «listening on :PORT» — kontur, «on 127.0.0.1:PORT» — kassa) — единый regex `on (?:https?:\/\/)?[^\s:]*:(\d+)`; (3) compose-инвариант без docker: mini-парсер YAML (flow-массивы, комментарии вне кавычек, отступы 2/4) согласован с pyyaml на всех 19 сервисах — CI-jq воспроизводим без docker-окружения; (4) `createStore.persist` синхронный — default-состояние переживает SIGKILL; контраст «sync default / deferred registry» — встроенный контроль негативных ног.
+- **Taxcom-проба #112 — уроки харнесса и контракта** (§2.13): (1) в hosted-owned у каждой песочницы СВОИ креды (`freshCredentials` при создании) — Login в пробах только с `created.creds`; env-креды (`MOCK_TAXCOM_*`) действуют только на default-запись (симптом нарушения: 401 «Неизвестный Integrator-ID» на валидных env-кредах); (2) `POST /mock/time` в hosted-owned требует owner-заголовков (`X-Mock-Sandbox` + `X-Sandbox-Token`) — без них 401, часы не сдвигаются, и «неотпускающая» квота после advance — симптом молчаливо провалившегося advance (в пробах проверять статус advance явно); (3) OpenAPI taxcom документирует ПОЛНУЮ поверхность (16 путей = 3 provider + 13 mock), а не только провайдерскую — ассерция «только 3 пути» неверна; (4) `createSandboxRuntime` по умолчанию `log = () => {}` — адаптер без `log:` глушит WARN ядра (находка Ф-1 этого прохода); в пробах не полагаться на stderr-диагностику рантайма в taxcom/kontur-ofd; (5) fixture-импорт для квотных ног: `validFixture` требует строгую форму (ISO-даты `dateValue`, целые копейки, items) — генерировать фикстуру программно от `MOCK_VIRTUAL_CLOCK`, а не копировать демо-даты.
 
 ## 7. Что этот набор НЕ делает
 
