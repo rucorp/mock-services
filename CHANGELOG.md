@@ -118,6 +118,13 @@ SPDX-License-Identifier: Apache-2.0
   `createSandboxRuntime` в обоих адаптерах получил tagged `log:` — WARN о
   query-токенах и сбои persist/restore песочниц больше не теряются.
 
+### Changed
+- **Внутренняя ИС выведена в приватный репозиторий команды** (решение владельца, 2026-10-15):
+  из репозитория удалены каталоги `docs/audit/`, `docs/briefs/`, `docs/canon/` (аудиты, брифы
+  агентов, внутренние спеки) — они перенесены в приватный дом ИС проекта. Публичная
+  документация продукта: `README`, `docs/integration/`, `docs/openapi/`, `docs/reference/`,
+  док-сайт (`index.html`, `_sidebar.md`).
+
 ## [0.7.0] — 2026-10-14
 
 ### Added

@@ -1,3 +1,0 @@
-[sber-mock] sandboxes restored from /tmp/w-ms06/evidence/sber-plain-state.json.sandboxes.records: 0
-[WARN] Приём admin_token/operator_token из query-строки устарел. Используйте заголовки X-Mock-Admin-Token, X-Operator-Token, Authorization или cookie.
-[WARN] Приём admin_token/operator_token из query-строки устарел. Используйте заголовки X-Mock-Admin-Token, X-Operator-Token, Authorization или cookie.

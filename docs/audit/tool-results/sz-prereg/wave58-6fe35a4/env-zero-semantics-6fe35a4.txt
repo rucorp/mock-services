@@ -1,3 +1,0 @@
-[alfa-mock 2026-10-13 17:51:29] WARN MOCK_SESSION_TIMEOUT_SECS="0": срок меньше 1 с не определён — используется 1200
-[alfa-mock 2026-10-13 17:51:29] callbacks: GET + checksum HMAC-SHA256 (симметричный; асимметричный вне области — см. README) · retry 0ms x24 (ACK ровно 200; параметры ретраев PDF не задаёт — это mock-конфиг) · default none (jsonParams.callback_url или MOCK_DEFAULT_CALLBACK_URL)
-[alfa-mock 2026-10-13 17:51:29] two-stage=true (MOCK_TWO_STAGE) partial-refund=true ssl-permitted=false session_timeout=1200s terminal=ALFA-MOCK-1
