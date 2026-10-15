@@ -16,8 +16,8 @@
 - [m4tveevm/paygen](https://github.com/m4tveevm/paygen) (MIT) — генератор платёжных
   фикстур; содержит **OpenAPI «Массовые выплаты 1.46»** (`e2c/v2`, `a2c/sbp/v2`,
   GetAccountInfo v2/v3, привязка карт, сертификаты, GetOperationDetails,
-  getConfirmOperation). Зеркало: `openapi/tbank-payouts-openapi.json` в этом репо.
-  Готовая база для генерации мок-сервера (prism/wiremock).
+  getConfirmOperation). Зеркало — `openapi/tbank-payouts-openapi.json` в самом
+  репозитории paygen[^paygen]. Готовая база для генерации мок-сервера (prism/wiremock).
 
 ## SDK (по языкам)
 
@@ -59,3 +59,8 @@
 - Публичные страницы developer.tbank.ru не полны относительно PDF-док Мультисплита:
   мультисплит-параметры Init (PaymentRecipientId/CreateDealWithType) и весь e2c-контур
   описаны только в PDF (см. `docs/`).
+
+<!-- Документы вне публичного репозитория -->
+
+[^paygen]: https://github.com/m4tveevm/paygen — внешний публичный репозиторий; файл
+    `openapi/tbank-payouts-openapi.json` в mock-services не копировался.

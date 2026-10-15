@@ -4,10 +4,11 @@
 (`/v2/*`), та же Token-подпись, платёжная форма с тестовыми картами, подписанные
 http-нотификации с банковскими ретраями, книга сделок (SpAccumulation) и
 текстовая админ-консоль. Исследовательская база и выбор методов —
-`lovii_docs/artifacts/RES-007-tbank-multisplit-mock-stand.md`, публичные
-конспекты — `lovii-ru/lovii-docs` → `tbank/notes/`.
+[`RES-007`](lovii/RES-007-tbank-multisplit-mock-stand.md)[^res007]; конспекты
+провайдера — [`docs/reference/tbank/`](tbank/01-payment-api.md).
 
-Zero npm dependencies — чистый Node (>= 18), один файл `server.js`.
+Zero npm dependencies — чистый Node (>= 18), один файл
+[`services/tbank-mock/server.js`](../../services/tbank-mock/server.js).
 
 ## Зачем
 
@@ -101,3 +102,8 @@ TBANK_NOTIFICATION_URL=https://<домен ядра>/api/v1/payments/tbank/webho
 - Состояние в памяти (опционально — JSON-файл): рестарт контейнера сбрасывает сессии.
 - Мок должен быть недоступен из интернета; в production-контуре не включается
   (`TBANK_API_URL` боевой по умолчанию).
+
+<!-- Документы вне публичного репозитория -->
+
+[^res007]: Публичная версия — `docs/reference/lovii/RES-007-tbank-multisplit-mock-stand.md`;
+    рабочая копия с артефактами — в закрытом репозитории `mock-services-docs`.

@@ -5,7 +5,8 @@
 документации ofd.ru (Ferma), поэтому переключение стенда на боевую кассу —
 только смена `FERMA_API_URL` и кредов в `.env` ядра; код не меняется.
 
-Zero npm dependencies — чистый Node (>= 18), один файл `server.js`.
+Zero npm dependencies — чистый Node (>= 18), один файл
+[`services/kassa-mock/server.js`](../../services/kassa-mock/server.js).
 
 ## Контракт (по документации Ferma)
 
@@ -73,6 +74,11 @@ FERMA_CALLBACK_SECRET=<секрет>
 
 ## staging
 
-Сервис в `compose-core-staging-extras.yml` (профиль `mock`, порт 3101 на
-localhost), исходник синкуется в `/opt/lovii-core-staging/kassa-mock/`.
-Админ-консоль: `curl http://localhost:3101/admin` с сервера.
+Сервис в стенд-конфигурации платформы[^staging] (профиль `mock`, порт 3101 на
+localhost). Базовая конфигурация — [`docker-compose.include.yml`](../../docker-compose.include.yml);
+админ-консоль: `curl http://localhost:3101/admin` с сервера.
+
+<!-- Документы вне публичного репозитория -->
+
+[^staging]: `compose-core-staging-extras.yml` и путь `/opt/lovii-core-staging/kassa-mock/`
+    относятся к стенду платформы-потребителя и в этом репозитории не публикуются.

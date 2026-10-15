@@ -1,8 +1,7 @@
 # Конспект: сделка, выплаты (e2c) и регистрация партнёров (acqapi)
 
-Источники: `docs/multisplit.pdf` (описание продукта, 06.04.2026),
-`docs/vyplaty-multisplit.pdf` («Протокол A2C_V2», выплаты),
-`docs/api_reg_upd_multisplit.pdf` (регистрация, 16.06.2026). Конспект — неофициальный.
+Источники: первичные PDF банка[^pdf] (описание продукта 06.04.2026; «Протокол A2C_V2»
+по выплатам; регистрация партнёров 16.06.2026). Конспект — неофициальный.
 
 ## Сделка (Deal / SpAccumulation)
 
@@ -116,3 +115,9 @@ TLS-сертификат НУЦ Минцифры), **IP-whitelist** (acq_help@tb
    `disableReimbursement`, `paymentSystemAttributes` (mid/tid).
 4. **Обновление:** `PATCH /sm-register/register/{shopCode}` — банк-реквизиты для возмещения
    (`bankAccount.account/bankName/bik/details` обязательны при передаче блока) и др.
+
+<!-- Документы вне публичного репозитория -->
+
+[^pdf]: `docs/multisplit.pdf`, `docs/vyplaty-multisplit.pdf` («Протокол A2C_V2»),
+    `docs/api_reg_upd_multisplit.pdf` — первичные документы Т-Банка, публично не
+    размещаются; копии — во внутреннем `mock-services-docs`.

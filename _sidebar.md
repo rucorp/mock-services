@@ -1,33 +1,102 @@
-- [Главная](README.md)
+- **Обзор**
+  - [Карта документации](/docs/overview.md)
+  - [Быстрый старт](/README.md#Быстрый-старт)
+  - [Что уже умеет мок](/README.md#Что-уже-умеет-мок)
+  - [Дорожная карта](/README.md#Дорожная-карта)
+  - [Тестирование](/README.md#Тестирование)
 
-- **Банки — эквайринг**
-  - [Т-Банк](docs/integration/tbank-eacq.md)
-  - [ЮKassa](docs/integration/yookassa.md)
-  - [Альфа-Банк](docs/integration/alfa.md)
-  - [Сбербанк](docs/integration/sber.md)
-  - [ВТБ](docs/integration/vtb.md)
+- **Интеграция за 10 минут**
+  - Банки — эквайринг
+    - [Т-Банк](/docs/integration/tbank-eacq.md)
+    - [ЮKassa](/docs/integration/yookassa.md)
+    - [Альфа-Банк](/docs/integration/alfa.md)
+    - [Сбербанк](/docs/integration/sber.md)
+    - [ВТБ](/docs/integration/vtb.md)
+  - Кассы и ОФД
+    - [OFD Ferma](/docs/integration/ferma-ofd.md)
+    - [АТОЛ Онлайн](/docs/integration/atol.md)
+    - [Первый ОФД (OKassa)](/docs/integration/first-ofd.md)
+    - [Контур.ОФД](/docs/integration/kontur-ofd.md)
+    - [Такском](/docs/integration/taxcom.md)
+  - [Подключение к платформе Lovii](/docs/integration/lovii.md)
 
-- **Кассы и ОФД**
-  - [Ferma (ОФД)](docs/integration/ferma-ofd.md)
-  - [АТОЛ Онлайн](docs/integration/atol.md)
-  - [Первый ОФД (OKassa)](docs/integration/first-ofd.md)
-  - [Контур.ОФД](docs/integration/kontur-ofd.md)
-  - [Такском](docs/integration/taxcom.md)
+- **OpenAPI 3.1**
+  - Банки
+    - [Т-Банк](https://github.com/rucorp/mock-services/blob/main/docs/openapi/tbank-mock.openapi.json)
+    - [Альфа-Банк](https://github.com/rucorp/mock-services/blob/main/docs/openapi/alfa-mock.openapi.json)
+    - [Сбербанк](https://github.com/rucorp/mock-services/blob/main/docs/openapi/sber-mock.openapi.json)
+    - [ВТБ](https://github.com/rucorp/mock-services/blob/main/docs/openapi/vtb-mock.openapi.json)
+  - Кассы и ОФД
+    - [OFD Ferma](https://github.com/rucorp/mock-services/blob/main/docs/openapi/kassa-mock.openapi.json)
+    - [АТОЛ Онлайн](https://github.com/rucorp/mock-services/blob/main/docs/openapi/atol-mock.openapi.json)
+    - [Первый ОФД](https://github.com/rucorp/mock-services/blob/main/docs/openapi/first-ofd-mock.openapi.json)
+    - [Контур.ОФД](https://github.com/rucorp/mock-services/blob/main/docs/openapi/kontur-ofd-mock.openapi.json)
+    - [Такском](https://github.com/rucorp/mock-services/blob/main/docs/openapi/taxcom-mock.openapi.json)
 
-- **Примеры и справочники**
-  - [Пример: интеграция Lovii](docs/integration/lovii.md)
-  - [OpenAPI: Т-Банк](docs/openapi/tbank-mock.openapi.json)
-  - [OpenAPI: Альфа-Банк](docs/openapi/alfa-mock.openapi.json)
-  - [OpenAPI: Сбербанк](docs/openapi/sber-mock.openapi.json)
-  - [OpenAPI: ВТБ](docs/openapi/vtb-mock.openapi.json)
-  - [OpenAPI: Ferma](docs/openapi/kassa-mock.openapi.json)
-  - [OpenAPI: АТОЛ](docs/openapi/atol-mock.openapi.json)
-  - [OpenAPI: Первый ОФД](docs/openapi/first-ofd-mock.openapi.json)
-  - [OpenAPI: Контур.ОФД](docs/openapi/kontur-ofd-mock.openapi.json)
-  - [OpenAPI: Такском](docs/openapi/taxcom-mock.openapi.json)
+- **Справочники провайдеров**
+  - [О справочнике](/docs/reference/README-stage1-issue-6.md)
+  - Т-Банк
+    - [Приём платежей](/docs/reference/tbank/01-payment-api.md)
+    - [Нотификации и подпись](/docs/reference/tbank/02-notifications-signature.md)
+    - [Выплаты и сделки](/docs/reference/tbank/03-payouts-and-deals.md)
+    - [Тестовые карты](/docs/reference/tbank/04-test-cards.md)
+    - [Мок-стенд своими руками](/docs/reference/tbank/05-mock-stand.md)
+    - [Экосистема GitHub](/docs/reference/tbank/06-ecosystem.md)
+  - Альфа-Банк
+    - [Платёжный API](/docs/reference/alfa/01-payment-api.md)
+    - [Уведомления и подпись](/docs/reference/alfa/02-notifications-and-signature.md)
+    - [Тестовый контур и карты](/docs/reference/alfa/03-test-contour.md)
+  - Сбербанк
+    - [Платёжный API](/docs/reference/sber/01-payment-api.md)
+    - [Callback и тестовый контур](/docs/reference/sber/02-callbacks-and-test.md)
+  - ВТБ
+    - [SMB E-commerce API](/docs/reference/vtb/01-smb-ecommerce-api.md)
+    - [Callback и тестирование](/docs/reference/vtb/02-callbacks-and-testing.md)
+  - ЮKassa
+    - [Платежи и возвраты](/docs/reference/yookassa/01-payments-and-refunds.md)
+    - [Вебхуки](/docs/reference/yookassa/02-webhooks.md)
+    - [Тестовый режим](/docs/reference/yookassa/03-testing.md)
+  - АТОЛ Онлайн
+    - [API v4 и v5](/docs/reference/atol-online/01-api-v4-v5.md)
+    - [Callbacks и тестирование](/docs/reference/atol-online/02-testing-and-callbacks.md)
+  - Первый ОФД (OKassa)
+    - [API облачной кассы](/docs/reference/first-ofd/01-okassa-api.md)
+    - [Тестовый стенд и расхождения](/docs/reference/first-ofd/02-test-and-open-issues.md)
+  - Контур.ОФД
+    - [Доступ и авторизация](/docs/reference/kontur-ofd/01-auth-and-access.md)
+    - [Организации, кассы, документы](/docs/reference/kontur-ofd/02-document-retrieval.md)
+  - Такском
+    - [Авторизация и поиск данных](/docs/reference/taxcom/01-api-auth-and-discovery.md)
+    - [Документы и границы интеграции](/docs/reference/taxcom/02-documents-and-test-limits.md)
+  - [Официальные доки провайдеров](/docs/reference/external-links.md)
+  - Материалы волны 1
+    - [Стенд Т-Банка (мок)](/docs/reference/README-tbank-mock.md)
+    - [Мок кассы OFD Ferma](/docs/reference/README-kassa-mock.md)
+    - [Бриф: стенды на всех контурах](/docs/reference/lovii/2026-09-28-mock-tbank-stands-brief.md)
+    - [RES-007: Мультирасчёты и стенд](/docs/reference/lovii/RES-007-tbank-multisplit-mock-stand.md)
+
+- **Сервисы**
+  - [Ядро и общие модули](/packages/core/README.md)
+  - [tbank-mock](/services/tbank-mock/README.md)
+  - [kassa-mock (OFD Ferma)](/services/kassa-mock/README.md)
+  - [yookassa-mock](/services/yookassa-mock/README.md)
+  - [atol-mock](/services/atol-mock/README.md)
+  - [alfa-mock](/services/alfa-mock/README.md)
+  - [sber-mock](/services/sber-mock/README.md)
+  - [vtb-mock](/services/vtb-mock/README.md)
+  - [first-ofd-mock](/services/first-ofd-mock/README.md)
+  - [kontur-ofd-mock](/services/kontur-ofd-mock/README.md)
+  - [taxcom-mock](/services/taxcom-mock/README.md)
+
+- **Проект**
+  - [Изоляция песочниц (RFC-001)](/docs/rfc/RFC-001-multi-tenant-sandboxes.md)
+  - [Участие в проекте](/CONTRIBUTING.md)
+  - [Безопасность](/SECURITY.md)
+  - [Правила для ИИ-агентов](/AGENTS.md)
+  - [История изменений](/CHANGELOG.md)
 
 - **Ресурсы**
-  - [Репозиторий](https://github.com/rucorp/mock-services)
-  - [Релиз v0.7.0](https://github.com/rucorp/mock-services/releases/tag/v0.7.0)
-  - [Образ (GHCR)](https://github.com/rucorp/mock-services/pkgs/container/mock-services)
+  - [Репозиторий на GitHub](https://github.com/rucorp/mock-services)
+  - [Релизы](https://github.com/rucorp/mock-services/releases)
+  - [Образ в GHCR](https://github.com/rucorp/mock-services/pkgs/container/mock-services)
   - [Стенд одной командой](https://github.com/rucorp/mock-services/blob/main/docker-compose.staging.yml)

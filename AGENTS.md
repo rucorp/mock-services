@@ -34,18 +34,19 @@
 | **до** правок (зафиксировать зелёную базу) и **после** каждого PR | `npm test` |
 | тронуты `protocols/*.json`, маршруты/коды/статусы в `services/*/server.js`, `docs/reference/**` | `npm run check:drift` |
 | тронуты `.md` в корне, `docs/`, `services/*/README.md`, `packages/core/README.md` | `npm run check:links` |
+| тронуты `index.html`, `_sidebar.md`, `site/**` или добавлен документ в `docs/` | `npm run check:site` |
 | тронуты env-переменные, `docker-compose*.yml`, `Dockerfile` | `npm run test:compose` и `node scripts/docker-smoke.js` |
 | тронут `docs/reference/external-links.md` или upstream-снапшот | `npm run check:upstream` |
 
 `npm test` = `test:core` + `test:tbank` + `test:kassa` + `test:yookassa` + `test:atol` +
-`test:upstream` + `check:links` + `check:drift` ([`package.json:7`](package.json)).
+`test:upstream` + `check:links` + `check:site` + `check:drift` ([`package.json:8`](package.json)).
 **`test:compose` и `test:docker` в `npm test` НЕ входят** — их прогоняет job `docker` в
-CI ([`.github/workflows/ci.yml:43-93`](.github/workflows/ci.yml)); локально они требуют Docker.
+CI ([`.github/workflows/ci.yml:67-182`](.github/workflows/ci.yml)); локально они требуют Docker.
 Отчёт в PR обязан перечислить, какие прогоны выполнены и их финальные строки.
 
-Отдельной «документационной» job в CI нет: `check:links` и `check:drift` — шаги внутри job
-`test` ([`.github/workflows/ci.yml:37-40`](.github/workflows/ci.yml)), то есть битая ссылка
-краснит весь matrix `test` на трёх версиях Node.
+Отдельной «документационной» job в CI нет: `check:links`, `check:site` и `check:drift` — шаги
+внутри job `test` ([`.github/workflows/ci.yml:60-65`](.github/workflows/ci.yml)), то есть битая
+ссылка или сломанная навигация сайта краснит весь matrix `test` на трёх версиях Node.
 
 Тесты: без `sleep`-ожиданий и без фиксированных портов (`:0`), новые сценарии — новым
 пунктом selftest'а соответствующего сервиса, дефекты — регресс-тестом.
@@ -61,7 +62,8 @@ CI ([`.github/workflows/ci.yml:43-93`](.github/workflows/ci.yml)); локаль�
 | OpenAPI 3.1 | `docs/openapi/*.openapi.json` | 3 файла |
 | Проверки | `scripts/*.js` | `check-protocol-drift.js`, `check-docs-links.js`, `compose-selftest.js`, `docker-smoke.js`, `sync-upstream.js` |
 | Контейнеры | `Dockerfile`, `docker-compose.yml`, `docker-compose.include.yml` | include — artifact потребителей, менять осторожно |
-| Документация | `README.md`, `SECURITY.md`, `CHANGELOG.md`, `docs/{canon,integration,rfc,reference,audit,briefs}` | |
+| Документация продукта | `README.md`, `SECURITY.md`, `CHANGELOG.md`, `docs/{overview.md,integration,rfc,reference,openapi}` | внутренние документы — в закрытом `mock-services-docs` (§10) |
+| Сайт документации (GitHub Pages) | `index.html`, `_sidebar.md`, `site/theme.css`, `site/site.js` | docsify без сборки, вендоренные скрипты в `site/vendor/`; тема и плагины — только свои |
 
 ## 4. Формальные требования к файлам
 
@@ -141,8 +143,20 @@ CI ([`.github/workflows/ci.yml:43-93`](.github/workflows/ci.yml)); локаль�
 
 | Задача | Читать |
 |---|---|
-| любая правка кода | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`docs/canon/MOCK_SERVICES_SPEC.md`](docs/canon/MOCK_SERVICES_SPEC.md) §2, §6.2 |
-| безопасность/hosted | [`SECURITY.md`](SECURITY.md), [`docs/rfc/RFC-001-multi-tenant-sandboxes.md`](docs/rfc/RFC-001-multi-tenant-sandboxes.md), [аудит-преп](docs/audit/AUDIT-PREP-2026-10-12.md) §2, §4D |
+| любая правка кода | [`CONTRIBUTING.md`](CONTRIBUTING.md), внутренняя спека проекта[^spec] §2, §6.2 |
+| безопасность/hosted | [`SECURITY.md`](SECURITY.md), [`docs/rfc/RFC-001-multi-tenant-sandboxes.md`](docs/rfc/RFC-001-multi-tenant-sandboxes.md), пакет подготовки к аудиту[^audit-prep] §2, §4D |
 | протокол провайдера | `docs/reference/<provider>/**`, `protocols/<provider>.json`, `docs/integration/<provider>.md` |
-| очередь доработок | «план доработок» (бриф — во внутреннем репозитории `mock-services-docs`) §0.1 (статусы), §9 (волны) |
-| аудит-партия | [`docs/audit/CHECKLIST-audit-party.md`](docs/audit/CHECKLIST-audit-party.md) |
+| очередь доработок | «план доработок» — бриф[^brief] §0.1 (статусы), §9 (волны) |
+| аудит-партия | чек-лист аудит-партии[^audit-party] |
+
+## 10. Документы вне публичного репозитория
+
+Часть проектной документации живёт в закрытом репозитории `mock-services-docs`:
+внутренняя спека, бриф доработок, аудиты и чек-листы. Ссылки на такие документы
+оформляются **сноской** (имя документа без ссылки) — публичная часть репозитория
+самодостаточна, а сноска объясняет, откуда взят контекст.
+
+[^spec]: `docs/canon/MOCK_SERVICES_SPEC.md` — внутренняя спека mock-services (карточки SZ-095/SZ-096, T-038).
+[^audit-prep]: `docs/audit/AUDIT-PREP-2026-10-12.md` — пакет подготовки к глубокому аудиту, карта покрытия.
+[^brief]: `docs/briefs/CLAUDE-2026-10-12-agent-brief.md` — бриф доработок, статусы MS-01…MS-40 и волны.
+[^audit-party]: `docs/audit/CHECKLIST-audit-party.md` — регламент запуска аудит-партии.

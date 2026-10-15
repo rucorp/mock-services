@@ -11,7 +11,7 @@ SPDX-License-Identifier: Apache-2.0
 внятными подсказками «что не так в запросе и как это чинить».
 
 > Статус: **alpha (0.7.0)**. Репозиторий готовится к публикации:
-> см. [дорожную карту](#дорожную-карту).
+> см. [дорожную карту](#дорожная-карта).
 > Сегодня поддерживается: эквайринг Т-Банка (обычный + Мультирасчеты Wave 2, СБП QR, рекурренты `RebillId`/`Charge`, регистрация партнёров `acqapi`, чарджбэки e2e,
 > выплаты e2c, верификация AV), облачная касса OFD Ferma (полная матрица 54-ФЗ:
 > `sell`/`buy` + возвраты и коррекции с позиционным контролем, авансы/зачёты, маркировка Честный ЗНАК,
@@ -57,6 +57,25 @@ SPDX-License-Identifier: Apache-2.0
 [README сервиса](services/taxcom-mock/README.md). Такском зарегистрирован в корневом
 и внешнем compose (профиль `mock`); pinned GHCR-релиз новый адаптер ещё не содержит —
 публикация образа и pin отдельным решением владельца.
+
+## Документация
+
+Полный сайт документации: **<https://rucorp.github.io/mock-services/>**
+(офлайн-самодостаточный, собирается из этого репозитория). Точки входа:
+
+| Что нужно | Где |
+|---|---|
+| Карта документов и быстрый старт | [`docs/overview.md`](docs/overview.md) · сайт: `/docs/overview` |
+| Интеграция «за 10 минут» по провайдеру | [`docs/integration/`](docs/integration/) — таблица ниже |
+| Контракт сервиса и переменные окружения | [`services/<service>/README.md`](services/) |
+| OpenAPI 3.1 | [`docs/openapi/`](docs/openapi/) — интерактивно: `/openapi/<service>.json` |
+| Канонические доки провайдера (ссылки на первоисточники) | [`docs/reference/`](docs/reference/) |
+| Проектные решения | [`docs/rfc/`](docs/rfc/) — например, [RFC-001 «Изоляция песочниц»](docs/rfc/RFC-001-multi-tenant-sandboxes.md) |
+| Контрибуция, безопасность, правила для агентов | [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`SECURITY.md`](SECURITY.md) · [`AGENTS.md`](AGENTS.md) |
+| Что менялось между версиями | [`CHANGELOG.md`](CHANGELOG.md) |
+
+Навигация сайта описана в [`_sidebar.md`](_sidebar.md); проверка полноты и
+самодостаточности — `npm run check:site`.
 
 ## Зачем
 
@@ -119,19 +138,28 @@ URL кассы Ferma → `http://<хост>:3101/possystem/v1`; публичны
 `MOCK_OPERATOR_TOKEN`/`MOCK_ADMIN_TOKEN` **до** первого запуска и поднимите
 TLS-прокси — см. [`SECURITY.md`](SECURITY.md).
 
-Инструкции «интеграция за 10 минут»: [`docs/integration/tbank-eacq.md`](docs/integration/tbank-eacq.md)
-(эквайринг), [`docs/integration/ferma-ofd.md`](docs/integration/ferma-ofd.md)
-(касса/ОФД Ferma), [`docs/integration/yookassa.md`](docs/integration/yookassa.md)
-(ЮKassa), [`docs/integration/atol.md`](docs/integration/atol.md)
-(АТОЛ Онлайн v4), [`docs/integration/alfa.md`](docs/integration/alfa.md)
-(Альфа-Банк REST), [`docs/integration/sber.md`](docs/integration/sber.md)
-(Сбербанк Ecom REST), [`docs/integration/vtb.md`](docs/integration/vtb.md)
-(ВТБ SMB E-commerce API), [`docs/integration/first-ofd.md`](docs/integration/first-ofd.md)
-(Первый ОФД — облачная касса OKassa), [`docs/integration/kontur-ofd.md`](docs/integration/kontur-ofd.md)
-(Контур.ОФД — read/reconciliation), [`docs/integration/taxcom.md`](docs/integration/taxcom.md)
-(Такском — read-only кабинет/ОФД, API v2) и [`docs/integration/lovii.md`](docs/integration/lovii.md)
-(подключение как внешнего сервиса в платформу Lovii). Контракты и переменные окружения — в README каждого сервиса
-(`services/tbank-mock`, `services/kassa-mock`, `services/yookassa-mock`, `services/atol-mock`, `services/alfa-mock`, `services/sber-mock`, `services/vtb-mock`, `services/first-ofd-mock`). Для acqapi Т-Банка тестовые Basic-креды по умолчанию `partner:partner`, а регистрация точки требует полной схемы реквизитов из `docs/reference/tbank/03-payouts-and-deals.md`. Дефолты alfa-mock (`ALFAMOCKTEST`/`mockpass123`) — синтетические креды мока, а не реквизиты банка: реальные тестовые креды Альфа-Банк выдаёт индивидуально. Дефолты sber-mock (`SBERMOCKTEST`/`mockpass123`) также синтетические; тестовые креды Сбербанка merchant получает отдельно. Дефолты vtb-mock (`vtbmocktest`/`mockpass123`) — синтетические; настоящие тестовые `client_id`/`client_secret` ВТБ выдаёт merchant отдельно. Дефолты first-ofd-mock (`firstofdmocktest` + синтетический UUID-ключ) также синтетические: публичных тестовых login/API-ключей Первого ОФД нет — реквизиты выдаются в тестовом ЛК.
+Рецепты «интеграция за 10 минут» и контракты сервисов:
+
+| Провайдер | Сервис | Порт | Рецепт | Контракт |
+|---|---|---|---|---|
+| Т-Банк — эквайринг, Мультирасчеты Wave 2, СБП QR, рекурренты, `acqapi` | `tbank-mock` | 3100 | [`docs/integration/tbank-eacq.md`](docs/integration/tbank-eacq.md) | [`services/tbank-mock/README.md`](services/tbank-mock/README.md) |
+| ОФД Ferma — облачная касса, 54-ФЗ | `kassa-mock` | 3101 | [`docs/integration/ferma-ofd.md`](docs/integration/ferma-ofd.md) | [`services/kassa-mock/README.md`](services/kassa-mock/README.md) |
+| ЮKassa REST `/v3` | `yookassa-mock` | 3102 | [`docs/integration/yookassa.md`](docs/integration/yookassa.md) | [`services/yookassa-mock/README.md`](services/yookassa-mock/README.md) |
+| АТОЛ Онлайн direct API v4 | `atol-mock` | 3103 | [`docs/integration/atol.md`](docs/integration/atol.md) | [`services/atol-mock/README.md`](services/atol-mock/README.md) |
+| Альфа-Банк интернет-эквайринг REST | `alfa-mock` | 3104 | [`docs/integration/alfa.md`](docs/integration/alfa.md) | [`services/alfa-mock/README.md`](services/alfa-mock/README.md) |
+| Сбербанк Ecom REST | `sber-mock` | 3105 | [`docs/integration/sber.md`](docs/integration/sber.md) | [`services/sber-mock/README.md`](services/sber-mock/README.md) |
+| ВТБ SMB E-commerce API | `vtb-mock` | 3106 | [`docs/integration/vtb.md`](docs/integration/vtb.md) | [`services/vtb-mock/README.md`](services/vtb-mock/README.md) |
+| Первый ОФД — облачная касса OKassa | `first-ofd-mock` | 3107 | [`docs/integration/first-ofd.md`](docs/integration/first-ofd.md) | [`services/first-ofd-mock/README.md`](services/first-ofd-mock/README.md) |
+| Контур.ОФД — read/reconciliation | `kontur-ofd-mock` | 3108 | [`docs/integration/kontur-ofd.md`](docs/integration/kontur-ofd.md) | [`services/kontur-ofd-mock/README.md`](services/kontur-ofd-mock/README.md) |
+| Такском — read-only кабинет/ОФД, API v2 | `taxcom-mock` | 3109 | [`docs/integration/taxcom.md`](docs/integration/taxcom.md) | [`services/taxcom-mock/README.md`](services/taxcom-mock/README.md) |
+| Платформа Lovii (подключение стенда как внешнего сервиса) | — | — | [`docs/integration/lovii.md`](docs/integration/lovii.md) | [`docs/reference/lovii/`](docs/reference/lovii/) |
+
+Креды всех моков синтетические: `alfa-mock` (`ALFAMOCKTEST`/`mockpass123`),
+`sber-mock` (`SBERMOCKTEST`/`mockpass123`), `vtb-mock` (`vtbmocktest`/`mockpass123`)
+и `first-ofd-mock` (`firstofdmocktest` + UUID-ключ) — реквизиты мока, а не данные
+банка/ОФД, которые провайдер выдаёт индивидуально. Для `acqapi` Т-Банка тестовые
+Basic-креды по умолчанию `partner:partner`, а регистрация точки требует полной
+схемы реквизитов из [`docs/reference/tbank/03-payouts-and-deals.md`](docs/reference/tbank/03-payouts-and-deals.md).
 
 ### Контейнерный харденинг и graceful shutdown (MS-04)
 
@@ -180,11 +208,15 @@ services/
 scripts/
   compose-selftest.js    — black-box selftest против поднятого compose-стенда
 docs/
+  overview.md            — «Карта документации»: точка входа и таблицы провайдеров
   rfc/                   — проектные решения (RFC-001: изоляция песочниц)
   integration/           — инструкции «интеграция за 10 минут» + миграция Lovii
   openapi/               — OpenAPI 3.1 спецификации сервисов
   reference/             — референсы и документация адаптеров: `docs/reference/<provider>/`
                            (канонический каталог доки провайдера, см. CONTRIBUTING.md)
+site/                    — сайт документации (docsify без сборки): theme.css, site.js, вендорные скрипты
+index.html               — точка входа сайта документации (GitHub Pages)
+_sidebar.md              — навигация сайта документации
 .github/workflows/ci.yml — CI: selftest на Node 18/20/22 + compose-стенд + публикация GHCR
 Dockerfile               — образ для всех сервисов (выбор командой)
 docker-compose.include.yml — внешний compose-модуль (профиль mock) для интеграции в core
@@ -224,7 +256,7 @@ docker-compose.include.yml — внешний compose-модуль (профил
 | 16 | **Stage 2: второй внешний касса-адаптер — Первый ОФД (облачная касса OKassa API)** (#92): `POST /getToken` (`{login, pass}` — API-ключ UUID) → Bearer-токен на 24 ч виртуальных часов, асинхронная очередь `/api/external/queue/v1/transaction/{type}` (`receipt`/`receiptCorrection`/`openShift`/`closeShift`/`currentStateReport`) → `requestId`, строгие схемы `ReceiptRequest`/`ReceiptCorrectionRequest`/`StateCommandRequest` (без «универсального» объекта), операции `INCOME`/`INCOME_RETURN`/`EXPENCE`/`EXPENCE_RETURN` — написание **как в схеме**, статусы `IN_PROGRESS → COMPLETED\|ERROR` с раздельными слоями ошибок API/ККТ (`errorCode`/`errorType`/`details`/`payload`), сверка `transaction/{requestId}`, `status/{requestId}`, `statuses?externalId&groupId`, документы `/api/external/receipts` за период с пагинацией, unsigned callback на `requestMetadata.callbackUrl` (подпись/ACK/повторы не выдумываются, SSRF-политика ядра, сверка через статус), сценарии/часы/журнал/RFC-001-песочницы; `protocols/first-ofd-okassa.json` + drift, OpenAPI 3.1, `test:first-ofd` в `npm test`, compose + healthcheck :3107, гайд «за 10 минут». Расхождения среза (`requestMetadata` required vs optional, `items` массив vs объект, `http://` vs `https://` callback, квирк `getToken`, тег ATOL Online V5), идемпотентность `externalId` и production base не подтверждены — помечены [VERIFY]/[FORK] | ✅ Unreleased |
 | 17 | **Stage 2: десятый сервис — Такском, read-only кабинет/ОФД (API v2)** (#112): `POST /API/v2/Login` (заголовок `Integrator-ID`, тело — консервативная форма `{login, password}` с пометкой [VERIFY]: схема `Login_Request` публично не раскрыта) → временный marker в `Session-Token` с TTL **300 с sliding** на виртуальных часах и `401` по истечении; `GET /API/v2/AccountList` (договоры и права), `GET /API/v2/NewDocuments` (последние **10 суток**, не более **10 000** за вызов, сортировка по времени приёма, курсор по `id`, хвост → пустой ответ, ошибки **3106** «нет доступной ККТ» и **2203** «некорректный курсор»), типы: смены, состояние расчётов, чек, чек коррекции, БСО, БСО коррекции; write API не моделируется (405/404 с подсказкой), сценарии/часы/журнал/RFC-001-песочницы; `protocols/taxcom-ofd.json` + drift, OpenAPI 3.1, `test:taxcom` в `npm test`, compose (root + include) + healthcheck :3109, гайд «за 10 минут». Повторный Login выдаёт новый marker ([FORK] против формулировки среза), HTTP-статусы 3106/2203, имена полей и суммы в копейках — [FORK]/[VERIFY] | ✅ Unreleased |
 
-Детали, оценки и приоритеты — во внутреннем аудите проекта (материалы — в приватном репозитории команды).
+Детали, оценки и приоритеты — во внутреннем аудите проекта[^audit] (материалы — в закрытом репозитории команды).
 
 ## Тестирование
 
@@ -274,13 +306,10 @@ owner-token (знание id доступа не даёт), TTL и квотам�
 Issues и PR приветствуются: [`CONTRIBUTING.md`](CONTRIBUTING.md). Полезнее всего:
 расхождения с официальной докой провайдера (со ссылкой на раздел), новые
 сценарии отказов, новые адаптеры. Правила для ИИ-агентов — [`AGENTS.md`](AGENTS.md);
-внутренние материалы (аудиты, брифы, верификации) — в приватном репозитории команды.
+внутренние материалы (аудиты[^audit], брифы[^brief], верификации) — в закрытом
+репозитории команды `mock-services-docs`.
 
-## Лицензия
-
-Apache-2.0 (см. `LICENSE`, `NOTICE`). Протоколы провайдеров воспроизводятся
-по их публичной документации; товарные знаки принадлежат их владельцам и
-использованы только для обозначения совместимости.
+## Ограничения и лимиты
 
 ### Общий бюджет состояния песочниц (PD-02)
 
@@ -295,3 +324,14 @@ Apache-2.0 (см. `LICENSE`, `NOTICE`). Протоколы провайдеро�
 `kind: 'bytes'`, без частичного применения отклонённого состояния.
 См. [байтовые квоты ядра](packages/core/README.md#байтовые-квоты-песочниц-pd-02-74)
 и env-таблицы сервисов.
+
+## Лицензия
+
+Apache-2.0 (см. `LICENSE`, `NOTICE`). Протоколы провайдеров воспроизводятся
+по их публичной документации; товарные знаки принадлежат их владельцам и
+использованы только для обозначения совместимости.
+
+<!-- Внутренние документы: закрытый репозиторий команды `mock-services-docs` -->
+
+[^audit]: `docs/audit/AUDIT-2026-10-08.md` — аудит репозитория перед публикацией (находки, оценки, приоритеты).
+[^brief]: `docs/briefs/CLAUDE-2026-10-12-agent-brief.md` — бриф доработок: статусы MS-01…MS-40, очередь волн.
