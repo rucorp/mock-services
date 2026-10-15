@@ -9,13 +9,18 @@ name: CI
 # порты, ремапнутые в свободный диапазон 3910–3917 (см. env джоба): на
 # разделяемом self-hosted хосте порты 3100–3101 могут быть заняты, а публичный
 # URL следует за host-портом (MS-22).
-# Джоб `publish-ghcr` закреплён на `ubuntu-24.04` (публикация образа, без портов).
+# Джоб `publish-ghcr` — только по тегам `v*`, на `ubuntu-24.04` (публикация образа, без портов).
+# CI-политика (2026-10-15): полный гейт (матрица Node + docker) — на pull request с кодом
+# и на теги; при изменениях только документации — лёгкая job «Docs checks» (docs-checks.yml);
+# push в `main` — один Node (smoke); публикация образа — только по тегам.
 
 on:
   push:
     branches: [main]
     tags: ['v*']
+    paths-ignore: ['**.md', 'docs/**']
   pull_request:
+    paths-ignore: ['**.md', 'docs/**']
 
 jobs:
   test:
@@ -23,9 +28,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # MS-40: матрица на поддерживаемых LTS. Node 18 — EOL, снят с CI
-        # (код остаётся совместим с ≥18; минимум-политика — решение владельца).
-        node: ['20', '22', '24']
+        # MS-40: поддерживаемые LTS. CI-политика (2026-10-15): полная матрица —
+        # для PR с кодом и тегов `v*`; push в `main` — smoke на одном Node.
+        node: ${{ ((github.event_name == 'pull_request') || startsWith(github.ref, 'refs/tags/v')) && fromJSON('["20","22","24"]') || fromJSON('["22"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -57,16 +62,19 @@ jobs:
         run: npm run test:taxcom
       - name: проверка относительных ссылок документации
         run: npm run check:links
-      - name: проверка структуры сайта документации (ссылки сайдбара, самодостаточность)
-        run: npm run check:site
+      - name: шаблон гайдов интеграции и README ↔ services/*
+        run: npm run check:guides
       - name: реестр markdown-таблиц (docs/tables.md)
         run: npm run check:tables
       - name: env-контракт сервисов (правило пяти мест, AGENTS.md §5)
         run: npm run check:env
+      - name: лицензионные шапки документов (R-01)
+        run: npm run check:copyright
       - name: детектор дрейфа протоколов и OpenAPI 3.1
         run: npm run check:drift
 
   docker:
+    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
     env:
       # Порт-ремап в свободный диапазон: на разделяемом self-hosted хосте
@@ -185,7 +193,7 @@ jobs:
   publish-ghcr:
     name: Публикация образа в GHCR
     needs: [test, docker]
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
       contents: read

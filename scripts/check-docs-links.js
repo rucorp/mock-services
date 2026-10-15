@@ -7,21 +7,19 @@
  *
  * Конспекты адаптеров живут в приватном репозитории `mock-services-docs` (см. CONTRIBUTING.md),
  * и все относительные ссылки между доками обязаны разрешаться в существующие файлы.
- * Скрипт обходит *.md (корень, docs/, services/, packages/), навигацию сайта
- * (`_sidebar.md`) и «сноски на документы вне публичного репозитория».
+ * Скрипт обходит *.md (корень, docs/, services/, packages/) и «сноски на документы
+ * вне публичного репозитория».
  *
  * Проверяется:
  *   1. каждая относительная ссылка `[текст](путь)` / `![](путь)` ведёт в существующий
  *      файл (якоря `#...` отбрасываются; http(s):/mailto: пропускаются; путь от корня
- *      сайта, начинающийся с `/`, разрешается от корня репозитория — так устроен
- *      `_sidebar.md` для docsify);
+ *      сайта, начинающийся с `/`, разрешается от корня репозитория);
  *   2. GFM-сноски согласованы: у каждой ссылки `[^id]` есть определение `[^id]: …`
  *      и на каждое определение есть ссылка (стандарт: документы вне публичного
  *      периметра оформляются сноской, а не битой ссылкой);
  *   3. якоря `file.md#anchor` / `#anchor` существуют: слаг считается как на GitHub
  *      (строчные буквы, без пунктуации, пробелы — дефисы, дубли — «-1»), потому что
- *      документы читают и на GitHub, и на сайте — см. `scripts/check-site.js`,
- *      где отдельно проверяются слаги навигации сайта (`_sidebar.md`, нотация docsify);
+ *      документы читают и на GitHub, и на сайте;
  *   4. ни один документ, вынесенный из репозитория, не упоминается ссылкой.
  *
  *   node scripts/check-docs-links.js     # 0 — все ссылки живы
@@ -34,12 +32,12 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 const SCAN_DIRS = ['docs', 'services', 'packages'];
-const ROOT_FILES = ['README.md', 'CONTRIBUTING.md', 'SECURITY.md', 'AGENTS.md', 'CHANGELOG.md', '_sidebar.md'];
+const ROOT_FILES = ['README.md', 'CONTRIBUTING.md', 'SECURITY.md', 'AGENTS.md', 'CHANGELOG.md'];
 const LINK_RE = /\[[^\]]*\]\(([^)\s]+)\)/g;
 const FOOTNOTE_REF_RE = /\[\^([^\]\s]+)\](?!:)/g;
 const FOOTNOTE_DEF_RE = /^\s*\[\^([^\]\s]+)\]:/gm;
 
-/* Слаг заголовка в нотации GitHub (docsify считает иначе — проверяется отдельно). */
+/* Слаг заголовка в нотации GitHub. */
 function githubSlug(text) {
   return text
     .replace(/`([^`]*)`/g, '$1')
@@ -90,7 +88,6 @@ function mdFiles(dir) {
 function checkLinks(file) {
   const problems = [];
   const text = fs.readFileSync(file, 'utf8');
-  const isSidebar = path.basename(file) === '_sidebar.md';
   const isMarkdownFile = file.endsWith('.md');
 
   for (const match of text.matchAll(LINK_RE)) {
@@ -115,8 +112,6 @@ function checkLinks(file) {
     }
     if (!isMarkdownFile || !anchor || anchor.startsWith('?id=')) continue;
 
-    /* _sidebar.md — навигация сайта: там слаги docsify (их проверяет check-site.js) */
-    if (isSidebar) continue;
 
     const anchors = resolved.endsWith('.md') ? fileAnchors(resolved) : [];
     if (!anchors.length) continue;
