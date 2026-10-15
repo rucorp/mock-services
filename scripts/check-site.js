@@ -171,17 +171,25 @@ for (const match of sidebarText.matchAll(/\]\(([^)]+)\)/g)) {
   }
 }
 
-/* ---------- 5. Guides continue to satisfy the existing authoring template ---------- */
-const GUIDE_EXEMPT = new Map([
-  ['docs/integration/lovii.md', 'подключение внешней платформы, а не протокол провайдера'],
-]);
-const integrationDir = path.join(ROOT, 'docs', 'integration');
-const guides = fs.readdirSync(integrationDir, { withFileTypes: true })
+/* ---------- 5. Гайды интеграции: единый шаблон ---------- */
+
+/*
+ * Шаблон гайда «Интеграция за 10 минут» зафиксирован в CONTRIBUTING.md
+ * (раздел «Гайды интеграции: шаблон»). Линтер требует от каждого
+ * провайдерского гайда в `docs/integration/`:
+ *   1. нумерованные `## N.`-разделы без пропусков и дублей (1..N);
+ *   2. раздел «Что мок проверяет за вас» (или «Известные отличия …»);
+ *   3. раздел «Ссылки» — контракт сервиса, OpenAPI, манифест протокола;
+ *   4. ссылку на README сервиса (`services/<name>-mock/README.md`).
+ * Все гайды в `docs/integration/` описывают протокол провайдера и следуют
+ * шаблону; исключений нет.
+ */
+
+const integrationGuides = fs.readdirSync(path.join(ROOT, 'docs', 'integration'), { withFileTypes: true })
   .filter((entry) => entry.isFile() && entry.name.endsWith('.md'))
   .map((entry) => `docs/integration/${entry.name}`);
 
-for (const guide of guides) {
-  if (GUIDE_EXEMPT.has(guide)) continue;
+for (const guide of integrationGuides) {
   const text = read(guide);
   const numbers = [...text.matchAll(/^##\s+(\d+)\.\s+\S/gm)].map((match) => Number(match[1]));
   if (!numbers.length) problems.push(`${guide}: нет нумерованных разделов «## 1. …»`);

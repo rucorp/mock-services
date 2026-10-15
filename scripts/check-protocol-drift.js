@@ -9,7 +9,7 @@
  * Детектор дрейфа протоколов (Protocol Drift Checker, спека §10):
  * сверяет декларативные манифесты протоколов (`protocols/*.json`),
  * спецификации OpenAPI 3.1 (`docs/openapi/*.openapi.json`),
- * эталонные выжимки документации (`внутренних конспектов (приватный mock-services-docs)**`) и фактическую
+ * конспекты провайдеров (приватный `mock-services-docs`) и фактическую
  * реализацию в `services/tbank-mock/server.js`, `services/kassa-mock/server.js`,
  * `services/atol-mock/server.js`, `services/alfa-mock/server.js`,
  * `services/sber-mock/server.js`, `services/vtb-mock/server.js`,
@@ -49,7 +49,7 @@ function main() {
     }
   }
 
-  // 1. Проверка Т-Банк (tbank-eacq.json <-> server.js <-> tbank-mock.openapi.json <-> документации Т-Банка*)
+  // 1. Проверка Т-Банк (tbank-eacq.json <-> server.js <-> tbank-mock.openapi.json <-> конспект Т-Банка в приватном mock-services-docs)
   const tbankManifest = readJson('protocols/tbank-eacq.json');
   const tbankServerCode = readText('services/tbank-mock/server.js');
   const tbankOpenApi = readJson('docs/openapi/tbank-mock.openapi.json');
@@ -87,7 +87,7 @@ function main() {
     assertCheck('tbank:test-card', pan, inServer, inServer ? 'тестовая карта поддерживается' : 'карта не найдена в server.js');
   }
 
-  // 2. Проверка ОФД Ферма (ferma-ofd.json <-> server.js <-> kassa-mock.openapi.json <-> внутренних конспектов (приватный mock-services-docs)*)
+  // 2. Проверка ОФД Ферма (ferma-ofd.json <-> server.js <-> kassa-mock.openapi.json <-> конспект Ferma в приватном mock-services-docs)
   const fermaManifest = readJson('protocols/ferma-ofd.json');
   const kassaServerCode = readText('services/kassa-mock/server.js');
   const kassaOpenApi = readJson('docs/openapi/kassa-mock.openapi.json');

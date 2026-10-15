@@ -4,6 +4,7 @@ data/
 .env
 .DS_Store
 **/.DS_Store
+.zcode/
 /dist/
 /dist-root/
 /site-build/node_modules/

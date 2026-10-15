@@ -89,24 +89,25 @@ MOCK_FERMA_LOGIN=loviitest MOCK_FERMA_PASSWORD=mockpass123 node services/kassa-m
 npm run test:kassa
 ```
 
-## Подключение lovii-core
+## Подключение своего приложения к моку
 
-В `.env` ядра:
+Приложение ходит в мок как в боевую кассу Ferma: укажите в конфигурации базовый
+URL мока и креды стенда (внутри docker-сети сервис доступен как
+`http://kassa-mock:3101`):
 
 ```env
-FISCALIZATION_ENABLED=true
-FISCALIZATION_PROVIDER=ferma            # не mock: тот же FermaProvider, что в бою
-FERMA_API_URL=http://kassa-mock:3101    # внутри docker-сети
+FERMA_API_URL=http://kassa-mock:3101   # или http://localhost:3101 с хоста
 FERMA_LOGIN=loviitest
 FERMA_PASSWORD=mockpass123
 FERMA_GROUP=Main
-FERMA_CALLBACK_URL=https://<домен ядра>/api/v1/fiscal/callback?secret=<FERMA_CALLBACK_SECRET>
-FERMA_CALLBACK_SECRET=<секрет>
+FERMA_CALLBACK_URL=https://<ваш домен>/api/v1/fiscal/callback
 ```
 
-Код ядра не меняется: `FermaFiscalProvider` ходит в мок как в боевую кассу,
-результат приходит callback'ом (проверка секрета — в `FiscalCallbackController`,
-заголовок `X-Lovii-Signature` ИЛИ `?secret=`).
+Клиент не меняется: результаты документов приходят callback'ом на
+`callback_url` из запроса (ретраи как у Ferma), чек покупателю доступен по
+ссылке `ofd_receipt_url`. Имена переменных в вашем приложении могут
+отличаться — важен контракт. Пошаговая цепочка curl — в
+[гайде «за 10 минут»](../../docs/integration/ferma-ofd.md).
 
 ## Конфиг (env)
 

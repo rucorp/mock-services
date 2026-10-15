@@ -8,8 +8,8 @@
 платёжной формой, подписанными нотификациями и админ-консолью. Профиль
 `plain` (по умолчанию) моделирует обычный эквайринг; `multisplit` добавляет
 обязательные поля и балансовые правила Мультирасчётов. Исследовательская база —
-`внутренних материалов lovii (приватный mock-services-docs)`; публичные
-конспекты — `документации Т-Банка*`.
+конспекты провайдеров в приватном репозитории `mock-services-docs`; публичный
+источник — официальная документация Т-Банка.
 
 Node.js >= 18; внешние npm-зависимости не нужны. Сервер использует общий модуль
 `packages/core` для HTTP, персистентности, sandbox и защитных helpers.
@@ -35,23 +35,21 @@ MOCK_TERMINAL_KEY=TBANKMOCKTEST MOCK_TERMINAL_PASSWORD=mockpass123 node services
 npm run test:tbank
 ```
 
-## Подключение lovii-core к моку
+## Подключение своего приложения к моку
 
-В `.env` ядра (локально — уже так, на staging — при включении стенда):
+Приложение ходит в мок как в банк: укажите в конфигурации базовый URL мока и
+креды стенда (внутри docker-сети сервис доступен как `http://tbank-mock:3100`):
 
 ```env
-PAYMENTS_ENABLED=true
-PAYMENTS_FAKE=false                 # мок идёт через НАСТОЯЩИЙ TBankClient
-TBANK_API_URL=http://tbank-mock:3100/v2   # внутри docker-сети; локально с хоста: http://localhost:3100/v2
-TBANK_TERMINAL_KEY=TBANKMOCKTEST    # те же ключи видит мок
+TBANK_API_URL=http://tbank-mock:3100/v2   # или http://localhost:3100/v2 с хоста
+TBANK_TERMINAL_KEY=TBANKMOCKTEST          # те же ключи видит мок
 TBANK_TERMINAL_PASSWORD=mockpass123
-TBANK_NOTIFICATION_URL=https://<домен ядра>/api/v1/payments/tbank/webhook
+TBANK_NOTIFICATION_URL=https://<ваш домен>/api/v1/payments/tbank/webhook
 ```
 
-Код ядра не меняется: `TBankClient` ходит в мок как в банк, вебхуки приходят
-снаружи, подпись проверяется по-настоящему (`HandleTBankNotificationAction`).
-Внутрипроцессный `FakeTBankClient` (`PAYMENTS_FAKE=true`) остаётся для
-дешёвых локальных прогонов без HTTP.
+Клиент не меняется: запросы подписываются `Token` (sha256) как в бою,
+нотификации приходят снаружи и проверяются по-настоящему. Пошаговая цепочка
+curl — в [гайде «за 10 минут»](../../docs/integration/tbank-eacq.md).
 
 ## API мока
 
