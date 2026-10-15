@@ -1,0 +1,1361 @@
+/* © 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Оформление сайта документации: три колонки, светлая/тёмная тема,
+ * типографика для длинного чтения. Внешних CDN нет — только системные шрифты.
+ * Разметку страницы генерирует docsify (main/aside/content/markdown-section),
+ * служебные узлы (оглавление, хлебные крошки, кнопка «копировать») — site/site.js.
+ */
+
+/* ============================================================
+   1. Токены темы
+   ============================================================ */
+
+:root {
+  color-scheme: light;
+
+  /* Геометрия */
+  --header-h: 3.6rem;
+  --sidebar-w: 19rem;
+  --toc-w: 16.5rem;
+  --content-w: 50rem;
+  --radius-sm: 4px;
+  --radius: 8px;
+
+  /* Светлая тема */
+  --bg: #ffffff;
+  --bg-subtle: #f7f8fa;
+  --bg-code: #f6f7f9;
+  --bg-sidebar: #f8f9fb;
+  --bg-header: rgba(255, 255, 255, 0.86);
+  --surface: #ffffff;
+  --border: #e4e7ec;
+  --border-strong: #ccd1da;
+
+  --text: #1c1f27;
+  --text-muted: #5c6675;
+  --text-faint: #8a93a1;
+
+  --primary: #673ab7;
+  --primary-hover: #56309b;
+  --primary-soft: #f2ecfd;
+  --accent: #ffb300;
+
+  --link: #6034ad;
+  --link-hover: #4a2585;
+  --mark: rgba(255, 179, 0, 0.32);
+
+  --code-text: #2f3542;
+  --quote-bg: #f7f8fa;
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --shadow: 0 6px 24px rgba(16, 24, 40, 0.09);
+  --shadow-lg: 0 18px 48px rgba(16, 24, 40, 0.16);
+
+  /* Типографика */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+    "Noto Sans", Arial, "Liberation Sans", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+  --font-size: 16px;
+  --line-height: 1.72;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #14161c;
+  --bg-subtle: #191c23;
+  --bg-code: #1d2029;
+  --bg-sidebar: #171a21;
+  --bg-header: rgba(20, 22, 28, 0.88);
+  --surface: #1a1d24;
+  --border: #272c37;
+  --border-strong: #39404e;
+
+  --text: #d7dce5;
+  --text-muted: #9aa4b4;
+  --text-faint: #737e8f;
+
+  --primary: #b39ddb;
+  --primary-hover: #cbb9ea;
+  --primary-soft: #241f33;
+  --accent: #ffca28;
+
+  --link: #c3aaf0;
+  --link-hover: #d9c8f7;
+  --mark: rgba(255, 202, 40, 0.24);
+
+  --code-text: #cdd4e0;
+  --quote-bg: #191c23;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 20px 52px rgba(0, 0, 0, 0.55);
+}
+
+/* ============================================================
+   2. База
+   ============================================================ */
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-padding-top: calc(var(--header-h) + 1rem);
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--font-size);
+  line-height: var(--line-height);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  overflow-wrap: break-word;
+}
+
+::selection {
+  background: var(--mark);
+}
+
+a {
+  color: var(--link);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--link-hover);
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Аккуратные скроллбары */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--text-faint);
+  background-clip: content-box;
+}
+
+/* ============================================================
+   3. Верхняя панель
+   ============================================================ */
+
+.site-header {
+  position: fixed;
+  inset: 0 0 auto 0;
+  z-index: 40;
+  height: var(--header-h);
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0 1.1rem;
+  background: var(--bg-header);
+  backdrop-filter: saturate(180%) blur(12px);
+  -webkit-backdrop-filter: saturate(180%) blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+
+.site-header__brand {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-weight: 600;
+  font-size: 0.98rem;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.site-header__brand:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.site-header__logo {
+  width: 1.6rem;
+  height: 1.6rem;
+  display: block;
+  border-radius: 6px;
+  flex: none;
+}
+
+.site-header__title-sub {
+  color: var(--text-faint);
+  font-weight: 500;
+  font-size: 0.85rem;
+  padding-left: 0.55rem;
+  margin-left: 0.2rem;
+  border-left: 1px solid var(--border);
+}
+
+.site-header__spacer {
+  flex: 1 1 auto;
+}
+
+.site-header__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.site-header__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  height: 2.1rem;
+  padding: 0 0.6rem;
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.site-header__link:hover {
+  background: var(--bg-subtle);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.site-header__link svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  fill: currentColor;
+}
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.1rem;
+  height: 2.1rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.theme-toggle:hover {
+  background: var(--bg-subtle);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.theme-toggle svg {
+  width: 1.1rem;
+  height: 1.1rem;
+  fill: currentColor;
+}
+
+.theme-toggle .theme-toggle__sun {
+  display: none;
+}
+
+[data-theme="dark"] .theme-toggle .theme-toggle__sun {
+  display: block;
+}
+
+[data-theme="dark"] .theme-toggle .theme-toggle__moon {
+  display: none;
+}
+
+/* ============================================================
+   4. Каркас: боковая навигация, контент, оглавление
+   ============================================================ */
+
+body > main {
+  padding-top: var(--header-h);
+}
+
+.sidebar {
+  position: fixed;
+  top: var(--header-h);
+  left: 0;
+  bottom: 0;
+  z-index: 30;
+  width: var(--sidebar-w);
+  padding: 1.25rem 0.9rem 2.5rem 1.1rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+  transition: transform 0.2s ease;
+}
+
+/* Логотип/название сайта в сайдбаре дублирует шапку — прячем. */
+.sidebar .app-name {
+  display: none;
+}
+
+.content {
+  margin-left: var(--sidebar-w);
+  padding: 2.2rem 2.5rem 5rem;
+  display: flex;
+  justify-content: center;
+}
+
+.markdown-section {
+  width: 100%;
+  max-width: var(--content-w);
+  min-width: 0;
+}
+
+/* Оглавление страницы (правая колонка) */
+.page-toc {
+  position: fixed;
+  top: calc(var(--header-h) + 2.2rem);
+  right: 1.5rem;
+  width: var(--toc-w);
+  max-height: calc(100vh - var(--header-h) - 5rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-left: 0.9rem;
+  border-left: 1px solid var(--border);
+  font-size: 0.83rem;
+  line-height: 1.55;
+}
+
+.page-toc__title {
+  margin: 0 0 0.6rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.page-toc__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.page-toc__list a {
+  display: block;
+  padding: 0.22rem 0.5rem;
+  margin-left: -0.5rem;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  border-left: 2px solid transparent;
+}
+
+.page-toc__list a:hover {
+  color: var(--primary-hover);
+  background: var(--bg-subtle);
+  text-decoration: none;
+}
+
+.page-toc__list a.is-active {
+  color: var(--primary);
+  font-weight: 600;
+  border-left-color: var(--primary);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.page-toc__list .page-toc__item--h3 a {
+  padding-left: 1.4rem;
+  font-size: 0.8rem;
+}
+
+/* Кнопка-гамбургер docsify */
+.sidebar-toggle {
+  position: fixed;
+  top: var(--header-h);
+  left: 0;
+  z-index: 35;
+  width: 2.6rem;
+  height: 2.6rem;
+  padding: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  border-radius: 0 0 var(--radius) 0;
+  background: var(--bg-sidebar);
+  cursor: pointer;
+}
+
+.sidebar-toggle-button {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 1.1rem;
+}
+
+.sidebar-toggle-button span {
+  display: block;
+  height: 2px;
+  background: var(--text-muted);
+  border-radius: 2px;
+}
+
+.mask {
+  display: none;
+  position: fixed;
+  inset: var(--header-h) 0 0 0;
+  z-index: 25;
+  background: rgba(16, 24, 40, 0.42);
+}
+
+body.close .mask {
+  display: block;
+}
+
+/* Прогресс загрузки */
+.progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 60;
+  height: 2px;
+  width: 0;
+  background: var(--primary);
+  opacity: 0;
+  transition: width 0.2s ease, opacity 0.4s ease;
+  pointer-events: none;
+}
+
+/* Кнопка «наверх» */
+.back-to-top {
+  position: fixed;
+  right: 1.5rem;
+  bottom: 1.5rem;
+  z-index: 20;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 2.6rem;
+  height: 2.6rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-muted);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+}
+
+.back-to-top.is-visible {
+  display: inline-flex;
+}
+
+.back-to-top:hover {
+  color: var(--primary);
+  border-color: var(--border-strong);
+  background: var(--primary-soft);
+}
+
+.back-to-top svg {
+  width: 1.2rem;
+  height: 1.2rem;
+  fill: currentColor;
+}
+
+/* ============================================================
+   5. Навигация в сайдбаре
+   ============================================================ */
+
+.sidebar-nav {
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.sidebar-nav ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sidebar-nav > ul > li {
+  margin: 0 0 0.15rem;
+}
+
+.sidebar-nav li a {
+  display: block;
+  padding: 0.34rem 0.6rem;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+}
+
+.sidebar-nav li a:hover {
+  background: var(--bg-subtle);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.sidebar-nav li.active > a,
+.sidebar-nav li.active > p {
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.sidebar-nav li.active > a {
+  background: var(--primary-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* Заголовки разделов («- **Раздел**») */
+.sidebar-nav li > p {
+  margin: 0;
+  padding: 0.34rem 0.6rem;
+  color: var(--text-faint);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+.sidebar-nav > ul > li.nav-section {
+  margin-top: 1.15rem;
+}
+
+.sidebar-nav > ul > li.nav-section:first-child {
+  margin-top: 0.25rem;
+}
+
+.sidebar-nav > ul > li.nav-section > p {
+  padding-left: 0.6rem;
+  margin-bottom: 0.15rem;
+}
+
+/* Вложенные пункты */
+.sidebar-nav ul ul {
+  margin: 0.1rem 0 0.35rem;
+}
+
+.sidebar-nav ul ul li a,
+.sidebar-nav ul ul li > p {
+  padding-left: 1.5rem;
+  font-size: 0.86rem;
+}
+
+.sidebar-nav ul ul ul li a,
+.sidebar-nav ul ul ul li > p {
+  padding-left: 2.3rem;
+  font-size: 0.83rem;
+}
+
+/* Сворачиваемые разделы (site.js) */
+.sidebar-nav .nav-section > p.nav-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  cursor: pointer;
+  user-select: none;
+  border-radius: var(--radius-sm);
+}
+
+.sidebar-nav .nav-section > p.nav-toggle:hover {
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+}
+
+.sidebar-nav .nav-section > p.nav-toggle::after {
+  content: "";
+  flex: none;
+  width: 0.42rem;
+  height: 0.42rem;
+  margin-right: 0.15rem;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg) translate(-0.1rem, -0.1rem);
+  transition: transform 0.15s ease;
+}
+
+.sidebar-nav .nav-section.is-collapsed > p.nav-toggle::after {
+  transform: rotate(-45deg);
+}
+
+.sidebar-nav .nav-section.is-collapsed > ul {
+  display: none;
+}
+
+/* Подсветка текущего пункта в списке подстраниц docsify */
+.sidebar-nav .app-sub-sidebar {
+  margin: 0.1rem 0 0.3rem;
+}
+
+.sidebar-nav .app-sub-sidebar li::before {
+  content: "";
+  display: inline-block;
+  width: 0.35rem;
+  height: 1px;
+  margin: 0 0.4rem 0.28rem 0.9rem;
+  background: var(--border-strong);
+}
+
+.sidebar-nav .app-sub-sidebar li a {
+  display: inline-block;
+  padding: 0.2rem 0.35rem;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+/* Дисклеймер-футер сайдбара */
+.sidebar__footer {
+  margin: 1.6rem 0.6rem 0;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--border);
+  color: var(--text-faint);
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+
+/* ============================================================
+   6. Контент: типографика
+   ============================================================ */
+
+.markdown-section h1,
+.markdown-section h2,
+.markdown-section h3,
+.markdown-section h4,
+.markdown-section h5,
+.markdown-section h6 {
+  position: relative;
+  margin: 2.1em 0 0.7em;
+  line-height: 1.28;
+  font-weight: 650;
+  letter-spacing: -0.012em;
+  scroll-margin-top: calc(var(--header-h) + 1.2rem);
+}
+
+.markdown-section h1 {
+  margin-top: 0.2em;
+  font-size: 1.95rem;
+  font-weight: 700;
+}
+
+.markdown-section h2 {
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--border);
+  font-size: 1.42rem;
+}
+
+.markdown-section h3 {
+  font-size: 1.16rem;
+}
+
+.markdown-section h4 {
+  font-size: 1.02rem;
+}
+
+.markdown-section h5,
+.markdown-section h6 {
+  font-size: 0.95rem;
+  color: var(--text-muted);
+}
+
+.markdown-section > *:first-child {
+  margin-top: 0;
+}
+
+.markdown-section p,
+.markdown-section ul,
+.markdown-section ol,
+.markdown-section blockquote,
+.markdown-section table,
+.markdown-section pre {
+  margin: 0 0 1.05rem;
+}
+
+.markdown-section ul,
+.markdown-section ol {
+  padding-left: 1.5rem;
+}
+
+.markdown-section li + li {
+  margin-top: 0.28rem;
+}
+
+.markdown-section li > ul,
+.markdown-section li > ol {
+  margin: 0.35rem 0 0.15rem;
+}
+
+.markdown-section hr {
+  height: 1px;
+  margin: 2rem 0;
+  border: 0;
+  background: var(--border);
+}
+
+.markdown-section strong {
+  font-weight: 650;
+}
+
+.markdown-section img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius);
+}
+
+.markdown-section kbd {
+  display: inline-block;
+  padding: 0.1em 0.42em;
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+}
+
+/* Заголовок-ссылка docsify (<a class="anchor">): выглядит как текст,
+   при наведении слева появляется ¶ (permalink, как в Material). */
+.markdown-section h1 > .anchor,
+.markdown-section h2 > .anchor,
+.markdown-section h3 > .anchor,
+.markdown-section h4 > .anchor,
+.markdown-section h5 > .anchor,
+.markdown-section h6 > .anchor {
+  color: inherit;
+  text-decoration: none;
+}
+
+.markdown-section h1 > .anchor:hover,
+.markdown-section h2 > .anchor:hover,
+.markdown-section h3 > .anchor:hover,
+.markdown-section h4 > .anchor:hover,
+.markdown-section h5 > .anchor:hover,
+.markdown-section h6 > .anchor:hover {
+  color: inherit;
+  text-decoration: none;
+}
+
+.markdown-section h1 > .anchor::before,
+.markdown-section h2 > .anchor::before,
+.markdown-section h3 > .anchor::before,
+.markdown-section h4 > .anchor::before,
+.markdown-section h5 > .anchor::before,
+.markdown-section h6 > .anchor::before {
+  content: "¶";
+  position: absolute;
+  left: -1.15rem;
+  color: var(--border-strong);
+  font-weight: 400;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.markdown-section h1 > .anchor::before {
+  left: -1.35rem;
+}
+
+.markdown-section h1:hover > .anchor::before,
+.markdown-section h2:hover > .anchor::before,
+.markdown-section h3:hover > .anchor::before,
+.markdown-section h4:hover > .anchor::before,
+.markdown-section h5:hover > .anchor::before,
+.markdown-section h6:hover > .anchor::before,
+.markdown-section .anchor:focus::before {
+  opacity: 1;
+}
+
+/* Ссылки в тексте заметнее на просмотр, но без пестроты */
+.markdown-section a {
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+}
+
+.markdown-section a:hover {
+  text-decoration: underline;
+}
+
+/* ============================================================
+   7. Контент: код, таблицы, цитаты, сноски
+   ============================================================ */
+
+.markdown-section code {
+  font-family: var(--font-mono);
+  font-size: 0.855em;
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.12em 0.34em;
+  color: var(--code-text);
+}
+
+.markdown-section pre {
+  position: relative;
+  overflow: auto;
+  padding: 1rem 1.1rem;
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  line-height: 1.58;
+}
+
+.markdown-section pre > code {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 0.83rem;
+  color: var(--code-text);
+  white-space: pre;
+}
+
+.copy-code-btn {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.85rem;
+  height: 1.85rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.markdown-section pre:hover .copy-code-btn,
+.copy-code-btn:focus {
+  opacity: 1;
+}
+
+.copy-code-btn:hover {
+  color: var(--primary);
+  border-color: var(--border-strong);
+}
+
+.copy-code-btn svg {
+  width: 0.95rem;
+  height: 0.95rem;
+  fill: currentColor;
+}
+
+.copy-code-btn.is-copied {
+  color: #1f9d55;
+  border-color: #1f9d55;
+  opacity: 1;
+}
+
+/* Таблицы: зебра, рамка, горизонтальный скролл на узких экранах */
+.table-wrap {
+  width: 100%;
+  margin: 0 0 1.2rem;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.table-wrap > table {
+  margin: 0;
+  border: 0;
+}
+
+.markdown-section table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.markdown-section th,
+.markdown-section td {
+  padding: 0.55rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-section th {
+  background: var(--bg-subtle);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.markdown-section tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--bg-subtle) 55%, transparent);
+}
+
+.markdown-section tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.markdown-section blockquote {
+  padding: 0.7rem 1rem;
+  border-left: 3px solid var(--primary);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: var(--quote-bg);
+  color: var(--text-muted);
+}
+
+.markdown-section blockquote > *:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-section blockquote strong {
+  color: var(--text);
+}
+
+/* Сноски (GFM): рендерит site.js */
+.footnote-ref {
+  font-size: 0.72em;
+  line-height: 0;
+}
+
+.footnote-ref a {
+  padding: 0 0.15em;
+  font-weight: 600;
+}
+
+.footnotes {
+  margin-top: 2.4rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.86rem;
+  color: var(--text-muted);
+}
+
+.footnotes__title {
+  margin: 0 0 0.5rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.footnotes ol {
+  margin: 0;
+  padding-left: 1.3rem;
+}
+
+.footnotes li {
+  margin-bottom: 0.35rem;
+}
+
+.footnotes li:target {
+  background: var(--primary-soft);
+  border-radius: var(--radius-sm);
+}
+
+/* Ссылка на документ вне публичного репозитория */
+.doc-external-ref {
+  color: var(--text-muted);
+  border-bottom: 1px dashed var(--border-strong);
+  cursor: help;
+}
+
+/* ============================================================
+   8. Поиск
+   ============================================================ */
+
+.site-header .search {
+  position: relative;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  width: min(24rem, 40vw);
+}
+
+.site-header .search .input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  height: 2.1rem;
+  padding: 0 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-subtle);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.site-header .search .input-wrap:focus-within {
+  border-color: var(--primary);
+  background: var(--surface);
+}
+
+.site-header .search .input-wrap::before {
+  content: "";
+  flex: none;
+  width: 0.95rem;
+  height: 0.95rem;
+  background: currentColor;
+  color: var(--text-faint);
+  -webkit-mask: no-repeat center / contain
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M15.5 14h-.79l-.28-.27a6.5 6.5 0 1 0-.7.7l.27.28v.79l5 4.99L20.49 19zm-6 0A4.5 4.5 0 1 1 14 9.5 4.5 4.5 0 0 1 9.5 14z'/%3E%3C/svg%3E");
+  mask: no-repeat center / contain
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M15.5 14h-.79l-.28-.27a6.5 6.5 0 1 0-.7.7l.27.28v.79l5 4.99L20.49 19zm-6 0A4.5 4.5 0 1 1 14 9.5 4.5 4.5 0 0 1 9.5 14z'/%3E%3C/svg%3E");
+}
+
+.site-header .search input[type="search"] {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.88rem;
+  outline: none;
+  box-shadow: none;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.site-header .search input[type="search"]:focus {
+  border: 0;
+  box-shadow: none;
+}
+
+.site-header .search input[type="search"]::placeholder {
+  color: var(--text-faint);
+}
+
+.site-header .search .clear-button {
+  flex: none;
+  width: 1.3rem;
+  text-align: center;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.site-header .search .clear-button svg {
+  width: 0.95rem;
+  height: 0.95rem;
+  vertical-align: middle;
+}
+
+.site-header .search .results-panel {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  left: 0;
+  right: 0;
+  z-index: 50;
+  max-height: min(70vh, 32rem);
+  overflow-y: auto;
+  padding: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.site-header .search .results-panel .matching-post {
+  border-radius: var(--radius-sm);
+}
+
+.site-header .search .results-panel .matching-post a {
+  display: block;
+  padding: 0.55rem 0.65rem;
+  color: var(--text);
+}
+
+.site-header .search .results-panel .matching-post a:hover {
+  background: var(--bg-subtle);
+  text-decoration: none;
+}
+
+.site-header .search .results-panel .matching-post h2 {
+  margin: 0 0 0.15rem;
+  padding: 0;
+  border: 0;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--primary);
+}
+
+.site-header .search .results-panel .matching-post em,
+.site-header .search .results-panel .matching-post strong {
+  background: var(--mark);
+  color: inherit;
+  font-style: normal;
+  font-weight: 600;
+  border-radius: 2px;
+}
+
+.site-header .search .results-panel .matching-post p {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.site-header .search .results-panel .empty {
+  margin: 0;
+  padding: 0.6rem;
+  font-size: 0.85rem;
+  color: var(--text-faint);
+}
+
+/* ============================================================
+   9. Мета страницы: хлебные крошки, ссылка на GitHub, навигация
+   ============================================================ */
+
+.page-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1.4rem;
+  font-size: 0.78rem;
+  color: var(--text-faint);
+}
+
+.page-meta a {
+  color: var(--text-muted);
+}
+
+.page-meta__edit {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.page-meta__edit svg {
+  width: 0.9rem;
+  height: 0.9rem;
+  fill: currentColor;
+}
+
+.page-nav {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.8rem;
+  margin-top: 3rem;
+  padding-top: 1.4rem;
+  border-top: 1px solid var(--border);
+}
+
+.page-nav__link {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+
+.page-nav__link:hover {
+  border-color: var(--primary);
+  text-decoration: none;
+}
+
+.page-nav__link:hover .page-nav__title {
+  color: var(--primary-hover);
+}
+
+.page-nav__link--next {
+  text-align: right;
+  grid-column: 2;
+}
+
+.page-nav__hint {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.page-nav__title {
+  font-weight: 600;
+  font-size: 0.92rem;
+  color: var(--primary);
+}
+
+/* Страница 404 */
+.markdown-section h1:first-child:last-child {
+  color: var(--text-muted);
+}
+
+/* ============================================================
+   10. Адаптивность
+   ============================================================ */
+
+@media (min-width: 1250px) {
+  .content {
+    margin-right: var(--toc-w);
+    padding-right: 2rem;
+  }
+}
+
+@media (max-width: 1249px) {
+  .page-toc {
+    display: none;
+  }
+}
+
+@media (max-width: 1023px) {
+  .sidebar {
+    transform: translateX(-100%);
+    box-shadow: none;
+  }
+
+  body.close .sidebar {
+    transform: translateX(0);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .sidebar-toggle {
+    display: inline-flex;
+  }
+
+  .content {
+    margin-left: 0;
+    padding: 4.2rem 1.4rem 4rem;
+  }
+
+  .site-header__title-sub {
+    display: none;
+  }
+
+  .site-header .search {
+    width: min(20rem, 45vw);
+  }
+}
+
+@media (max-width: 720px) {
+  :root {
+    --font-size: 15.5px;
+  }
+
+  .site-header {
+    padding: 0 0.7rem;
+    gap: 0.4rem;
+  }
+
+  .site-header__brand span {
+    display: none;
+  }
+
+  .site-header .search {
+    width: auto;
+    flex: 1 1 auto;
+  }
+
+  .site-header .search .input-wrap::before {
+    margin-left: 0.1rem;
+  }
+
+  .site-header__link--github span {
+    display: none;
+  }
+
+  .content {
+    padding: 4.2rem 1rem 3.5rem;
+  }
+
+  .markdown-section h1 {
+    font-size: 1.6rem;
+  }
+
+  .markdown-section h2 {
+    font-size: 1.28rem;
+  }
+
+  .page-toc__list {
+    columns: 1;
+  }
+
+  .page-nav {
+    grid-template-columns: 1fr;
+  }
+
+  .page-nav__link--next {
+    grid-column: 1;
+    text-align: left;
+  }
+
+  .back-to-top {
+    right: 0.9rem;
+    bottom: 0.9rem;
+  }
+}
+
+/* ============================================================
+   11. Печать
+   ============================================================ */
+
+@media print {
+  .site-header,
+  .sidebar,
+  .sidebar-toggle,
+  .page-toc,
+  .page-nav,
+  .page-meta,
+  .copy-code-btn,
+  .back-to-top,
+  .progress {
+    display: none !important;
+  }
+
+  .content {
+    margin: 0;
+    padding: 0;
+  }
+
+  .markdown-section {
+    max-width: none;
+  }
+
+  body {
+    background: #fff;
+    color: #000;
+  }
+}
+
+/* ============================================================
+   12. Плавные переходы темы
+   ============================================================ */
+
+body,
+.site-header,
+.sidebar,
+.markdown-section pre,
+.markdown-section code,
+.markdown-section table th,
+.page-nav__link,
+.back-to-top {
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
