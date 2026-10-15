@@ -2,7 +2,7 @@
 
 > Реестр всех markdown-таблиц репозитория. Файл собирается и проверяется скриптом `scripts/check-tables.js` (`npm run check:tables`). Не править вручную: после изменения таблиц выполните `node scripts/check-tables.js --write`.
 
-Актуально на 2026-10-15. Всего таблиц: **73** в **29** файлах.
+Актуально на 2026-10-15. Всего таблиц: **72** в **28** файлах.
 
 ## Сводка
 
@@ -36,7 +36,6 @@
 | [`services/tbank-mock/README.md`](/services/tbank-mock/README.md) | 6 | ✅ целы |
 | [`services/vtb-mock/README.md`](/services/vtb-mock/README.md) | 3 | ✅ целы |
 | [`services/yookassa-mock/README.md`](/services/yookassa-mock/README.md) | 4 | ✅ целы |
-| [`site/vendor/README-LICENSE.md`](/site/vendor/README-LICENSE.md) | 1 | ✅ целы |
 
 ## Реестр
 
@@ -114,4 +113,3 @@
 | 70 | [`services/yookassa-mock/README.md`](/services/yookassa-mock/README.md) | 161 | Сценарии (X-Mock-Scenario и /mock/scenarios) | 2 | 6 | ✅ |
 | 71 | [`services/yookassa-mock/README.md`](/services/yookassa-mock/README.md) | 186 | Переменные окружения | 3 | 12 | ✅ |
 | 72 | [`services/yookassa-mock/README.md`](/services/yookassa-mock/README.md) | 227 | Байтовые квоты состояния (PD-02) | 3 | 2 | ✅ |
-| 73 | [`site/vendor/README-LICENSE.md`](/site/vendor/README-LICENSE.md) | 3 | Вендоренные файлы сайта документации | 4 | 2 | ✅ |

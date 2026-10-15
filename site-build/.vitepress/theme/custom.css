@@ -1,0 +1,48 @@
+/* © 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0
+ * SPDX-License-Identifier: Apache-2.0
+ */
+.doc-static-toc {
+  margin: 1.5rem 0 2rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 8px;
+  background: var(--vp-c-bg-soft);
+}
+
+.doc-static-toc__title {
+  margin: 0 0 0.5rem;
+  font-weight: 600;
+}
+
+.doc-static-toc ul {
+  margin: 0;
+}
+
+.doc-static-toc__item--2 {
+  margin-left: 0.75rem;
+}
+
+.doc-static-toc__item--3 {
+  margin-left: 1.5rem;
+}
+
+.doc-static-toc__link {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.doc-source-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--vp-c-divider);
+  font-size: 0.9rem;
+}
+
+.doc-source-links a {
+  color: var(--vp-c-brand-1);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
