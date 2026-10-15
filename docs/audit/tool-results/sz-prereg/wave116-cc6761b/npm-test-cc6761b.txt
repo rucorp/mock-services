@@ -1,0 +1,2479 @@
+
+> mock-services@0.7.0 test
+> npm run test:core && npm run test:tbank && npm run test:kassa && npm run test:yookassa && npm run test:atol && npm run test:alfa && npm run test:sber && npm run test:vtb && npm run test:first-ofd && npm run test:kontur-ofd && npm run test:upstream && npm run check:links && npm run check:drift
+
+
+> mock-services@0.7.0 test:core
+> node packages/core/selftest.js
+
+
+== core selftest ==
+
+  ✓ restore() сохраняет ссылку очереди и восстанавливает словарь без прототипа
+  ✓ restore() удаляет ключи, которых нет в файле (не тащит мусор прошлого процесса)
+  ✓ restore() целиком отклоняет __proto__ до merge: прототип чист, state не изменён и есть DX-лог
+  ✓ createSandboxManager отклоняет опасные ключи без частичного импорта
+  ✓ safe state schema rejects constructor and prototype at every nesting level
+  ✓ успешная доставка помечается done и не повторяется (в т.ч. после сериализации)
+  ✓ после успеха запись не переотправляется (1 попадание)
+  ✓ медленный вебхук не порождает параллельных дублей (одна запись — один POST в полёте)
+  ✓ postJson обрывает слишком большой ответ и применяет абсолютный deadline к trickle-response (F-03)
+  ✓ delivery queue доставляет GET-callback без тела (request(entry).method — для Альфа-Банка)
+  ✓ escapeHtml экранирует данные интегратора
+  ✓ parseBody понимает json и form-urlencoded
+  ✓ readBody считает байты, точно принимает лимит и после 413 больше не копит chunks (F-02)
+  ✓ HTTP 413 корректно отвечает и дренирует тело, отправленное после внутреннего отказа (F-02)
+  ✓ createErrorCatalog собирает код+поле+подсказку+ссылку (спека §6.2)
+  ✓ parseDuration разбирает дни/часы/минуты/мс (этап 7)
+  ✓ createVirtualClock сдвигает виртуальное время на +7d / +60d и сбрасывает (этап 7)
+  ✓ createVirtualClock валидирует Date-диапазон до записи state и восстанавливается после отказа (F-05)
+  ✓ parseMoneyKopeks строго принимает целые копейки и отклоняет prefix/trailing junk и дроби (F-24)
+  ✓ createScenarioRegistry объединяет заголовок X-Mock-Scenario, правила и журнал срабатываний
+  ✓ createScenarioRegistry/createJournal: разделы по записи песочницы не пересекаются (PA-51/PG-04/PB-13, #52)
+  ✓ createScenarioRegistry: cap 200 и лимит правила 8 KiB per-sandbox, отказ по code без мутации (PA-51, #52)
+[WARN] Приём admin_token/operator_token из query-строки устарел. Используйте заголовки X-Mock-Admin-Token, X-Operator-Token, Authorization или cookie.
+  ✓ checkAdminAuth пропускает по умолчанию и проверяет токен при MOCK_ADMIN_TOKEN (A-20)
+  ✓ resolveTenancyMode принимает литералы и legacy-флаги, а неизвестное значение безопасно откатывает с warn (#31)
+  ✓ CSRF-токены подписаны, истекают и привязаны к контексту; Origin режет cross-site формы (A-20)
+  ✓ flagEnabled принимает 1/true и различает явное false (F-08)
+  ✓ isPrivateAddress/isPrivateHost различают приватные IPv4/IPv6 и служебные имена (F-08)
+  ✓ isPrivateAddress: IPv4-mapped в dotted и hex форме и 4-частная SIIT-форма (#45, SSRF-обход)
+  ✓ isPrivateAddress: NAT64 64:ff9b::/96 решается по встроенному IPv4 (#45)
+  ✓ isPrivateAddress: публичные IPv6 не задеты, hex-подобные имена — это имена (#45)
+  ✓ assertPublicHost блокирует приватные адреса, имена и опасные схемы (F-08)
+  ✓ assertPublicHost: URL со скобками (IPv4-mapped, NAT64) → SSRF_BLOCKED (#45)
+  ✓ assertPublicHost: hex-подобное имя проходит через DNS-проверку (#45)
+  ✓ verifyMerchantWebhook с blockPrivateHosts: IPv4-mapped цель не получает ни одного соединения (#45, регресс)
+  ✓ postJson отклоняет не-http(s) схемы до открытия сокета (F-08)
+  ✓ delivery queue с blockPrivateHosts не отправляет на приватный адрес и не роняет цикл (F-08)
+[WARN] Приём admin_token/operator_token из query-строки устарел. Используйте заголовки X-Mock-Admin-Token, X-Operator-Token, Authorization или cookie.
+  ✓ checkControlAccess: роли admin/operator, fallback и hosted fail-closed (F-07)
+  ✓ createJournal формирует curl, shell-экранирует динамику и скрывает query-токены (F-04)
+  ✓ redactSecrets рекурсивно скрывает секреты, PAN и PII, не трогая обычные поля (F-09)
+  ✓ redactSecrets не переносит __proto__ и ограничивает глубину (F-01/F-09)
+  ✓ PAN-сканер маскирует только номера карт: Luhn + префикс платёжной системы (F-10)
+  ✓ redactRawBody понимает JSON, form-urlencoded и произвольный текст (F-09)
+  ✓ createJournal: креды и PAN не попадают в запись, JSON и curl; запись ограничена по длине (F-09)
+  ✓ createSandboxManager изолирует песочницы по X-Mock-Sandbox и сохраняет ссылки state
+  ✓ createSandboxRuntime: запросы A/B не смешивают state между await
+  ✓ createSandboxRuntime: owned-режим — owner-token, знание ID ≠ доступ
+  ✓ #98: ownerTokenOf — порядок источников owner-token (явные заголовки выше Bearer)
+  ✓ #98: owned-режим адаптера с бизнес-Bearer (first-ofd/vtb) — владелец получает доступ, чужой токен — 401
+  ✓ #98: self-hosted (namespaces) — бизнес-Bearer не становится owner-token, поведение не меняется
+  ✓ createSandboxRuntime: TTL-очистка и персистентность реестра без relabel default
+  ✓ createSandboxRuntime: PA-50 явная авторизация target в exportState/importState/reset/updateCreds/remove
+  ✓ createSandboxRuntime: PA-50 §7.2 / PG-10 TTL-sweep посреди запроса закрывается fail-closed без отката к чужой песочнице
+  ✓ createSandboxRuntime: PA-54 закрытая default-песочница, fail-closed политика и честный via="form"
+  ✓ createSandboxRuntime: PA-55 switchActive в namespaces не переключает глобальный fallback для других запросов
+  ✓ createSandboxRuntime: PA-56 run() отказывается выполнять обработчик при неуспешном admission
+  ✓ createSandboxRuntime + сценарии/журнал: жизненный цикл раздела = запись песочницы (удаление/TTL/пересоздание, #52)
+  ✓ createDeliveryQueue: entries-функция отправляет записи каждой песочницы
+  ✓ createDeliveryQueue: awaitSequential — порядок без повторов при медленном первом вебхуке (F-29)
+  ✓ verifyMerchantWebhook проверяет валидный вебхук, дубль и отклонение поддельного Token
+  ✓ #51 PA-26: isPrivateAddress / isPrivateHost / assertPublicHost блокируют ff00::/8, TEST-NET×3, 2001:db8::/32 и 64:ff9b:1::/96
+  ✓ #51 PA-25: IPv6-литералы в URL доставляются при разрешённом режиме и блокируются SSRF_BLOCKED без ENOTFOUND
+  ✓ #51 PA-58: createDeliveryQueue и verifyMerchantWebhook включают blockPrivateHosts по умолчанию при MOCK_HOSTED=1
+  ✓ #51 §7.3 / PG-11: DNS TOCTOU rebinding блокируется в createDeliveryQueue и verifyMerchantWebhook, а публичный адрес пиннится с одним lookup
+  ✓ PD-02: мутация одной песочницы переписывает только её файл, а не весь реестр
+  ✓ PD-02: удалённая песочница не воскресает после рестарта (файл уходит вместе с записью)
+  ✓ PD-02: legacy-реестр <stateFile>.sandboxes.json мигрирует в поштучные файлы, повторно не читается
+  ✓ PD-02: байтовая квота состояния — импорт сверх лимита отклоняется и откатывается; соседи не меняются
+  ✓ PD-02: глобальный бюджет суммирует default/A/B; HTTP 400, импорт и запись атомарны
+  ✓ PD-02: 0 выключает глобальный бюджет; байтовые квоты независимы и дефолты сохранены
+  ✓ PD-02: откат после retention не воскрешает очищенные документы
+  ✓ PD-02: восстановленный default остаётся снимком отката, не заменяется начальным состоянием
+  ✓ PD-02: точная граница, замена без двойного учёта и reset/TTL освобождают бюджет
+  ✓ PA-52: tickAll за один проход доставляет КАЖДУЮ готовую песочницу (3 песочницы, одинаковый id записи)
+  ✓ MS-04: shutdown флашит состояние, закрывает сервер и выходит 0 один раз
+  ✓ MS-04: сигналы процесса (SIGTERM/SIGINT) снимаются dispose()
+  ✓ MS-04: страховочный таймер выходит 0, если server.close не завершился
+  ✓ MS-04: installGracefulShutdown без server — явная ошибка
+
+ИТОГ: 77 passed, 0 failed
+
+
+> mock-services@0.7.0 test:tbank
+> node services/tbank-mock/selftest.js
+
+selftest: mock on :34661, webhook on :44861
+[mock] Init token FAIL. payload: {"TerminalKey":"TBANKMOCKTEST","Amount":"1000","OrderId":"o-1","Token":"[REDACTED]","tokenReceived":"<…>","tokenExpected":"<4a3ab94e…>"}
+[mock] Init token FAIL. payload: {"TerminalKey":"TBANKMOCKTEST","Amount":"1000","OrderId":"o-1","PaymentRecipientId":"recipient-77","Token":"[REDACTED]","tokenReceived":"<…>","tokenExpected":"<f5c35936…>"}
+[mock] notification 1 queued: 1792027872631 -> AUTHORIZED
+[tbank-mock 2026-10-15 01:31:13] webhook 1 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[mock] notification 2 queued: 1792027872631 -> CONFIRMED
+[tbank-mock 2026-10-15 01:31:14] webhook 2 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[mock] notification 3 queued: 1792027872631 -> PARTIAL_REFUNDED
+[tbank-mock 2026-10-15 01:31:15] webhook 3 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[mock] notification 4 queued: 1792027872631 -> PARTIAL_REFUNDED
+[mock] notification 5 queued: 1792027872632 -> AUTHORIZED
+[tbank-mock 2026-10-15 01:31:16] webhook 4 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[tbank-mock 2026-10-15 01:31:16] webhook 5 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[mock] notification 6 queued: 1792027872633 -> REJECTED
+[tbank-mock 2026-10-15 01:31:17] webhook 6 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[mock] notification 7 queued: 1792027872634 -> REJECTED
+[mock] Init token FAIL. payload: {"TerminalKey":"TBANKMOCKTEST","Amount":"1000","OrderId":"order-82","Token":"[REDACTED]","tokenReceived":"<abc…>","tokenExpected":"<458e6d00…>"}
+[mock] Init token FAIL. payload: {"TerminalKey":"TBANKMOCKTEST","Amount":"1000","OrderId":"order-f28","Token":"[REDACTED]","tokenReceived":"<😄😄😄😄…>","tokenExpected":"<aafefa60…>"}
+[mock] notification 8 queued: 1792027872636 -> AUTHORIZED
+[tbank-mock 2026-10-15 01:31:18] webhook 7 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[tbank-mock 2026-10-15 01:31:19] webhook 8 failed status=500, retry in 1000ms
+[tbank-mock 2026-10-15 01:31:21] webhook 8 failed status=500, retry in 1000ms
+[mock] notification 9 queued: 1792027872637 -> AUTHORIZED
+[mock] notification 10 queued: 1792027872637 -> CONFIRMED
+[tbank-mock 2026-10-15 01:31:22] webhook 9 delivered -> http://127.0.0.1:44861/ordered (1 attempt(s))
+[tbank-mock 2026-10-15 01:31:22] webhook 10 delivered -> http://127.0.0.1:44861/ordered (1 attempt(s))
+[mock] notification 11 queued: 1792027872638 -> CONFIRMED
+[tbank-mock 2026-10-15 01:31:24] webhook 8 failed status=500, retry in 1000ms
+[tbank-mock 2026-10-15 01:31:24] webhook 11 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[mock] notification 12 queued: 1792027872638 -> PARTIAL_CHARGEBACK
+[tbank-mock 2026-10-15 01:31:26] webhook 8 failed status=500, retry in 1000ms
+[tbank-mock 2026-10-15 01:31:26] webhook 12 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[mock] notification 13 queued: 1792027872638 -> PARTIAL_CHARGEBACK
+[tbank-mock 2026-10-15 01:31:26] webhook 13 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[mock] notification 14 queued: 1792027872638 -> PARTIAL_CHARGEBACK
+[tbank-mock 2026-10-15 01:31:28] webhook 8 failed status=500, retry in 1000ms
+[tbank-mock 2026-10-15 01:31:28] webhook 14 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[mock] notification 15 queued: 1792027872638 -> CONFIRMED
+[tbank-mock 2026-10-15 01:31:28] webhook 15 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[mock] notification 16 queued: 1792027872638 -> CHARGEBACK
+[mock] notification 17 queued: 1792027872638 -> CHARGEBACK
+[mock] notification 18 SUPPRESSED (webhook-drop): 1792027872639 -> CONFIRMED
+[mock] notification 19 SUPPRESSED (webhook-drop): 1792027872639 -> PARTIAL_REFUNDED
+[mock] notification 20 queued: 1792027872640 -> AUTHORIZED
+[mock] notification 21 queued: 1792027872641 -> CONFIRMED
+[mock] notification 22 queued: 1792027872632 -> CONFIRMED
+[mock] auto-confirmed hold 1792027872632 after 604800000ms
+[mock] notification 23 queued: 1792027872636 -> CONFIRMED
+[mock] auto-confirmed hold 1792027872636 after 604800000ms
+[mock] notification 24 queued: 1792027872640 -> CONFIRMED
+[mock] auto-confirmed hold 1792027872640 after 604800000ms
+[mock] notification 25 queued: 1792027872641 -> CHARGEBACK
+[mock] scheduled chargeback triggered for payment 1792027872641
+[tbank-mock 2026-10-15 01:31:29] webhook 8 failed status=500, retry in 1000ms
+[tbank-mock 2026-10-15 01:31:29] webhook 16 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[tbank-mock 2026-10-15 01:31:29] webhook 17 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[tbank-mock 2026-10-15 01:31:29] webhook 20 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[tbank-mock 2026-10-15 01:31:29] webhook 21 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[tbank-mock 2026-10-15 01:31:29] webhook 22 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[tbank-mock 2026-10-15 01:31:29] webhook 23 failed status=500, retry in 1000ms
+[tbank-mock 2026-10-15 01:31:29] webhook 24 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[tbank-mock 2026-10-15 01:31:29] webhook 25 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[mock] notification 26 queued: 1792027872632 -> REFUNDED
+[mock] deal 50001 / payment 1792027872632 auto-refunded after 60d
+[mock] notification 27 queued: 1792027872636 -> REFUNDED
+[mock] deal 50005 / payment 1792027872636 auto-refunded after 60d
+[mock] notification 28 queued: 1792027872637 -> REFUNDED
+[mock] deal 50006 / payment 1792027872637 auto-refunded after 60d
+[mock] notification 29 queued: 1792027872640 -> REFUNDED
+[mock] deal 50009 / payment 1792027872640 auto-refunded after 60d
+[mock] payment 1792027872642 expired -> DEADLINE_EXPIRED
+[tbank-mock 2026-10-15 01:31:30] webhook 8 failed status=500, retry in 1000ms
+[tbank-mock 2026-10-15 01:31:31] webhook 23 failed status=500, retry in 1000ms
+[tbank-mock 2026-10-15 01:31:31] webhook 26 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[tbank-mock 2026-10-15 01:31:31] webhook 27 failed status=500, retry in 1000ms
+[tbank-mock 2026-10-15 01:31:31] webhook 28 delivered -> http://127.0.0.1:44861/ordered (1 attempt(s))
+[tbank-mock 2026-10-15 01:31:31] webhook 29 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[mock] 1792027872643: no notification URL, skip AUTHORIZED
+[mock] 1792027872644: no notification URL, skip CONFIRMED
+[mock] 1792027872645: no notification URL, skip CONFIRMED
+[mock] 1792027872646: no notification URL, skip CONFIRMED
+[mock] e2c Init P-900000: 45000коп, order=payout-1, deal=50015, канал=card
+[mock] e2c Payment P-900000: CONFIRMED 45000коп
+[mock] account verification 7000000: VER-777 100коп — прогон завершён (RETURNED)
+[mock] incoming IN-1: VER-777 100коп от 7801111111
+[tbank-mock 2026-10-15 01:31:32] webhook 30 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[mock] notification 31 queued: 1792027872647 -> CONFIRMED
+[mock] e2c Init P-900001: 20000коп, order=payout-badcard, deal=50016, канал=card
+[mock] e2c Init P-900002: 40000коп, order=payout-cancelable, deal=50016, канал=partner
+[mock] e2c Payment P-900002: CONFIRMED 40000коп
+[mock] e2c CancelPayment P-900002: CREDIT_CANCELED (40000коп, deal=50016)
+[mock] e2c Init P-900003: 70000коп, order=payout-final, deal=50016, канал=card
+[mock] e2c Payment P-900003: CONFIRMED 70000коп (deal 50016 closed)
+[mock] notification 32 queued: 1792027872649 -> CONFIRMED
+[tbank-mock 2026-10-15 01:31:33] webhook 31 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[tbank-mock 2026-10-15 01:31:33] webhook 32 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[mock] notification 33 queued: 1792027872652 -> AUTHORIZED
+[mock] notification 34 queued: 1792027872652 -> CONFIRMED
+[tbank-mock 2026-10-15 01:31:34] webhook 33 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[tbank-mock 2026-10-15 01:31:34] webhook 34 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[mock] notification 35 queued: 1792027872653 -> CONFIRMED
+[mock] payment 1792027872651 expired -> DEADLINE_EXPIRED
+[tbank-mock 2026-10-15 01:31:34] webhook 35 delivered -> http://127.0.0.1:44861/webhook (1 attempt(s))
+[mock] 1792027872654: no notification URL, skip CONFIRMED
+[mock] 1792027872656: no notification URL, skip CONFIRMED
+[mock] e2c Init P-900006: 1000коп, order=f17-card, deal=50025, канал=card
+[mock] e2c Init P-900007: 1000коп, order=f17-carddata, deal=50025, канал=card
+[mock] e2c Init P-900008: 1000коп, order=f17-sbp, deal=50025, канал=sbp
+[mock] e2c Init P-900009: 1000коп, order=f17-partner, deal=50025, канал=partner
+[mock] 1792027872657: no notification URL, skip CONFIRMED
+[mock] e2c Init P-900010: 10000коп, order=f18-new, deal=50026, канал=partner
+[mock] e2c Init P-900011: 10000коп, order=f18-rej, deal=50026, канал=card
+[mock] e2c Init P-900012: 10000коп, order=f18-ok, deal=50026, канал=partner
+[mock] e2c Payment P-900012: CONFIRMED 10000коп
+[mock] e2c CancelPayment P-900012: CREDIT_CANCELED (10000коп, deal=50026)
+[mock] e2c Init P-900013: 10000коп, order=f18-legacy-canceled, deal=50026, канал=partner
+[mock] e2c Payment P-900013: CONFIRMED 10000коп
+[mock] 1792027872658: no notification URL, skip CONFIRMED
+[mock] e2c Init P-900014: 10000коп, order=f19-closed, deal=50027, канал=partner
+[mock] e2c Payment P-900014: CONFIRMED 10000коп
+[mock] 1792027872659: no notification URL, skip CONFIRMED
+[mock] e2c Init P-900015: 10000коп, order=f19-gone, deal=50028, канал=partner
+[mock] e2c Payment P-900015: CONFIRMED 10000коп
+[mock] e2c Init P-900016: 10000коп, order=f20-card, deal=50026, канал=card
+[mock] e2c Payment P-900016: CONFIRMED 10000коп
+[mock] e2c Init P-900017: 10000коп, order=f20-sbp, deal=50026, канал=sbp
+[mock] e2c Payment P-900017: CONFIRMED 10000коп
+[mock] e2c Init P-900018: 10000коп, order=f21-deal, deal=50026, канал=partner
+[mock] e2c Payment P-900018: CONFIRMED 10000коп
+[mock] 1792027872660: no notification URL, skip CONFIRMED
+[mock] e2c CancelPayment P-900018: CREDIT_CANCELED (10000коп, deal=50026)
+[mock] e2c Init P-900019: 10000коп, order=f22-e2c-terminal, deal=50026, канал=partner
+[mock] e2c Payment P-900019: CONFIRMED 10000коп
+[mock] e2c CancelPayment P-900019: CREDIT_CANCELED (10000коп, deal=50026)
+[mock] 1792027872661: no notification URL, skip CONFIRMED
+[mock] e2c Init P-900020: 10000коп, order=e2c-terminal-check, deal=50030, канал=card
+[mock] e2c Payment P-900020: CONFIRMED 10000коп
+selftest: 31 webhook deliveries, 31 payment sessions
+SELFTEST PASSED ✅
+
+> mock-services@0.7.0 test:kassa
+> node services/kassa-mock/selftest.js
+
+
+== kassa-mock selftest on :41597 ==
+
+  ✓ #31: неизвестный MOCK_TENANCY пишет WARN и запускается с безопасным namespaces default
+  ✓ healthz ok
+  ✓ getToken bad password -> error
+  ✓ getToken ok returns token
+  ✓ sell без токена -> error 11
+  ✓ DX: error 11 несёт field/hint/doc (спека §6.2)
+  ✓ sell -> uuid + status wait
+  ✓ dup external_id -> error 12
+  ✓ report сразу -> wait
+  ✓ callback доставлен
+  ✓ report -> done + ФД/ФП
+  ✓ страница чека 200 + ИНН поставщика
+  ✓ валидация: total ≠ Σ позиций -> код 4 + field + hint
+  ✓ валидация: Σ оплат ≠ total -> код 4
+  ✓ валидация: неизвестный vat.type -> код 4 с подсказкой
+  ✓ receipt_datetime не 1970 (снимок после печати)
+  ✓ номера чеков в смене уникальны
+  ✓ чек покупателя экранирует HTML из данных интегратора
+  ✓ F-30: price за пределами safe integer -> код 4
+  ✓ F-30: price × quantity вне safe integer -> код 4
+  ✓ F-30: total за пределами safe integer -> код 4
+  ✓ F-30: Σ оплат вне safe integer -> код 4
+  ✓ F-30: /validate отклоняет суммы вне safe integer
+  ✓ F-30: отклонённый sell не занимает external_id (state не менялся)
+  ✓ F-30: sell_refund с суммой вне safe integer -> код 4
+  ✓ лента чека: НДС по ставке позиции (vat20 → «НДС 20%»)
+  ✓ fail- сценарий -> status fail + error
+  ✓ hang- -> wait
+  ✓ X-Mock-Scenario: fail -> статус fail для обычного external_id
+  ✓ X-Mock-Scenario: hang -> вечный wait
+  ✓ X-Mock-Scenario: http-500 -> HTTP 500
+  ✓ chaos http-500 -> provider-shaped error
+  ✓ X-Mock-Scenario: http-504 -> HTTP 504
+  ✓ chaos http-504 -> provider-shaped error
+  ✓ chaos http-500/504 не меняет счётчики/очередь
+  ✓ #52: правила песочницы A не видны B
+  ✓ #52: правило A не влияет на документ B (uuid выдан)
+  ✓ #52: срабатывания правила A в истории B нет
+  ✓ #52: история B (external_id) не видна A
+  ✓ #52 PB-13: журналы A и B не пересекаются
+  ✓ #52 PG-09/PB-13: reset A не стирает правила и журнал B
+  ✓ #52: правило >8 KiB -> 400 + code rule_too_large
+  ✓ #52: update по id; oversized update -> 400 без затирания старого
+  ✓ #52: cap 200; 201-е -> 400 + code rule_cap_exceeded
+  ✓ stats: Готова к работе
+  ✓ buy (неагентский расход) -> uuid + wait
+  ✓ buy_refund с origin_external_id в пределах суммы -> ok
+  ✓ buy_refund сверх остатка исходного чека -> код 4
+  ✓ чек предоплаты с расчётным НДС vat20_120 принят
+  ✓ зачёт предоплаты (type=2 + prepayment_external_id) принят
+  ✓ повторный зачёт уже погашенного аванса -> код 4
+  ✓ валидация: невалидный ИНН поставщика -> код 4
+  ✓ валидация: marked_commodity без кода маркировки -> код 4
+  ✓ маркированный товар с КМ и mark_quantity принят
+  ✓ отчёт маркированного чека содержит marking_verified + vat_amounts (vat7)
+  ✓ лента маркированного чека печатает [М] и КМ
+  ✓ X-Mock-Scenario: mark-fail -> status fail + код 58
+  ✓ X-Mock-Scenario: ofd-queue -> чек done в ККТ, но ofd_status=pending
+  ✓ GET /possystem/v1/ofd/queue показывает документ в очереди ОФД
+  ✓ X-Mock-Scenario: ofd-reject -> ofd_status=rejected + ofd_error
+  ✓ POST /possystem/v1/ofd/mode {flush:true} -> ofd_status=sent
+  ✓ POST /mock/time {advance:"13h"} сдвигает виртуальные часы
+  ✓ после сдвига часов на +13h токен (TTL 12ч) возвращает код 11
+  ✓ POST /possystem/v1/shift/close закрывает смену и формирует Z-отчёт
+  ✓ попытка фискализации при закрытой смене -> код 62
+  ✓ POST /possystem/v1/shift/open открывает новую смену
+  ✓ смена открыта > 24 часов (ст. 4.3 54-ФЗ) -> код 62
+  ✓ переполнение фискального накопителя (used >= capacity) -> код 63
+  ✓ POST /possystem/v1/fn/state {reset:true} сбрасывает счётчик ФН
+  ✓ позиционный контроль возврата: возврат 3 шт. при 2 проданных -> код 4 на items[0].quantity
+  ✓ POST /possystem/v1/validate на валидном чеке -> valid=true без записи в реестр
+  ✓ POST /possystem/v1/validate на битом чеке -> valid=false + error.field
+  ✓ X-Mock-Sandbox изолирует состояние кассы (checks=0 в новой песочнице)
+  ✓ POST /mock/verify-merchant проверяет callback мерчанта (readyForProd=true)
+  ✓ /admin/journal содержит готовый curl-сниппет для воспроизведения
+  ✓ #23 F-04: Kassa сохраняет query-token в сниппете только как YOUR_TOKEN
+  ✓ #24: getToken с чужим паролем -> error 14
+  ✓ #24: getToken с верным паролем выдаёт токен
+  ✓ #24: пароль getToken отсутствует в /admin/journal
+  ✓ #24: логин getToken отсутствует в /admin/journal
+  ✓ #24: выданный токен не хранится в журнале
+  ✓ #24: запись getToken хранит креды только как [REDACTED]
+  ✓ #24: curl-сниппет getToken воспроизводим без секретов
+  ✓ #24: пароль getToken отсутствует в HTML-консоли
+  ✓ #24: креды getToken отсутствуют в логе стенда
+  ✓ #24: в логе остаётся различимый префикс логина (DX)
+  ✓ #22: GET /mock/state без токена -> 401
+  ✓ #22: GET /mock/time без токена -> 401
+  ✓ #22: GET /mock/sandboxes без токена -> 401
+  ✓ #22: GET /possystem/v1/shift/status без токена -> 401
+  ✓ #22: POST /possystem/v1/shift/open без токена -> 401
+  ✓ #22: GET /possystem/v1/fn/state без токена -> 401
+  ✓ #22: POST /possystem/v1/ofd/mode без токена -> 401
+  ✓ #22: GET /possystem/v1/ofd/queue без токена -> 401
+  ✓ #22: GET /admin/journal без токена -> 401
+  ✓ #22: неверный управляющий токен -> 401
+  ✓ #22: operator-токен открывает /mock/state
+  ✓ #22: X-Operator-Token открывает /shift/status
+  ✓ #22: operator-токен открывает POST /fn/state
+  ✓ #22: operator-токен не открывает /admin
+  ✓ #22: админ-токен открывает /admin/journal
+  ✓ #5 A-20: POST login устанавливает cookie
+  ✓ #5 A-20: cookie доступ работает, токенов в action URL нет
+  ✓ #5 A-20: действие без CSRF-токена отклоняется
+  ✓ #5 A-20: same-origin проверка отклоняет cross-site форму
+  ✓ #5 A-20: CSRF-форма работает, redirect сохраняет admin_token
+  ✓ #5 A-20: redirect с admin_token снова открывает консоль
+  ✓ #22: getToken (контракт Ferma) не требует operator-токена
+  ✓ #22: sell (контракт Ferma) не требует operator-токена
+  ✓ #23 F-01: /mock/state отклоняет __proto__ с DX-ошибкой 400
+  ✓ #23 F-01: импорт не загрязнил Object.prototype (пустой body не переключает sandbox)
+  ✓ #23 F-01: отклонённый импорт не меняет state
+  ✓ #23 F-02: /mock/state отдаёт 413 + DX при лимит+1
+  ✓ #22: hosted без секрета: /mock/state закрыт (fail-closed)
+  ✓ #22: hosted без секрета: /fn/state закрыт
+  ✓ #22: hosted: /healthz публичный
+  ✓ #22: hosted: контракт Ferma (getToken) работает
+  ✓ #22: =1: private IPv4 в /mock/verify-merchant -> 403 + SSRF
+  ✓ #22: =1: private IPv6 -> 403
+  ✓ #22: =1: callback на приватный адрес заблокирован (SSRF в lastStatus)
+  ✓ #22: =true тоже включает SSRF-guard
+  ✓ #51 PF-01: MOCK_HOSTED=1 без MOCK_BLOCK_PRIVATE_WEBHOOKS включает block_private_webhooks=true по умолчанию
+  ✓ #51 PF-01: MOCK_HOSTED=1 по умолчанию блокирует private IPv4 в /mock/verify-merchant (403 + SSRF)
+  ✓ #51 PF-01: MOCK_HOSTED=1 по умолчанию блокирует приватный callback очереди (SSRF_BLOCKED, 0 соединений)
+  ✓ #8 F-11: параллельные чеки в разных песочницах принимаются
+  ✓ #8 F-11: песочница A видит только свой чек
+  ✓ #8 F-11: песочница B видит только свой чек
+  ✓ #8 F-11: запрос без селектора разрешается в default без чеков песочниц
+  ✓ #8 F-13: импорт возвращает фактический target
+  ✓ #8 F-13: экспорт читает только выбранный снимок
+  ✓ #8 F-13: импорт в target не изменил default
+  ✓ #8 F-12: POST /sandboxes отдаёт id, ownerToken и креды песочницы
+  ✓ #8 F-12: native admin-form передаёт owner-token, CSRF и сохраняет токен после redirect
+  ✓ #8 F-12: знание ID без owner-token -> 401
+  ✓ #8 F-12: owner-token другой песочницы не открывает чужую
+  ✓ #8 F-12: неизвестная песочница -> 404 + подсказка создать
+  ✓ #8 F-12: getToken с кредами песочницы и owner-token работает
+  ✓ #8 F-12: креды стенда в песочнице не действуют (код 14)
+  ✓ #8 F-12: список песочниц без токена -> 401
+  ✓ #8 F-12: владелец видит только свою песочницу
+  ✓ #8 F-12: owner-token открывает управляющие маршруты своей песочницы
+  ✓ #8 F-12: /sandboxes/me отдаёт песочницу владельца
+  ✓ #8 F-12: reset-creds меняет пароль песочницы
+[kassa-mock] sandboxes restored from /tmp/kassa-sbx-XqPeY3/state.json.sandboxes.records: 0
+[kassa-mock] sandboxes restored from /tmp/kassa-sbx-XqPeY3/state.json.sandboxes.records: 1
+  ✓ #8 F-14: состояние именованной песочницы восстанавливается после рестарта
+  ✓ #8 F-14: чужой state не приписывается default
+  ✓ #8 F-14: до TTL песочница доступна
+  ✓ #8 F-14: после TTL песочница недоступна
+  ✓ #8 F-15: первый чек проходит
+  ✓ #8 F-15: второй чек проходит (лимит 6 документов)
+  ✓ #8 F-15: превышение квоты документов отклоняется с DX
+[kassa-mock] sandbox registry migrated from /tmp/kassa-pa50-Au8pjV/sandboxes.json: 2
+[kassa-mock] sandboxes restored from /tmp/kassa-pa50-Au8pjV/sandboxes.records: 2
+  ✓ PA-50: чужой GET /mock/state?sandbox=victim-b -> 401 без утечки
+  ✓ PA-50: чужой POST /mock/state -> 401
+  ✓ PA-50: чужой POST /mock/reset -> 401
+  ✓ PA-50: чужой DELETE /sandboxes -> 401
+  ✓ PA-50: оператор читает /mock/state?sandbox=victim-b
+  ✓ PA-54: страница чека защищённой default без токена -> 401
+  ✓ PA-54: публичный /healthz на защищённой default не раскрывает checks
+  ✓ PA-50 §7.2: истёкшая во время await песочница -> 410 без утечки
+[kassa-mock] sandboxes restored from /tmp/kassa-ms04-UyKRpM/state.json.sandboxes.records: 0
+  ✓ MS-04: SIGINT даёт самостоятельный exit 0
+  ✓ MS-04: выход по SIGINT ≤ 2 с
+  ✓ MS-04: SIGINT сбросил отложенную запись песочницы на диск
+[kassa-mock] sandboxes restored from /tmp/kassa-ms04-UyKRpM/state.json.sandboxes.records: 1
+  ✓ MS-04: после рестарта отложенная запись на месте
+  ✓ MS-04: удалось наблюдать отложенную запись (окно debounce 150 мс)
+[kassa-mock] sandboxes restored from /tmp/kassa-selftest-8558.json.sandboxes.records: 0
+  ✓ MOCK_PROCESS_MS=0: чек печатается сразу
+  ✓ незавершённый callback ретраится до рестарта
+[kassa-mock] sandboxes restored from /tmp/kassa-selftest-8558.json.sandboxes.records: 0
+state restored from /tmp/kassa-selftest-8558.json
+  ✓ после рестарта незавершённый callback продолжает ретраиться (A-2)
+[kassa-mock] sandboxes restored from /tmp/kassa-selftest-8558.json.sandboxes.records: 0
+state restored from /tmp/kassa-selftest-8558.json
+  ✓ токен с истёкшим TTL -> ошибка 11 (A-11)
+
+ИТОГ: 167 passed, 0 failed
+
+
+> mock-services@0.7.0 test:yookassa
+> node services/yookassa-mock/selftest.js
+
+
+== yookassa-mock selftest on :38413 ==
+
+— health / auth
+  ✓ health 200 ok
+  ✓ health: payments/refunds числа
+  ✓ без Basic Auth: HTTP 401 + формат ЮKassa
+  ✓ без Basic Auth: id + DX hint/doc
+  ✓ 401: WWW-Authenticate
+  ✓ неверный secret: HTTP 401 + формат ЮKassa
+  ✓ неверный secret: id + DX hint/doc
+  ✓ GET /v3/payments без Idempotence-Key (GET ключ не нужен)
+— валидация /v3/payments
+  ✓ нет amount: HTTP 400 + формат ЮKassa
+  ✓ нет amount: parameter=amount
+  ✓ нет amount: id + DX hint/doc
+  ✓ amount.value числом: HTTP 400 + формат ЮKassa
+  ✓ amount.value числом: parameter=amount.value
+  ✓ amount.value числом: id + DX hint/doc
+  ✓ amount.value 3 знака: HTTP 400 + формат ЮKassa
+  ✓ amount.value 3 знака: parameter=amount.value
+  ✓ amount.value 3 знака: id + DX hint/doc
+  ✓ amount.value = 0: HTTP 400 + формат ЮKassa
+  ✓ amount.value = 0: parameter=amount.value
+  ✓ amount.value = 0: id + DX hint/doc
+  ✓ валюта USD: HTTP 400 + формат ЮKassa
+  ✓ валюта USD: parameter=amount.currency
+  ✓ валюта USD: id + DX hint/doc
+  ✓ валюта rub (не заглавными): HTTP 400 + формат ЮKassa
+  ✓ валюта rub (не заглавными): parameter=amount.currency
+  ✓ валюта rub (не заглавными): id + DX hint/doc
+  ✓ capture не boolean: HTTP 400 + формат ЮKassa
+  ✓ capture не boolean: parameter=capture
+  ✓ capture не boolean: id + DX hint/doc
+  ✓ нет confirmation: HTTP 400 + формат ЮKassa
+  ✓ нет confirmation: parameter=confirmation
+  ✓ нет confirmation: id + DX hint/doc
+  ✓ confirmation.type = embedded: HTTP 400 + формат ЮKassa
+  ✓ confirmation.type = embedded: parameter=confirmation.type
+  ✓ confirmation.type = embedded: id + DX hint/doc
+  ✓ нет return_url: HTTP 400 + формат ЮKassa
+  ✓ нет return_url: parameter=confirmation.return_url
+  ✓ нет return_url: id + DX hint/doc
+  ✓ description 129 символов: HTTP 400 + формат ЮKassa
+  ✓ description 129 символов: parameter=description
+  ✓ description 129 символов: id + DX hint/doc
+  ✓ metadata 17 ключей: HTTP 400 + формат ЮKassa
+  ✓ metadata 17 ключей: parameter=metadata
+  ✓ metadata 17 ключей: id + DX hint/doc
+  ✓ metadata-ключ 33 символа: HTTP 400 + формат ЮKassa
+  ✓ metadata-ключ 33 символа: parameter=metadata
+  ✓ metadata-ключ 33 символа: id + DX hint/doc
+  ✓ payment_token + payment_method_id вместе: HTTP 400 + формат ЮKassa
+  ✓ payment_token + payment_method_id вместе: id + DX hint/doc
+  ✓ payment_method_data.type = sbp: HTTP 400 + формат ЮKassa
+  ✓ payment_method_data.type = sbp: parameter=payment_method_data.type
+  ✓ payment_method_data.type = sbp: id + DX hint/doc
+  ✓ нет Idempotence-Key: HTTP 400 + формат ЮKassa
+  ✓ нет Idempotence-Key: parameter=Idempotence-Key
+  ✓ нет Idempotence-Key: description
+  ✓ нет Idempotence-Key: id + DX hint/doc
+  ✓ Idempotence-Key 65 символов: HTTP 400 + формат ЮKassa
+  ✓ Idempotence-Key 65 символов: parameter=Idempotence-Key
+  ✓ Idempotence-Key 65 символов: description
+  ✓ Idempotence-Key 65 символов: id + DX hint/doc
+  ✓ битый JSON: HTTP 400 + формат ЮKassa
+  ✓ битый JSON: id + DX hint/doc
+  ✓ 415 без тела (как у ЮKassa)
+  ✓ неизвестный /v3-маршрут: HTTP 404 + формат ЮKassa
+  ✓ неизвестный /v3-маршрут: id + DX hint/doc
+— create + идемпотентность
+[yookassa-mock] payment created: d725f633-f80a-4cd5-800f-11a7a35897c3 100.00 RUB capture=true
+  ✓ create 200: pending, test:true, decimal-строка
+  ✓ create: confirmation.redirect + confirmation_url
+  ✓ create: id — uuid
+  ✓ create: default capture=true не ломает pending
+  ✓ повтор того же ключа -> тот же объект
+  ✓ повтор: заголовок X-Idempotence-Replayed
+  ✓ повтор не создал второй платёж
+  ✓ повтор raw-тела -> тот же объект (hash по raw)
+  ✓ тот же ключ, другое тело -> duplicate: HTTP 400 + формат ЮKassa
+  ✓ тот же ключ, другое тело -> duplicate: parameter=Idempotence-Key
+  ✓ тот же ключ, другое тело -> duplicate: id + DX hint/doc
+  ✓ duplicate: description про дубль
+  ✓ GET платежа -> тот же объект
+  ✓ GET неизвестного платежа: HTTP 404 + формат ЮKassa
+  ✓ GET неизвестного платежа: parameter=payment_id
+  ✓ GET неизвестного платежа: description
+  ✓ GET неизвестного платежа: id + DX hint/doc
+  ✓ GET /v3/payments: {type:list, items, next_cursor}
+  ✓ PUT /v3/payments/{id} -> 405 с пустым телом
+— confirmation-страница и тестовые карты
+  ✓ страница оплаты 200 + тестовые карты
+  ✓ страница неизвестного платежа 404
+[yookassa-mock 2026-10-15 01:31:57] webhook 1 queued: payment.succeeded d725f633-f80a-4cd5-800f-11a7a35897c3
+[yookassa-mock] payment d725f633-f80a-4cd5-800f-11a7a35897c3 succeeded (captured 100.00 RUB)
+  ✓ оплата 302 на return_url
+  ✓ succeeded: paid, refundable, captured_at
+  ✓ authorization_details: rrn + auth_code + 3ds
+  ✓ payment_method: маска, заголовок, тип
+  ✓ refunded_amount 0.00 у succeeded
+  ✓ PAN не хранится в состоянии
+[yookassa-mock 2026-10-15 01:31:58] webhook 1 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+  ✓ webhook payment.succeeded доставлен (ACK 200)
+  ✓ уведомление done после ACK 200
+[yookassa-mock] payment created: 65c47eed-d516-40a5-9f19-cd4df376768e 100.00 RUB capture=true
+  ✓ 3DS: страница ACS
+[yookassa-mock 2026-10-15 01:31:58] webhook 2 queued: payment.succeeded 65c47eed-d516-40a5-9f19-cd4df376768e
+[yookassa-mock] payment 65c47eed-d516-40a5-9f19-cd4df376768e succeeded (captured 100.00 RUB)
+  ✓ 3DS: подтверждение 302
+  ✓ 3DS: succeeded + applied=true
+[yookassa-mock] payment created: 3e324c8e-c4e1-46a2-b5f0-7e3b9df376c9 100.00 RUB capture=true
+[yookassa-mock 2026-10-15 01:31:58] webhook 3 queued: payment.canceled 3e324c8e-c4e1-46a2-b5f0-7e3b9df376c9
+[yookassa-mock] payment 3e324c8e-c4e1-46a2-b5f0-7e3b9df376c9 canceled: payment_network/insufficient_funds
+  ✓ insufficient_funds: 302 покупателю
+  ✓ insufficient_funds: canceled + paid:false
+  ✓ insufficient_funds: payment_network/insufficient_funds
+[yookassa-mock 2026-10-15 01:31:59] webhook 2 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+[yookassa-mock 2026-10-15 01:31:59] webhook 3 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+[yookassa-mock] payment created: ee8c4670-1e7c-40c5-bcd1-77eba31ac0ed 100.00 RUB capture=true
+[yookassa-mock 2026-10-15 01:31:59] webhook 4 queued: payment.canceled ee8c4670-1e7c-40c5-bcd1-77eba31ac0ed
+[yookassa-mock] payment ee8c4670-1e7c-40c5-bcd1-77eba31ac0ed canceled: payment_network/invalid_card_number
+  ✓ invalid_card_number (тестовая): 302 покупателю
+  ✓ invalid_card_number (тестовая): canceled + paid:false
+  ✓ invalid_card_number (тестовая): payment_network/invalid_card_number
+[yookassa-mock 2026-10-15 01:32:00] webhook 4 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+[yookassa-mock] payment created: b59f99e6-1739-4e2b-a8d5-8afc4794de47 100.00 RUB capture=true
+[yookassa-mock 2026-10-15 01:32:00] webhook 5 queued: payment.canceled b59f99e6-1739-4e2b-a8d5-8afc4794de47
+[yookassa-mock] payment b59f99e6-1739-4e2b-a8d5-8afc4794de47 canceled: payment_network/invalid_card_number
+  ✓ Luhn-invalid карта: 302 покупателю
+  ✓ Luhn-invalid карта: canceled + paid:false
+  ✓ Luhn-invalid карта: payment_network/invalid_card_number
+[yookassa-mock 2026-10-15 01:32:01] webhook 5 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+[yookassa-mock] payment created: b056e1c6-8397-4b37-84ed-7ae52a62359e 100.00 RUB capture=true
+[yookassa-mock 2026-10-15 01:32:01] webhook 6 queued: payment.canceled b056e1c6-8397-4b37-84ed-7ae52a62359e
+[yookassa-mock] payment b056e1c6-8397-4b37-84ed-7ae52a62359e canceled: payment_network/general_decline
+  ✓ не-тестовая Luhn-валидная: 302 покупателю
+  ✓ не-тестовая Luhn-валидная: canceled + paid:false
+  ✓ не-тестовая Luhn-валидная: payment_network/general_decline
+[yookassa-mock 2026-10-15 01:32:02] webhook 6 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+[yookassa-mock] payment created: 306f1c67-35eb-44fc-bd77-1cfe302430ed 100.00 RUB capture=true
+[yookassa-mock 2026-10-15 01:32:02] webhook 7 queued: payment.canceled 306f1c67-35eb-44fc-bd77-1cfe302430ed
+[yookassa-mock] payment 306f1c67-35eb-44fc-bd77-1cfe302430ed canceled: yoo_money/fraud_suspected
+  ✓ fraud_suspected: 302 покупателю
+  ✓ fraud_suspected: canceled + paid:false
+  ✓ fraud_suspected: yoo_money/fraud_suspected
+[yookassa-mock 2026-10-15 01:32:03] webhook 7 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+[yookassa-mock] payment created: f0271d0b-b48c-4a1a-b59d-da15108887f7 100.00 RUB capture=true
+  ✓ 3d_secure_failed: 3DS-страница
+[yookassa-mock 2026-10-15 01:32:03] webhook 8 queued: payment.canceled f0271d0b-b48c-4a1a-b59d-da15108887f7
+[yookassa-mock] payment f0271d0b-b48c-4a1a-b59d-da15108887f7 canceled: payment_network/3d_secure_failed
+  ✓ 3d_secure_failed: canceled + paid:false
+  ✓ 3d_secure_failed: payment_network/3d_secure_failed
+[yookassa-mock 2026-10-15 01:32:04] webhook 8 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+[yookassa-mock] payment created: e21fb2ec-717d-48c9-9d19-e28fe52b077a 100.00 RUB capture=true
+  ✓ кривой CVC: ошибка на форме, платёж pending
+[yookassa-mock 2026-10-15 01:32:04] webhook 9 queued: payment.canceled e21fb2ec-717d-48c9-9d19-e28fe52b077a
+[yookassa-mock] payment e21fb2ec-717d-48c9-9d19-e28fe52b077a canceled: payment_network/card_expired
+  ✓ просроченный срок: 302
+  ✓ просроченный срок: card_expired
+— two-stage: capture / cancel
+[yookassa-mock] payment created: 964a37ce-26b5-475e-981b-8dbea6ba5865 100.00 RUB capture=false
+[yookassa-mock 2026-10-15 01:32:04] webhook 10 queued: payment.waiting_for_capture 964a37ce-26b5-475e-981b-8dbea6ba5865
+[yookassa-mock] payment 964a37ce-26b5-475e-981b-8dbea6ba5865 waiting_for_capture (hold until 2026-10-22T01:32:04.193Z)
+  ✓ hold: оплата 302
+  ✓ hold: waiting_for_capture + expires_at
+[yookassa-mock 2026-10-15 01:32:05] webhook 9 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+[yookassa-mock 2026-10-15 01:32:05] webhook 10 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+  ✓ webhook payment.waiting_for_capture
+  ✓ capture без Idempotence-Key: HTTP 400 + формат ЮKassa
+  ✓ capture без Idempotence-Key: parameter=Idempotence-Key
+  ✓ capture без Idempotence-Key: description
+  ✓ capture без Idempotence-Key: id + DX hint/doc
+[yookassa-mock 2026-10-15 01:32:05] webhook 11 queued: payment.succeeded 964a37ce-26b5-475e-981b-8dbea6ba5865
+[yookassa-mock] payment 964a37ce-26b5-475e-981b-8dbea6ba5865 succeeded (captured 100.00 RUB)
+  ✓ capture: succeeded
+[yookassa-mock 2026-10-15 01:32:06] webhook 11 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+  ✓ webhook payment.succeeded после capture
+  ✓ повторный capture: HTTP 400 + формат ЮKassa
+  ✓ повторный capture: id + DX hint/doc
+  ✓ cancel succeeded-платежа: HTTP 400 + формат ЮKassa
+  ✓ cancel succeeded-платежа: id + DX hint/doc
+[yookassa-mock] payment created: c70e9ca7-a3c4-4a29-804c-93c79080fe6a 100.00 RUB capture=false
+[yookassa-mock 2026-10-15 01:32:06] webhook 12 queued: payment.waiting_for_capture c70e9ca7-a3c4-4a29-804c-93c79080fe6a
+[yookassa-mock] payment c70e9ca7-a3c4-4a29-804c-93c79080fe6a waiting_for_capture (hold until 2026-10-22T01:32:06.192Z)
+  ✓ capture больше авторизованного: HTTP 400 + формат ЮKassa
+  ✓ capture больше авторизованного: parameter=amount
+  ✓ capture больше авторизованного: id + DX hint/doc
+  ✓ capture: amount числом: HTTP 400 + формат ЮKassa
+  ✓ capture: amount числом: parameter=amount.value
+  ✓ capture: amount числом: id + DX hint/doc
+[yookassa-mock 2026-10-15 01:32:06] webhook 13 queued: payment.succeeded c70e9ca7-a3c4-4a29-804c-93c79080fe6a
+[yookassa-mock] payment c70e9ca7-a3c4-4a29-804c-93c79080fe6a succeeded (captured 40.00 RUB)
+  ✓ частичный capture 40.00 -> succeeded
+  ✓ частичный capture: amount объекта не меняется
+[yookassa-mock] payment created: 97c8b6c6-a9a7-4d90-9d6c-727bb25523cd 100.00 RUB capture=true
+  ✓ cancel без Idempotence-Key: HTTP 400 + формат ЮKassa
+  ✓ cancel без Idempotence-Key: parameter=Idempotence-Key
+  ✓ cancel без Idempotence-Key: id + DX hint/doc
+[yookassa-mock 2026-10-15 01:32:06] webhook 14 queued: payment.canceled 97c8b6c6-a9a7-4d90-9d6c-727bb25523cd
+[yookassa-mock] payment 97c8b6c6-a9a7-4d90-9d6c-727bb25523cd canceled: merchant/canceled_by_merchant
+  ✓ cancel: canceled + merchant/canceled_by_merchant
+[yookassa-mock 2026-10-15 01:32:07] webhook 12 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+[yookassa-mock 2026-10-15 01:32:07] webhook 13 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+[yookassa-mock 2026-10-15 01:32:07] webhook 14 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+  ✓ повторный cancel: HTTP 400 + формат ЮKassa
+  ✓ повторный cancel: id + DX hint/doc
+  ✓ capture из pending (после cancel): HTTP 400 + формат ЮKassa
+  ✓ capture из pending (после cancel): id + DX hint/doc
+— возвраты
+[yookassa-mock] payment created: c36b654c-00cd-487b-884f-41c7ab2f9d77 100.00 RUB capture=true
+[yookassa-mock 2026-10-15 01:32:07] webhook 15 queued: payment.succeeded c36b654c-00cd-487b-884f-41c7ab2f9d77
+[yookassa-mock] payment c36b654c-00cd-487b-884f-41c7ab2f9d77 succeeded (captured 100.00 RUB)
+  ✓ refund без Idempotence-Key: HTTP 400 + формат ЮKassa
+  ✓ refund без Idempotence-Key: parameter=Idempotence-Key
+  ✓ refund без Idempotence-Key: id + DX hint/doc
+  ✓ refund без payment_id: HTTP 400 + формат ЮKassa
+  ✓ refund без payment_id: parameter=payment_id
+  ✓ refund без payment_id: id + DX hint/doc
+  ✓ refund на неизвестный платёж: HTTP 404 + формат ЮKassa
+  ✓ refund на неизвестный платёж: parameter=payment_id
+  ✓ refund на неизвестный платёж: id + DX hint/doc
+  ✓ refund без amount: HTTP 400 + формат ЮKassa
+  ✓ refund без amount: parameter=amount
+  ✓ refund без amount: id + DX hint/doc
+[yookassa-mock] refund created: 5e1a9415-905f-4cfa-b56f-233a08a80deb -> payment c36b654c-00cd-487b-884f-41c7ab2f9d77 30.00 RUB status=succeeded
+[yookassa-mock 2026-10-15 01:32:07] webhook 16 queued: refund.succeeded 5e1a9415-905f-4cfa-b56f-233a08a80deb
+  ✓ частичный возврат 30.00 -> succeeded
+  ✓ refund: refund_authorization_details.rrn
+[yookassa-mock 2026-10-15 01:32:08] webhook 15 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+[yookassa-mock 2026-10-15 01:32:08] webhook 16 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+  ✓ webhook refund.succeeded
+  ✓ payment.refunded_amount = 30.00
+  ✓ payment после возврата остаётся succeeded
+  ✓ GET возврата
+  ✓ GET неизвестного возврата: HTTP 404 + формат ЮKassa
+  ✓ GET неизвестного возврата: parameter=refund_id
+  ✓ GET неизвестного возврата: id + DX hint/doc
+[yookassa-mock] refund created: 871459b6-4947-4be1-bbe1-bfe9f70956e3 -> payment c36b654c-00cd-487b-884f-41c7ab2f9d77 70.00 RUB status=succeeded
+[yookassa-mock 2026-10-15 01:32:08] webhook 17 queued: refund.succeeded 871459b6-4947-4be1-bbe1-bfe9f70956e3
+  ✓ второй возврат 70.00 (остаток)
+  ✓ возврат больше refundable: HTTP 400 + формат ЮKassa
+  ✓ возврат больше refundable: parameter=amount
+  ✓ возврат больше refundable: id + DX hint/doc
+  ✓ refund по pending (canceled): HTTP 400 + формат ЮKassa
+  ✓ refund по pending (canceled): parameter=payment_id
+  ✓ refund по pending (canceled): id + DX hint/doc
+  ✓ GET /v3/refunds: {type:list}
+  ✓ возврат > частичного capture (40 удержано): HTTP 400 + формат ЮKassa
+  ✓ возврат > частичного capture (40 удержано): parameter=amount
+  ✓ возврат > частичного capture (40 удержано): id + DX hint/doc
+[yookassa-mock] refund created: 1b97214c-a84d-408b-8765-a5ead3d9cca5 -> payment c70e9ca7-a3c4-4a29-804c-93c79080fe6a 40.00 RUB status=succeeded
+[yookassa-mock 2026-10-15 01:32:08] webhook 18 queued: refund.succeeded 1b97214c-a84d-408b-8765-a5ead3d9cca5
+  ✓ возврат ровно удержанной суммы
+— вебхуки: ретраи, drop, дубли
+[yookassa-mock] payment created: 752e0c3c-aec6-4525-84a0-944fcd06c87b 100.00 RUB capture=true
+[yookassa-mock 2026-10-15 01:32:08] webhook 19 queued: payment.succeeded 752e0c3c-aec6-4525-84a0-944fcd06c87b
+[yookassa-mock] payment 752e0c3c-aec6-4525-84a0-944fcd06c87b succeeded (captured 100.00 RUB)
+[yookassa-mock 2026-10-15 01:32:09] webhook 17 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+[yookassa-mock 2026-10-15 01:32:09] webhook 18 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+[yookassa-mock 2026-10-15 01:32:09] webhook 19 failed status=500, retry in 1000ms
+[yookassa-mock 2026-10-15 01:32:11] webhook 19 delivered -> http://127.0.0.1:43173/flaky (2 attempt(s))
+  ✓ недоставленный вебхук ретраится до 200 (повторная доставка)
+[yookassa-mock] payment created: 803dfec8-1c2f-47d5-ba58-673b37f59cd2 100.00 RUB capture=true
+[yookassa-mock 2026-10-15 01:32:11] webhook 20 SUPPRESSED (webhook-drop): payment.succeeded 803dfec8-1c2f-47d5-ba58-673b37f59cd2
+[yookassa-mock] payment 803dfec8-1c2f-47d5-ba58-673b37f59cd2 succeeded (captured 100.00 RUB)
+  ✓ сценарий webhook-drop: уведомление подавлено, приёмник не тронут
+[yookassa-mock] payment created: a1f2c068-17b3-45dd-935d-12d3a5b94135 100.00 RUB capture=true
+[yookassa-mock 2026-10-15 01:32:11] webhook 21 queued: payment.canceled a1f2c068-17b3-45dd-935d-12d3a5b94135
+[yookassa-mock 2026-10-15 01:32:11] webhook 22 queued: payment.canceled a1f2c068-17b3-45dd-935d-12d3a5b94135
+[yookassa-mock] payment a1f2c068-17b3-45dd-935d-12d3a5b94135 canceled: merchant/canceled_by_merchant
+  ✓ cancel с webhook-duplicate: 200
+  ✓ webhook-duplicate: 2 записи в очереди
+[yookassa-mock 2026-10-15 01:32:12] webhook 21 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+[yookassa-mock 2026-10-15 01:32:12] webhook 22 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+  ✓ webhook-duplicate: приёмник получил 2 копии
+— сценарии X-Mock-Scenario
+  ✓ scenario fail -> 500 internal_server_error: HTTP 500 + формат ЮKassa
+  ✓ scenario fail -> 500 internal_server_error: id + DX hint/doc
+  ✓ fail: бизнес не выполняется (платежей не прибавилось)
+  ✓ chaos http-500: HTTP 500 + формат ЮKassa
+  ✓ chaos http-500: id + DX hint/doc
+  ✓ chaos http-504 -> 504 provider-shaped
+  ✓ X-Mock-Latency 300ms выдержан
+  ✓ scenario hang: ответа нет
+  ✓ правило сценария добавлено
+  ✓ правило сработало (fail)
+[yookassa-mock] payment created: 82642c7e-dc5c-4fe5-8a27-0519847d47bb 100.00 RUB capture=true
+  ✓ правило израсходовано (times:1)
+  ✓ история триггеров непустая
+  ✓ правила очищены
+  ✓ #52: правила песочницы A не видны B
+[yookassa-mock] payment created: e89ec9ca-0eea-45a3-972a-822e60d57ed3 100.00 RUB capture=true
+  ✓ #52: правило A (fail) не срабатывает на платеже B
+  ✓ #52: срабатывания правила A в истории B нет
+[yookassa-mock] payment created: f6119dc9-5b0d-4fbe-b154-de091c797e80 100.00 RUB capture=true
+  ✓ #52: история B не видна A, у B своя история есть
+  ✓ #52 PB-13: журналы A и B не пересекаются
+  ✓ #52 PG-09/PB-13: reset A не стирает правила и журнал B
+  ✓ #52: правило >8 KiB -> 400 + code rule_too_large
+  ✓ #52: update по id; oversized update -> 400 без затирания старого
+  ✓ #52: cap 200; 201-е -> 400 + code rule_cap_exceeded
+— виртуальные часы /mock/time
+  ✓ GET /mock/time
+[yookassa-mock] payment created: 9beff604-57ce-4ad7-ab34-ab2f8e8ed680 100.00 RUB capture=false
+[yookassa-mock 2026-10-15 01:32:13] webhook 23 queued: payment.waiting_for_capture 9beff604-57ce-4ad7-ab34-ab2f8e8ed680
+[yookassa-mock] payment 9beff604-57ce-4ad7-ab34-ab2f8e8ed680 waiting_for_capture (hold until 2026-10-22T01:32:13.261Z)
+  ✓ hold создан
+[yookassa-mock 2026-10-15 01:32:13] webhook 24 queued: payment.canceled 9beff604-57ce-4ad7-ab34-ab2f8e8ed680
+[yookassa-mock] payment 9beff604-57ce-4ad7-ab34-ab2f8e8ed680 canceled: yoo_money/expired_on_capture
+  ✓ advance +7d
+  ✓ холд истёк: canceled expired_on_capture
+[yookassa-mock 2026-10-15 01:32:13] webhook 23 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+[yookassa-mock 2026-10-15 01:32:13] webhook 24 delivered -> http://127.0.0.1:43173/hook (1 attempt(s))
+  ✓ offset сброшен
+— журнал, admin, песочницы
+  ✓ journal: есть /v3-записи
+  ✓ journal: curl-сниппет
+  ✓ journal: секретов нет в журнале (F-09)
+  ✓ admin: HTML-консоль
+  ✓ создание/выбор песочницы iso-a
+[yookassa-mock] payment created: 9af73418-5c01-456d-bb6f-25e70f1bc08d 100.00 RUB capture=true
+  ✓ возврат на default
+  ✓ платёж из iso-a в default не виден
+  ✓ тот же платёж виден в iso-a
+  ✓ GET /mock/state
+  ✓ POST /mock/reset
+  ✓ reset очистил платежи default
+— персистентность и control-plane (дочерние процессы)
+  ✓ дочерний стенд: платёж создан
+  ✓ после рестарта платёж читается из state-файла
+  ✓ после рестарта replay идемпотентности работает
+  ✓ с токенами /admin/journal закрыт (401)
+  ✓ токен админа открывает /admin/journal
+  ✓ /mock/time закрыт без оператор-токена
+  ✓ оператор-токен открывает /mock/time
+  ✓ /health публичен
+  ✓ /v3 не требует control-токенов (Basic Auth)
+  ✓ стартовый лог печатает креды
+  ✓ PF-02: лог использует префикс [yookassa-mock], вхождений [mock] нет
+  ✓ #51 PF-01: MOCK_HOSTED=1 в yookassa-mock включает block_private_webhooks=true по умолчанию
+  ✓ отложенный возврат создаётся pending
+  ✓ по тику возврат становится succeeded
+  ✓ webhook refund.succeeded после финализации
+  ✓ PA-50: чужой GET /mock/state?sandbox=victim-b -> 401 без утечки
+  ✓ PA-50: чужой POST /mock/state -> 401
+  ✓ PA-50: чужой POST /mock/reset -> 401
+  ✓ PA-50: чужой DELETE /sandboxes -> 401
+  ✓ PA-50: оператор читает /mock/state?sandbox=victim-b
+  ✓ PA-54: форма защищённой default без токена -> 401
+  ✓ PA-54: публичный /health на защищённой default не раскрывает payments
+  ✓ PA-50 §7.2: истёкшая во время await песочница -> 410 без утечки
+
+ИТОГ: 246 passed, 0 failed · вебхуков доставлено: 26
+SELFTEST PASSED ✅
+
+> mock-services@0.7.0 test:atol
+> node services/atol-mock/selftest.js
+
+
+== atol-mock selftest on :40621 (АТОЛ Онлайн direct API v4, ФФД 1.05) ==
+
+— health, OpenAPI, публичные тестовые реквизиты v4
+  ✓ health 200 ok
+  ✓ health: api=v4, ffd=1.05, группы и TTL токена
+  ✓ health: счётчики документов
+  ✓ /openapi.json отдаёт OpenAPI 3.1 с маршрутами v4
+  ✓ дефолт мока — публичные тестовые реквизиты v4
+— getToken: авторизация v4
+[atol-mock 2026-10-15 01:32:17] getToken DENIED for login=v4***
+  ✓ неверный пароль: provider-shaped error (code=14)
+  ✓ неверный пароль: field=login, pass
+  ✓ неверный пароль: type + error_id + DX hint/doc
+[atol-mock 2026-10-15 01:32:17] getToken DENIED for login=v5***
+  ✓ неверный login (креды v5 против стенда v4) -> code 14
+[atol-mock 2026-10-15 01:32:17] getToken DENIED for login=[REDACTED]
+  ✓ пустые креды -> code 14
+[atol-mock 2026-10-15 01:32:17] getToken OK for v4***
+  ✓ getToken выдаёт токен
+  ✓ getToken: ответ без error
+— sell: wait -> done, payload с ФД/ФП/ФН/ККТ
+[atol-mock 2026-10-15 01:32:17] doc 0c976d46-fe32-480d-842a-baa792e6302d принят в очередь: sell group=v4-online-atol-ru_4179 external_id=st-sell-1 total=241 items=1
+  ✓ sell принят: {uuid, status:"wait"}
+  ✓ report до печати: status=wait, payload=null
+  ✓ report: эхо external_id/group/type
+  ✓ страница чека до печати объясняет, что документ ещё в очереди
+[atol-mock 2026-10-15 01:32:17] 
+===== ЧЕК НАПЕЧАТАН (sell) =====
+--------------------------------
+ТЕСТОВАЯ КАССА АТОЛ (МОК)
+ИНН 5544332219
+--------------------------------
+КАССОВЫЙ ЧЕК · ПРИХОД
+СНО: usn_income
+Сайт ФНС: www.nalog.gov.ru
+--------------------------------
+Кофе латте
+  2 x 120.50 = 241.00
+  ПОЛНЫЙ РАСЧЁТ · COMMODITY
+  НДС 20/120
+--------------------------------
+ИТОГО: 241.00 р
+  ЭЛЕКТРОННЫМИ: 241.00 р
+--------------------------------
+НДС 20/120: 40.17 р
+--------------------------------
+ФД: 50001  ФП: 1395957919
+ФН: 9999078902001294  ККТ: 0001234567025896
+Смена: 12  Чек №: 2
+2026-10-15T01:32:37
+--------------------------------
+ОФД: ИНН 7709359901
+http://mock.test/receipts/0c976d46-fe32-480d-842a-baa792e6302d
+--------------------------------
+НЕ ОТПРАВЛЯЕТСЯ В ФНС (тестовый контур МГМ)
+--------------------------------
+============================================
+[atol-mock 2026-10-15 01:32:17] doc 0c976d46-fe32-480d-842a-baa792e6302d: callback поставлен -> http://127.0.0.1:35661/hook
+  ✓ POST /mock/time advance +20s
+  ✓ report после печати: status=done
+  ✓ payload: ФД и ФП
+  ✓ payload: номер ФН и ККТ
+  ✓ payload: смена, номер чека, дата
+  ✓ payload: ofd_receipt_url ведёт на страницу чека
+  ✓ payload: total в decimal-рублях и СНО
+  ✓ payload: vat_amounts по ставке vat120 (20/120)
+  ✓ страница чека /receipts/{uuid} отдаёт ленту с ФД/ФП
+— callback: POST результата, ретраи, дубли, идемпотентный приём
+[atol-mock 2026-10-15 01:32:18] webhook 1 delivered -> http://127.0.0.1:35661/hook (1 attempt(s))
+  ✓ callback доставлен POST-ом на service.callback_url
+  ✓ callback: тело = результат документа (uuid/external_id/status)
+  ✓ callback: payload с ФД — сверяется с report
+  ✓ callback: error=null при успехе
+  ✓ callback: подпись в тело не добавляется (v4 её не предусматривает)
+  ✓ report и callback согласованы (сверка через report)
+[atol-mock 2026-10-15 01:32:18] doc e17aac03-b17d-453b-bdd9-01295b340f74 принят в очередь: sell group=v4-online-atol-ru_4179 external_id=st-flaky-1 total=241 items=1
+[atol-mock 2026-10-15 01:32:18] 
+===== ЧЕК НАПЕЧАТАН (sell) =====
+--------------------------------
+ТЕСТОВАЯ КАССА АТОЛ (МОК)
+ИНН 5544332219
+--------------------------------
+КАССОВЫЙ ЧЕК · ПРИХОД
+СНО: usn_income
+Сайт ФНС: www.nalog.gov.ru
+--------------------------------
+Кофе латте
+  2 x 120.50 = 241.00
+  ПОЛНЫЙ РАСЧЁТ · COMMODITY
+  НДС 20/120
+--------------------------------
+ИТОГО: 241.00 р
+  ЭЛЕКТРОННЫМИ: 241.00 р
+--------------------------------
+НДС 20/120: 40.17 р
+--------------------------------
+ФД: 50002  ФП: 1395965838
+ФН: 9999078902001294  ККТ: 0001234567025896
+Смена: 12  Чек №: 3
+2026-10-15T01:32:58
+--------------------------------
+ОФД: ИНН 7709359901
+http://mock.test/receipts/e17aac03-b17d-453b-bdd9-01295b340f74
+--------------------------------
+НЕ ОТПРАВЛЯЕТСЯ В ФНС (тестовый контур МГМ)
+--------------------------------
+============================================
+[atol-mock 2026-10-15 01:32:18] doc e17aac03-b17d-453b-bdd9-01295b340f74: callback поставлен -> http://127.0.0.1:35661/flaky
+[atol-mock 2026-10-15 01:32:19] webhook 2 failed status=500, retry in 1000ms
+[atol-mock 2026-10-15 01:32:21] webhook 2 delivered -> http://127.0.0.1:35661/flaky (2 attempt(s))
+  ✓ callback на 500 повторяется (ретрай до 2xx)
+  ✓ идемпотентный приём: обе доставки одного документа (тот же uuid)
+[atol-mock 2026-10-15 01:32:21] doc 683ee9e8-0a40-4b40-b65c-37c32f49205b принят в очередь: sell group=v4-online-atol-ru_4179 external_id=st-dup-1 total=241 items=1
+[atol-mock 2026-10-15 01:32:21] 
+===== ЧЕК НАПЕЧАТАН (sell) =====
+--------------------------------
+ТЕСТОВАЯ КАССА АТОЛ (МОК)
+ИНН 5544332219
+--------------------------------
+КАССОВЫЙ ЧЕК · ПРИХОД
+СНО: usn_income
+Сайт ФНС: www.nalog.gov.ru
+--------------------------------
+Кофе латте
+  2 x 120.50 = 241.00
+  ПОЛНЫЙ РАСЧЁТ · COMMODITY
+  НДС 20/120
+--------------------------------
+ИТОГО: 241.00 р
+  ЭЛЕКТРОННЫМИ: 241.00 р
+--------------------------------
+НДС 20/120: 40.17 р
+--------------------------------
+ФД: 50003  ФП: 1395973757
+ФН: 9999078902001294  ККТ: 0001234567025896
+Смена: 12  Чек №: 4
+2026-10-15T01:33:21
+--------------------------------
+ОФД: ИНН 7709359901
+http://mock.test/receipts/683ee9e8-0a40-4b40-b65c-37c32f49205b
+--------------------------------
+НЕ ОТПРАВЛЯЕТСЯ В ФНС (тестовый контур МГМ)
+--------------------------------
+============================================
+[atol-mock 2026-10-15 01:32:21] doc 683ee9e8-0a40-4b40-b65c-37c32f49205b: callback поставлен -> http://127.0.0.1:35661/hook (дубль x2)
+[atol-mock 2026-10-15 01:32:22] webhook 3 delivered -> http://127.0.0.1:35661/hook (1 attempt(s))
+[atol-mock 2026-10-15 01:32:22] webhook 4 delivered -> http://127.0.0.1:35661/hook (1 attempt(s))
+  ✓ webhook-duplicate: две копии результата (приёмник должен быть идемпотентен)
+[atol-mock 2026-10-15 01:32:22] doc 651bc3d3-482e-4619-a537-69d330861be1 принят в очередь: sell group=v4-online-atol-ru_4179 external_id=st-drop-1 total=241 items=1
+[atol-mock 2026-10-15 01:32:22] 
+===== ЧЕК НАПЕЧАТАН (sell) =====
+--------------------------------
+ТЕСТОВАЯ КАССА АТОЛ (МОК)
+ИНН 5544332219
+--------------------------------
+КАССОВЫЙ ЧЕК · ПРИХОД
+СНО: usn_income
+Сайт ФНС: www.nalog.gov.ru
+--------------------------------
+Кофе латте
+  2 x 120.50 = 241.00
+  ПОЛНЫЙ РАСЧЁТ · COMMODITY
+  НДС 20/120
+--------------------------------
+ИТОГО: 241.00 р
+  ЭЛЕКТРОННЫМИ: 241.00 р
+--------------------------------
+НДС 20/120: 40.17 р
+--------------------------------
+ФД: 50004  ФП: 1395981676
+ФН: 9999078902001294  ККТ: 0001234567025896
+Смена: 12  Чек №: 5
+2026-10-15T01:33:42
+--------------------------------
+ОФД: ИНН 7709359901
+http://mock.test/receipts/651bc3d3-482e-4619-a537-69d330861be1
+--------------------------------
+НЕ ОТПРАВЛЯЕТСЯ В ФНС (тестовый контур МГМ)
+--------------------------------
+============================================
+[atol-mock 2026-10-15 01:32:22] doc 651bc3d3-482e-4619-a537-69d330861be1: callback подавлен сценарием (webhook-drop)
+  ✓ webhook-drop: callback подавлен, но report отдаёт результат
+[atol-mock 2026-10-15 01:32:22] doc 788eb071-8e00-46ca-a8f4-9f0c70bf4d51 принят в очередь: sell group=v4-online-atol-ru_4179 external_id=st-nocb-1 total=241 items=1
+[atol-mock 2026-10-15 01:32:22] 
+===== ЧЕК НАПЕЧАТАН (sell) =====
+--------------------------------
+ТЕСТОВАЯ КАССА АТОЛ (МОК)
+ИНН 5544332219
+--------------------------------
+КАССОВЫЙ ЧЕК · ПРИХОД
+СНО: usn_income
+Сайт ФНС: www.nalog.gov.ru
+--------------------------------
+Кофе латте
+  2 x 120.50 = 241.00
+  ПОЛНЫЙ РАСЧЁТ · COMMODITY
+  НДС 20/120
+--------------------------------
+ИТОГО: 241.00 р
+  ЭЛЕКТРОННЫМИ: 241.00 р
+--------------------------------
+НДС 20/120: 40.17 р
+--------------------------------
+ФД: 50005  ФП: 1395989595
+ФН: 9999078902001294  ККТ: 0001234567025896
+Смена: 12  Чек №: 6
+2026-10-15T01:34:02
+--------------------------------
+ОФД: ИНН 7709359901
+http://mock.test/receipts/788eb071-8e00-46ca-a8f4-9f0c70bf4d51
+--------------------------------
+НЕ ОТПРАВЛЯЕТСЯ В ФНС (тестовый контур МГМ)
+--------------------------------
+============================================
+[atol-mock 2026-10-15 01:32:22] doc 788eb071-8e00-46ca-a8f4-9f0c70bf4d51: service.callback_url не передан — результат доступен только через report
+  ✓ без service.callback_url: докумнт обработан, callback не отправляется
+— идемпотентность external_id: повтор -> тот же UUID (НЕ ошибка)
+[atol-mock 2026-10-15 01:32:22] doc 0c976d46-fe32-480d-842a-baa792e6302d: повтор external_id=st-sell-1 — возвращаю ранее назначенный UUID (второй чек не создаётся)
+  ✓ повтор того же external_id НЕ ошибка (error=null)
+  ✓ повтор вернул ТОТ ЖЕ uuid
+  ✓ второй чек не создан (число документов не выросло)
+  ✓ повтор помечен заголовком X-Mock-Replayed
+  ✓ повтор объясняет, что тело проигнорировано (DX hint)
+  ✓ повтор вернул актуальный статус документа (done, а не wait)
+  ✓ один external_id в двух группах — два разных документа
+  ✓ повтор в своей группе возвращает свой uuid
+  ✓ отчёт в чужой группе — документ не найден (code 10)
+  ✓ песочница default не изменилась от дочернего прогона
+— операции v4: возврат прихода, расход, коррекции
+[atol-mock 2026-10-15 01:32:22] doc cbb9d7f3-7551-4143-983f-da2d09ab287e принят в очередь: sell_refund group=v4-online-atol-ru_4179 external_id=st-refund-1 total=120.5 items=1
+  ✓ sell_refund принят в очередь
+[atol-mock 2026-10-15 01:32:22] 
+===== ЧЕК НАПЕЧАТАН (sell_refund) =====
+--------------------------------
+ТЕСТОВАЯ КАССА АТОЛ (МОК)
+ИНН 5544332219
+--------------------------------
+КАССОВЫЙ ЧЕК · ВОЗВРАТ ПРИХОДА
+СНО: usn_income
+Сайт ФНС: www.nalog.gov.ru
+--------------------------------
+Кофе латте
+  1 x 120.50 = 120.50
+  ПОЛНЫЙ РАСЧЁТ · COMMODITY
+  НДС 20/120
+--------------------------------
+ИТОГО: 120.50 р
+  ЭЛЕКТРОННЫМИ: 120.50 р
+--------------------------------
+НДС 20/120: 20.08 р
+--------------------------------
+ФД: 50006  ФП: 1395997514
+ФН: 9999078902001294  ККТ: 0001234567025896
+Смена: 12  Чек №: 7
+2026-10-15T01:34:22
+--------------------------------
+ОФД: ИНН 7709359901
+http://mock.test/receipts/cbb9d7f3-7551-4143-983f-da2d09ab287e
+--------------------------------
+НЕ ОТПРАВЛЯЕТСЯ В ФНС (тестовый контур МГМ)
+--------------------------------
+============================================
+[atol-mock 2026-10-15 01:32:22] doc cbb9d7f3-7551-4143-983f-da2d09ab287e: callback поставлен -> http://127.0.0.1:35661/hook
+  ✓ sell_refund напечатан: payload.total = 120.50
+[atol-mock 2026-10-15 01:32:23] webhook 5 delivered -> http://127.0.0.1:35661/hook (1 attempt(s))
+  ✓ callback возврата доставлен
+[atol-mock 2026-10-15 01:32:23] doc ddc7ea16-3f2c-4c90-bff1-37db98b035d1 принят в очередь: buy group=v4-online-atol-ru_4179 external_id=st-buy-1 total=50.00 items=1
+  ✓ buy (расход) принят: decimal-строки и наличные type=0
+[atol-mock 2026-10-15 01:32:23] 
+===== ЧЕК НАПЕЧАТАН (buy) =====
+--------------------------------
+ТЕСТОВАЯ КАССА АТОЛ (МОК)
+ИНН 5544332219
+--------------------------------
+КАССОВЫЙ ЧЕК · РАСХОД
+СНО: usn_income
+Сайт ФНС: www.nalog.gov.ru
+--------------------------------
+Выплата поставщику
+  1 x 50.00 = 50.00
+  SERVICE
+  НДС без НДС
+--------------------------------
+ИТОГО: 50.00 р
+  НАЛИЧНЫМИ: 50.00 р
+--------------------------------
+НДС: без НДС
+--------------------------------
+ФД: 50007  ФП: 1396005433
+ФН: 9999078902001294  ККТ: 0001234567025896
+Смена: 12  Чек №: 8
+2026-10-15T01:34:43
+--------------------------------
+ОФД: ИНН 7709359901
+http://mock.test/receipts/ddc7ea16-3f2c-4c90-bff1-37db98b035d1
+--------------------------------
+НЕ ОТПРАВЛЯЕТСЯ В ФНС (тестовый контур МГМ)
+--------------------------------
+============================================
+[atol-mock 2026-10-15 01:32:23] doc ddc7ea16-3f2c-4c90-bff1-37db98b035d1: service.callback_url не передан — результат доступен только через report
+  ✓ buy напечатан, в ленте «НАЛИЧНЫМИ»
+[atol-mock 2026-10-15 01:32:23] doc d58fcb42-fb88-4dbd-a379-497fc69c81c7 принят в очередь: sell_correction group=v4-online-atol-ru_4179 external_id=st-sell_correction-1 total=10 items=1
+  ✓ sell_correction принят в очередь
+[atol-mock 2026-10-15 01:32:23] 
+===== ЧЕК НАПЕЧАТАН (sell_correction) =====
+--------------------------------
+ТЕСТОВАЯ КАССА АТОЛ (МОК)
+ИНН 5544332219
+--------------------------------
+ЧЕК КОРРЕКЦИИ · ПРИХОД
+СНО: usn_income
+Сайт ФНС: www.nalog.gov.ru
+--------------------------------
+Корректировка
+  1 x 10.00 = 10.00
+  НДС 20%
+--------------------------------
+ИТОГО: 10.00 р
+  ЭЛЕКТРОННЫМИ: 10.00 р
+--------------------------------
+НДС 20%: 1.67 р
+--------------------------------
+ФД: 50008  ФП: 1396013352
+ФН: 9999078902001294  ККТ: 0001234567025896
+Смена: 12  Чек №: 9
+2026-10-15T01:35:03
+--------------------------------
+ОФД: ИНН 7709359901
+http://mock.test/receipts/d58fcb42-fb88-4dbd-a379-497fc69c81c7
+--------------------------------
+НЕ ОТПРАВЛЯЕТСЯ В ФНС (тестовый контур МГМ)
+--------------------------------
+============================================
+[atol-mock 2026-10-15 01:32:23] doc d58fcb42-fb88-4dbd-a379-497fc69c81c7: service.callback_url не передан — результат доступен только через report
+  ✓ sell_correction напечатан
+[atol-mock 2026-10-15 01:32:23] doc 2412eb0b-2596-4c64-b5ed-9900386bf4e8 принят в очередь: buy_refund group=v4-online-atol-ru_4179 external_id=st-buy_refund-1 total=10 items=1
+  ✓ buy_refund принят в очередь
+[atol-mock 2026-10-15 01:32:23] 
+===== ЧЕК НАПЕЧАТАН (buy_refund) =====
+--------------------------------
+ТЕСТОВАЯ КАССА АТОЛ (МОК)
+ИНН 5544332219
+--------------------------------
+КАССОВЫЙ ЧЕК · ВОЗВРАТ РАСХОДА
+СНО: usn_income
+Сайт ФНС: www.nalog.gov.ru
+--------------------------------
+Корректировка
+  1 x 10.00 = 10.00
+  НДС 20%
+--------------------------------
+ИТОГО: 10.00 р
+  ЭЛЕКТРОННЫМИ: 10.00 р
+--------------------------------
+НДС 20%: 1.67 р
+--------------------------------
+ФД: 50009  ФП: 1396021271
+ФН: 9999078902001294  ККТ: 0001234567025896
+Смена: 12  Чек №: 10
+2026-10-15T01:35:23
+--------------------------------
+ОФД: ИНН 7709359901
+http://mock.test/receipts/2412eb0b-2596-4c64-b5ed-9900386bf4e8
+--------------------------------
+НЕ ОТПРАВЛЯЕТСЯ В ФНС (тестовый контур МГМ)
+--------------------------------
+============================================
+[atol-mock 2026-10-15 01:32:23] doc 2412eb0b-2596-4c64-b5ed-9900386bf4e8: service.callback_url не передан — результат доступен только через report
+  ✓ buy_refund напечатан
+[atol-mock 2026-10-15 01:32:23] doc 324aaeec-d901-41cf-a2cd-d3362ec8ca6e принят в очередь: buy_correction group=v4-online-atol-ru_4179 external_id=st-buy_correction-1 total=10 items=1
+  ✓ buy_correction принят в очередь
+[atol-mock 2026-10-15 01:32:23] 
+===== ЧЕК НАПЕЧАТАН (buy_correction) =====
+--------------------------------
+ТЕСТОВАЯ КАССА АТОЛ (МОК)
+ИНН 5544332219
+--------------------------------
+ЧЕК КОРРЕКЦИИ · РАСХОД
+СНО: usn_income
+Сайт ФНС: www.nalog.gov.ru
+--------------------------------
+Корректировка
+  1 x 10.00 = 10.00
+  НДС 20%
+--------------------------------
+ИТОГО: 10.00 р
+  ЭЛЕКТРОННЫМИ: 10.00 р
+--------------------------------
+НДС 20%: 1.67 р
+--------------------------------
+ФД: 50010  ФП: 1396029190
+ФН: 9999078902001294  ККТ: 0001234567025896
+Смена: 12  Чек №: 11
+2026-10-15T01:35:43
+--------------------------------
+ОФД: ИНН 7709359901
+http://mock.test/receipts/324aaeec-d901-41cf-a2cd-d3362ec8ca6e
+--------------------------------
+НЕ ОТПРАВЛЯЕТСЯ В ФНС (тестовый контур МГМ)
+--------------------------------
+============================================
+[atol-mock 2026-10-15 01:32:23] doc 324aaeec-d901-41cf-a2cd-d3362ec8ca6e: service.callback_url не передан — результат доступен только через report
+  ✓ buy_correction напечатан
+— негативы: группа, реквизиты ФФД, токены, формат
+  ✓ чужая группа: provider-shaped error (code=4)
+  ✓ чужая группа: field=group_code
+  ✓ чужая группа: type + error_id + DX hint/doc
+[atol-mock 2026-10-15 01:32:23] sell REJECTED (валидация реквизитов): receipt.client — external_id=st-neg-1
+  ✓ client без email и телефона: provider-shaped error (code=4)
+  ✓ client без email и телефона: field=receipt.client
+  ✓ client без email и телефона: type + error_id + DX hint/doc
+[atol-mock 2026-10-15 01:32:23] sell REJECTED (валидация реквизитов): receipt.client.email — external_id=st-neg-2
+  ✓ client.email некорректный: provider-shaped error (code=4)
+  ✓ client.email некорректный: field=receipt.client.email
+  ✓ client.email некорректный: type + error_id + DX hint/doc
+[atol-mock 2026-10-15 01:32:23] sell REJECTED (валидация реквизитов): receipt.client.phone — external_id=st-neg-3
+  ✓ client.phone некорректный: provider-shaped error (code=4)
+  ✓ client.phone некорректный: field=receipt.client.phone
+  ✓ client.phone некорректный: type + error_id + DX hint/doc
+[atol-mock 2026-10-15 01:32:23] sell REJECTED (валидация реквизитов): receipt.company — external_id=st-neg-4
+  ✓ нет company: provider-shaped error (code=4)
+  ✓ нет company: field=receipt.company
+  ✓ нет company: type + error_id + DX hint/doc
+[atol-mock 2026-10-15 01:32:23] sell REJECTED (валидация реквизитов): receipt.company.inn — external_id=st-neg-5
+  ✓ company.inn из 3 цифр: provider-shaped error (code=4)
+  ✓ company.inn из 3 цифр: field=receipt.company.inn
+  ✓ company.inn из 3 цифр: type + error_id + DX hint/doc
+[atol-mock 2026-10-15 01:32:23] sell REJECTED (валидация реквизитов): receipt.company.payment_address — external_id=st-neg-6
+  ✓ нет company.payment_address: provider-shaped error (code=4)
+  ✓ нет company.payment_address: field=receipt.company.payment_address
+  ✓ нет company.payment_address: type + error_id + DX hint/doc
+[atol-mock 2026-10-15 01:32:23] sell REJECTED (валидация реквизитов): receipt.company.sno — external_id=st-neg-7
+  ✓ неизвестная СНО: provider-shaped error (code=4)
+  ✓ неизвестная СНО: field=receipt.company.sno
+  ✓ неизвестная СНО: type + error_id + DX hint/doc
+[atol-mock 2026-10-15 01:32:23] sell REJECTED (валидация реквизитов): receipt.items — external_id=st-neg-8
+  ✓ пустой items: provider-shaped error (code=4)
+  ✓ пустой items: field=receipt.items
+  ✓ пустой items: type + error_id + DX hint/doc
+[atol-mock 2026-10-15 01:32:23] sell REJECTED (валидация реквизитов): receipt.items[0].vat — external_id=st-neg-9
+  ✓ неизвестная ставка НДС: provider-shaped error (code=4)
+  ✓ неизвестная ставка НДС: field=receipt.items[0].vat
+  ✓ неизвестная ставка НДС: type + error_id + DX hint/doc
+[atol-mock 2026-10-15 01:32:23] sell REJECTED (валидация реквизитов): receipt.items[0].vat — external_id=st-neg-10
+  ✓ Ferma-синтаксис vat20_120 отклонён с подсказкой про vat120: provider-shaped error (code=4)
+  ✓ Ferma-синтаксис vat20_120 отклонён с подсказкой про vat120: field=receipt.items[0].vat
+  ✓ Ferma-синтаксис vat20_120 отклонён с подсказкой про vat120: type + error_id + DX hint/doc
+  ✓ hint объясняет запись расчётной ставки v4
+[atol-mock 2026-10-15 01:32:23] sell REJECTED (валидация реквизитов): receipt.items[0].vat — external_id=st-neg-11
+  ✓ нет vat у позиции: provider-shaped error (code=4)
+  ✓ нет vat у позиции: field=receipt.items[0].vat
+  ✓ нет vat у позиции: type + error_id + DX hint/doc
+[atol-mock 2026-10-15 01:32:23] sell REJECTED (валидация реквизитов): receipt.items[0].sum — external_id=st-neg-12
+  ✓ sum ≠ price × quantity: provider-shaped error (code=4)
+  ✓ sum ≠ price × quantity: field=receipt.items[0].sum
+  ✓ sum ≠ price × quantity: type + error_id + DX hint/doc
+[atol-mock 2026-10-15 01:32:23] sell REJECTED (валидация реквизитов): receipt.total — external_id=st-neg-13
+  ✓ total ≠ сумме позиций: provider-shaped error (code=4)
+  ✓ total ≠ сумме позиций: field=receipt.total
+  ✓ total ≠ сумме позиций: type + error_id + DX hint/doc
+[atol-mock 2026-10-15 01:32:23] sell REJECTED (валидация реквизитов): receipt.payments — external_id=st-neg-14
+  ✓ Σ оплат ≠ итогу: provider-shaped error (code=4)
+  ✓ Σ оплат ≠ итогу: field=receipt.payments
+  ✓ Σ оплат ≠ итогу: type + error_id + DX hint/doc
+[atol-mock 2026-10-15 01:32:23] sell REJECTED (валидация реквизитов): receipt.payments[0].type — external_id=st-neg-15
+  ✓ payments.type=5 (Ferma) отклонён: provider-shaped error (code=4)
+  ✓ payments.type=5 (Ferma) отклонён: field=receipt.payments[0].type
+  ✓ payments.type=5 (Ferma) отклонён: type + error_id + DX hint/doc
+  ✓ hint объясняет формы расчёта v4 (ФФД 1081)
+[atol-mock 2026-10-15 01:32:23] sell REJECTED (валидация реквизитов): receipt.items[0].price — external_id=st-neg-16
+  ✓ цена с 3 знаками после запятой: provider-shaped error (code=4)
+  ✓ цена с 3 знаками после запятой: field=receipt.items[0].price
+  ✓ цена с 3 знаками после запятой: type + error_id + DX hint/doc
+  ✓ нет external_id: provider-shaped error (code=5)
+  ✓ нет external_id: field=external_id
+  ✓ нет external_id: type + error_id + DX hint/doc
+  ✓ external_id длиннее 128 символов: provider-shaped error (code=5)
+  ✓ external_id длиннее 128 символов: field=external_id
+  ✓ external_id длиннее 128 символов: type + error_id + DX hint/doc
+[atol-mock 2026-10-15 01:32:23] sell REJECTED (валидация реквизитов): timestamp — external_id=st-neg-17
+  ✓ timestamp не в формате dd.mm.yyyy HH:MM:SS: provider-shaped error (code=4)
+  ✓ timestamp не в формате dd.mm.yyyy HH:MM:SS: field=timestamp
+  ✓ timestamp не в формате dd.mm.yyyy HH:MM:SS: type + error_id + DX hint/doc
+  ✓ битый JSON в теле: provider-shaped error (code=4)
+  ✓ битый JSON в теле: type + error_id + DX hint/doc
+  ✓ нет заголовка Token: provider-shaped error (code=11)
+  ✓ нет заголовка Token: field=Token
+  ✓ нет заголовка Token: type + error_id + DX hint/doc
+  ✓ hint подсказывает отличие v4 от Ferma (?token=)
+  ✓ чужой/неизвестный токен: provider-shaped error (code=11)
+  ✓ чужой/неизвестный токен: field=Token
+  ✓ чужой/неизвестный токен: type + error_id + DX hint/doc
+  ✓ токен в query (Ferma-стиль) в v4 не работает: provider-shaped error (code=11)
+  ✓ токен в query (Ferma-стиль) в v4 не работает: type + error_id + DX hint/doc
+  ✓ report: неизвестный uuid: provider-shaped error (code=10)
+  ✓ report: неизвестный uuid: field=uuid
+  ✓ report: неизвестный uuid: type + error_id + DX hint/doc
+  ✓ report без токена: provider-shaped error (code=11)
+  ✓ report без токена: type + error_id + DX hint/doc
+  ✓ GET на маршруте регистрации -> 405: provider-shaped error (code=4)
+  ✓ GET на маршруте регистрации -> 405: type + error_id + DX hint/doc
+  ✓ маршрут Ferma /possystem/v1 не обслуживается: provider-shaped error (code=404)
+  ✓ маршрут Ferma /possystem/v1 не обслуживается: type + error_id + DX hint/doc
+— сценарии: fail (отказ печати), hang, latency, http-500/504
+[atol-mock 2026-10-15 01:32:23] doc fdb113bf-4acb-4874-b66d-5737b47df550 принят в очередь: sell group=v4-online-atol-ru_4179 external_id=fail-st-1 total=241 items=1
+  ✓ сценарий fail: документ принят в очередь
+[atol-mock 2026-10-15 01:32:23] doc fdb113bf-4acb-4874-b66d-5737b47df550: FAILED (сценарий fail)
+[atol-mock 2026-10-15 01:32:23] doc fdb113bf-4acb-4874-b66d-5737b47df550: callback поставлен -> http://127.0.0.1:35661/hook
+  ✓ report: status=fail, error.code=57, payload=null
+  ✓ report: error несёт code/text/type/error_id (не сводится к HTTP-коду)
+[atol-mock 2026-10-15 01:32:24] webhook 6 delivered -> http://127.0.0.1:35661/hook (1 attempt(s))
+  ✓ callback об отказе: status=fail и error (не «молчаливый» успех)
+[atol-mock 2026-10-15 01:32:24] doc 6f243cde-4afe-4d37-b04d-955c2c73d916 принят в очередь: sell group=v4-online-atol-ru_4179 external_id=fail-st-2 total=241 items=1
+[atol-mock 2026-10-15 01:32:24] doc 6f243cde-4afe-4d37-b04d-955c2c73d916: FAILED (сценарий fail)
+[atol-mock 2026-10-15 01:32:24] doc 6f243cde-4afe-4d37-b04d-955c2c73d916: service.callback_url не передан — результат доступен только через report
+  ✓ external_id с префиксом fail- -> отказ печати
+[atol-mock 2026-10-15 01:32:24] doc eccb6cc2-70f0-41cc-b6b0-3247482682d8 принят в очередь: sell group=v4-online-atol-ru_4179 external_id=hang-st-1 total=241 items=1
+  ✓ external_id с префиксом hang- -> вечный wait, callback не уходит
+[atol-mock 2026-10-15 01:32:25] doc d4cfdc1a-5f61-4a02-b166-799ce15bb5db принят в очередь: sell group=v4-online-atol-ru_4179 external_id=st-latency-1 total=241 items=1
+  ✓ X-Mock-Latency 300ms выдержан
+  ✓ chaos http-500 (системный сбой) -> 500 provider-shaped: provider-shaped error (code=500)
+  ✓ chaos http-500 (системный сбой) -> 500 provider-shaped: type + error_id + DX hint/doc
+  ✓ hint советует паузу ≥1 с и сверку через report (рекомендация v4)
+  ✓ chaos http-504 -> 504 provider-shaped: provider-shaped error (code=500)
+  ✓ chaos http-504 -> 504 provider-shaped: type + error_id + DX hint/doc
+[atol-mock 2026-10-15 01:32:25] doc a7a6f05d-fbff-4cc1-80cf-23c507354e37 принят в очередь: sell group=v4-online-atol-ru_4179 external_id=st-hang-req total=241 items=1
+  ✓ сценарий hang на запросе: ответа нет (клиент должен таймаутить)
+  ✓ правило сценария добавлено
+[atol-mock 2026-10-15 01:32:25] doc 57522649-75fe-40b2-8817-a7ae6e961ca5 принят в очередь: sell group=v4-online-atol-ru_4179 external_id=st-rule-1 total=241 items=1
+[atol-mock 2026-10-15 01:32:25] 
+===== ЧЕК НАПЕЧАТАН (sell) =====
+--------------------------------
+ТЕСТОВАЯ КАССА АТОЛ (МОК)
+ИНН 5544332219
+--------------------------------
+КАССОВЫЙ ЧЕК · ПРИХОД
+СНО: usn_income
+Сайт ФНС: www.nalog.gov.ru
+--------------------------------
+Кофе латте
+  2 x 120.50 = 241.00
+  ПОЛНЫЙ РАСЧЁТ · COMMODITY
+  НДС 20/120
+--------------------------------
+ИТОГО: 241.00 р
+  ЭЛЕКТРОННЫМИ: 241.00 р
+--------------------------------
+НДС 20/120: 40.17 р
+--------------------------------
+ФД: 50014  ФП: 1396060866
+ФН: 9999078902001294  ККТ: 0001234567025896
+Смена: 12  Чек №: 12
+2026-10-15T01:37:45
+--------------------------------
+ОФД: ИНН 7709359901
+http://mock.test/receipts/d4cfdc1a-5f61-4a02-b166-799ce15bb5db
+--------------------------------
+НЕ ОТПРАВЛЯЕТСЯ В ФНС (тестовый контур МГМ)
+--------------------------------
+============================================
+[atol-mock 2026-10-15 01:32:25] doc d4cfdc1a-5f61-4a02-b166-799ce15bb5db: service.callback_url не передан — результат доступен только через report
+[atol-mock 2026-10-15 01:32:25] doc 57522649-75fe-40b2-8817-a7ae6e961ca5: FAILED (сценарий fail)
+[atol-mock 2026-10-15 01:32:25] doc 57522649-75fe-40b2-8817-a7ae6e961ca5: service.callback_url не передан — результат доступен только через report
+  ✓ правило /mock/scenarios сработало (fail)
+[atol-mock 2026-10-15 01:32:25] doc 8504b197-9719-4bd4-8679-c430ae22cd66 принят в очередь: sell group=v4-online-atol-ru_4179 external_id=st-rule-2 total=241 items=1
+[atol-mock 2026-10-15 01:32:25] 
+===== ЧЕК НАПЕЧАТАН (sell) =====
+--------------------------------
+ТЕСТОВАЯ КАССА АТОЛ (МОК)
+ИНН 5544332219
+--------------------------------
+КАССОВЫЙ ЧЕК · ПРИХОД
+СНО: usn_income
+Сайт ФНС: www.nalog.gov.ru
+--------------------------------
+Кофе латте
+  2 x 120.50 = 241.00
+  ПОЛНЫЙ РАСЧЁТ · COMMODITY
+  НДС 20/120
+--------------------------------
+ИТОГО: 241.00 р
+  ЭЛЕКТРОННЫМИ: 241.00 р
+--------------------------------
+НДС 20/120: 40.17 р
+--------------------------------
+ФД: 50017  ФП: 1396084623
+ФН: 9999078902001294  ККТ: 0001234567025896
+Смена: 12  Чек №: 13
+2026-10-15T01:38:05
+--------------------------------
+ОФД: ИНН 7709359901
+http://mock.test/receipts/8504b197-9719-4bd4-8679-c430ae22cd66
+--------------------------------
+НЕ ОТПРАВЛЯЕТСЯ В ФНС (тестовый контур МГМ)
+--------------------------------
+============================================
+[atol-mock 2026-10-15 01:32:25] doc 8504b197-9719-4bd4-8679-c430ae22cd66: service.callback_url не передан — результат доступен только через report
+  ✓ правило израсходовано (times:1)
+  ✓ история триггеров непустая
+  ✓ правила очищены
+[atol-mock 2026-10-15 01:32:25] getToken OK for v4***
+[atol-mock 2026-10-15 01:32:25] getToken OK for v4***
+  ✓ #52: правила песочницы A не видны B
+[atol-mock 2026-10-15 01:32:25] doc 5a83341c-5459-45a7-a2af-2409e58e8105 принят в очередь: sell group=v4-online-atol-ru_4179 external_id=sc52-b-1 total=241 items=1
+  ✓ #52: правило A не влияет на документ B (uuid выдан)
+  ✓ #52: срабатывания правила A в истории B нет
+[atol-mock 2026-10-15 01:32:25] doc ca4f4a1c-1898-40d7-a246-d0e625c115c3 принят в очередь: sell group=v4-online-atol-ru_4179 external_id=sc52-b-hist total=241 items=1
+[atol-mock 2026-10-15 01:32:25] doc f96392c9-8278-4272-994b-0d9d5e20b063 принят в очередь: sell group=v4-online-atol-ru_4179 external_id=sc52-a-1 total=241 items=1
+  ✓ #52: история B (external_id) не видна A
+  ✓ #52 PB-13: журналы A и B не пересекаются
+  ✓ #52 PG-09/PB-13: reset A не стирает правила и журнал B
+  ✓ #52: правило >8 KiB -> 400 + code rule_too_large
+  ✓ #52: update по id; oversized update -> 400 без затирания старого
+  ✓ #52: cap 200; 201-е -> 400 + code rule_cap_exceeded
+— журнал, админ-консоль, песочницы, state/reset
+  ✓ journal: есть записи /possystem/v4
+  ✓ journal: curl-сниппет для воспроизведения
+  ✓ journal: пароль и токены не утекают (F-09)
+  ✓ journal: e-mail покупателя маскирован (F-09)
+  ✓ admin: HTML-консоль с документами и callback
+  ✓ создание/выбор песочницы iso-a
+[atol-mock 2026-10-15 01:32:25] getToken OK for v4***
+[atol-mock 2026-10-15 01:32:25] doc 7744d6e3-e5ae-4416-bb77-c0f0d75f3490 принят в очередь: sell group=v4-online-atol-ru_4179 external_id=st-iso-1 total=241 items=1
+  ✓ документ создан в песочнице iso-a
+  ✓ документ из iso-a в default не виден (code 10)
+  ✓ тот же документ виден в своей песочнице
+  ✓ токен другой песочницы не даёт доступа к её документам из default
+  ✓ GET /mock/state отдаёт снимок
+  ✓ POST /mock/reset
+  ✓ reset очистил документы default
+— персистентность и control-plane (дочерние процессы)
+  ✓ дочерний стенд: документ создан
+  ✓ после рестарта документ читается из state-файла
+  ✓ после рестарта токен продолжает работать
+  ✓ после рестарта дедуп external_id работает (тот же uuid)
+  ✓ /admin/journal без токена закрыт: provider-shaped error (code=11)
+  ✓ /admin/journal без токена закрыт: type + error_id + DX hint/doc
+  ✓ токен админа открывает /admin/journal
+  ✓ /mock/time закрыт без оператор-токена
+  ✓ оператор-токен открывает /mock/time
+  ✓ /health публичен
+  ✓ /possystem/v4 не требует control-токенов (нужен только Token)
+  ✓ hosted: POST /sandboxes выдаёт ownerToken и креды АТОЛ
+  ✓ hosted: знание ID песочницы без owner-token доступа не даёт
+  ✓ hosted: креды стенда в песочнице не работают (14)
+  ✓ hosted: креды песочницы выдают токен
+  ✓ hosted: sell в группе песочницы принят
+  ✓ hosted: группы стенда в песочнице остаются доступными
+  ✓ hosted: незарегистрированная группа отклонена (4, group_code)
+  ✓ hosted: report в песочнице доходит до done
+  ✓ hosted: ofd_receipt_url несёт селектор песочницы
+  ✓ #98 hosted: X-Sandbox-Token приоритетнее постороннего Authorization: Bearer (не-Bearer адаптер)
+  ✓ #98 hosted: чужой X-Sandbox-Token → 401 «знание ID ≠ доступ» (не-Bearer адаптер)
+  ✓ #98 hosted: Bearer <owner-token> без явных заголовков → 200 (fallback сохранён, не-Bearer адаптер)
+  ✓ #98 hosted: оператор по Bearer обслужит песочницу даже с чужим X-Sandbox-Token
+  ✓ hosted: владелец удаляет свою песочницу
+  ✓ #51 PF-01: MOCK_HOSTED=1 в atol-mock включает block_private_webhooks=true по умолчанию
+  ✓ стартовый лог печатает креды и группу v4
+  ✓ стартовый лог отмечает, что v5/маркировка вне области
+  ✓ без service.callback_url документ создан
+  ✓ MOCK_DEFAULT_CALLBACK_URL: результат ушёл на приёмник по умолчанию
+— виртуальные часы: истечение токена v4 (TTL 24 ч)
+  ✓ токен жив: ошибка «документ не найден» (10), а не авторизация
+  ✓ advance +25h принят
+  ✓ токен истёк через 24 ч -> code 11: provider-shaped error (code=11)
+  ✓ токен истёк через 24 ч -> code 11: field=Token
+  ✓ токен истёк через 24 ч -> code 11: type + error_id + DX hint/doc
+  ✓ hint объясняет, что нужен новый getToken
+  ✓ новый getToken после истечения работает
+  ✓ PA-50: чужой GET /mock/state?sandbox=victim-b -> 401 без утечки
+  ✓ PA-50: чужой POST /mock/state -> 401
+  ✓ PA-50: чужой POST /mock/reset -> 401
+  ✓ PA-50: чужой DELETE /sandboxes -> 401
+  ✓ PA-50: оператор читает /mock/state?sandbox=victim-b
+  ✓ PA-54: страница чека защищённой default без токена -> 401
+  ✓ PA-54: публичный /health на защищённой default не раскрывает documents
+  ✓ PA-50 §7.2: истёкшая во время await песочница -> 410 без утечки
+
+ИТОГ: 224 passed, 0 failed · callback-доставок: 8
+SELFTEST PASSED ✅
+
+> mock-services@0.7.0 test:alfa
+> node services/alfa-mock/selftest.js
+
+  ✓ PD-02: env sandbox_state_quota_exceeded доходит до рантайма → HTTP 400 + errorCode + kind
+  ✓ PD-02: отказ импорта не применяет состояние частично
+  ✓ PD-02: env global — две песочницы ниже суммарного бюджета проходят
+  ✓ PD-02: env sandbox_state_budget_exceeded доходит до рантайма → HTTP 400 + errorCode + kind
+  ✓ PD-02: отказ импорта не применяет состояние частично
+  ✓ PD-02: env 0/пусто — импорт проходит
+  ✓ PD-02: env 0/пусто — импорт проходит
+
+== alfa-mock selftest on :33809 (Альфа-Банк, интернет-эквайринг REST /payment/rest/*.do) ==
+
+— health, OpenAPI, синтетические креды стенда
+  ✓ health 200 ok
+  ✓ health: api=rest, base=/payment/rest
+  ✓ health: two-stage и checksum HMAC-SHA256, sessionTimeoutSecs=1200
+  ✓ health: счётчики orders/awaiting/callbacks
+  ✓ /openapi.json отдаёт OpenAPI 3.1 с маршрутами *.do
+  ✓ дефолты мока — СИНТЕТИЧЕСКИЕ креды (не реквизиты банка)
+— checksum: каноническая строка name;value;…; и HMAC-SHA256 uppercase
+  ✓ canonicalChecksumString: сортировка, хвостовой «;», checksum/sign_alias исключены
+  ✓ checksumOf: HMAC-SHA256, hex 64 символа в верхнем регистре
+  ✓ checksumOf совпадает с независимой реализацией
+— register.do: креды, обязательные поля, orderNumber уникален
+[alfa-mock 2026-10-15 01:32:30] отказ авторизации: userName=[REDACTED] не найден
+  ✓ пустые креды: provider-shaped error (errorCode=2, HTTP 200)
+  ✓ пустые креды: field=userName
+  ✓ пустые креды: DX hint + doc
+[alfa-mock 2026-10-15 01:32:30] отказ авторизации: userName=wr*** не найден
+  ✓ неверный userName: provider-shaped error (errorCode=2, HTTP 200)
+  ✓ неверный userName: field=userName
+  ✓ неверный userName: DX hint + doc
+[alfa-mock 2026-10-15 01:32:30] отказ авторизации: неверный password для userName=AL***
+  ✓ неверный password: provider-shaped error (errorCode=2, HTTP 200)
+  ✓ неверный password: field=password
+  ✓ неверный password: DX hint + doc
+  ✓ неверный password: hint объясняет, что креды синтетические и где их взять
+  ✓ нет orderNumber: provider-shaped error (errorCode=3, HTTP 200)
+  ✓ нет orderNumber: field=orderNumber
+  ✓ нет orderNumber: DX hint + doc
+  ✓ orderNumber длиннее 64 символов: provider-shaped error (errorCode=3, HTTP 200)
+  ✓ orderNumber длиннее 64 символов: field=orderNumber
+  ✓ orderNumber длиннее 64 символов: DX hint + doc
+  ✓ нет amount: provider-shaped error (errorCode=5, HTTP 200)
+  ✓ нет amount: field=amount
+  ✓ нет amount: DX hint + doc
+  ✓ amount дробный (копейки — целые): provider-shaped error (errorCode=5, HTTP 200)
+  ✓ amount дробный (копейки — целые): field=amount
+  ✓ amount дробный (копейки — целые): DX hint + doc
+  ✓ amount отрицательный: provider-shaped error (errorCode=5, HTTP 200)
+  ✓ amount отрицательный: field=amount
+  ✓ amount отрицательный: DX hint + doc
+  ✓ нет returnUrl: provider-shaped error (errorCode=5, HTTP 200)
+  ✓ нет returnUrl: field=returnUrl
+  ✓ нет returnUrl: DX hint + doc
+  ✓ returnUrl не http(s): provider-shaped error (errorCode=5, HTTP 200)
+  ✓ returnUrl не http(s): field=returnUrl
+  ✓ returnUrl не http(s): DX hint + doc
+  ✓ currency != 643 (только RUB): provider-shaped error (errorCode=5, HTTP 200)
+  ✓ currency != 643 (только RUB): field=currency
+  ✓ currency != 643 (только RUB): DX hint + doc
+  ✓ sessionTimeoutSecs не целое: provider-shaped error (errorCode=5, HTTP 200)
+  ✓ sessionTimeoutSecs не целое: field=sessionTimeoutSecs
+  ✓ sessionTimeoutSecs не целое: DX hint + doc
+  ✓ sessionTimeoutSecs=0: provider-shaped error (errorCode=5, HTTP 200)
+  ✓ sessionTimeoutSecs=0: field=sessionTimeoutSecs
+  ✓ sessionTimeoutSecs=0: DX hint + doc
+  ✓ jsonParams не JSON: provider-shaped error (errorCode=5, HTTP 200)
+  ✓ jsonParams не JSON: field=jsonParams
+  ✓ jsonParams не JSON: DX hint + doc
+  ✓ jsonParams.callback_url некорректен: provider-shaped error (errorCode=5, HTTP 200)
+  ✓ jsonParams.callback_url некорректен: field=jsonParams
+  ✓ jsonParams.callback_url некорректен: DX hint + doc
+  ✓ неизвестный REST-метод foo.do: provider-shaped error (errorCode=6, HTTP 404)
+  ✓ неизвестный REST-метод foo.do: DX hint + doc
+  ✓ неизвестный метод: hint перечисляет методы шлюза
+  ✓ GET вместо POST на *.do: provider-shaped error (errorCode=6, HTTP 405)
+  ✓ GET вместо POST на *.do: DX hint + doc
+  ✓ GET вместо POST: Allow: POST
+— register.do: {orderId, formUrl}, errorCode=0 ≠ оплата, дубль orderNumber -> 1
+[alfa-mock 2026-10-15 01:32:30] заказ зарегистрирован: 21bd4fcd-1d50-4f05-a6c4-c068f1ad0b5b orderNumber=reg-mv8v68bm-14 amount=10000 коп. scheme=one-stage timeout=1200s
+  ✓ register принят: HTTP 200, errorCode=0, errorMessage пуст
+  ✓ register: orderId — uuid
+  ✓ register: formUrl ведёт на платёжную страницу стенда
+  ✓ register: DX-hint — errorCode=0 не эквивалент финального статуса оплаты
+  ✓ повтор orderNumber: provider-shaped error (errorCode=1, HTTP 200)
+  ✓ повтор orderNumber: field=orderNumber
+  ✓ повтор orderNumber: DX hint + doc
+  ✓ повтор orderNumber: hint ведёт к прежнему заказу (не replay)
+— оплата: formUrl -> карта 3DS1 -> ACS (12345678) -> orderStatus=2 + callback deposited
+  ✓ форма до оплаты: пресеты тестовых карт, ACS-пароль 12345678, сумма
+[alfa-mock 2026-10-15 01:32:30] заказ зарегистрирован: 0504370b-a44a-4974-ae1f-6b964c295ab3 orderNumber=st-mv8v68bq-15 amount=10000 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:30] callback 1 queued: GET deposited status=1 order=0504370b-a44a-4974-ae1f-6b964c295ab3
+[alfa-mock 2026-10-15 01:32:30] заказ 0504370b-a44a-4974-ae1f-6b964c295ab3: списание 10000 коп. (orderStatus=2, одностадийная оплата)
+  ✓ платёжная страница formUrl открывается (GET /payment/{orderId})
+  ✓ после оплаты форма показывает состояние заказа (orderStatus=2)
+  ✓ ACS проведён: 302 на returnUrl
+  ✓ getOrderStatusExtended: orderStatus=2 (оплата проведена)
+  ✓ статус: actionCode=0 «Одобрено», amount, date — epoch-ms
+  ✓ статус: маска карты first6**last4 и cardAuthCode (PAN не хранится)
+  ✓ статус: terminalId и orderDescription (эхо description)
+  ✓ extended: authorizedAmount=depositedAmount=10000, refundedAmount=0
+  ✓ extended: authDate/depositDate — epoch-ms
+[alfa-mock 2026-10-15 01:32:31] webhook 1 delivered -> http://127.0.0.1:40377/hook?amount=10000&callbackCreationDate=1792027950761&checksum=DFE5AD7E9402C041DC51FAA2D4745B170662EE0A6FA39A9E51EFBE706484B2C8&mdOrder=0504370b-a44a-4974-ae1f-6b964c295ab3&operation=deposited&orderNumber=st-mv8v68bq-15&status=1 (1 attempt(s))
+  ✓ callback доставлен HTTP GET (не POST)
+  ✓ callback GET — без тела
+  ✓ callback: mdOrder=orderId, orderNumber, operation=deposited, status=1, amount
+  ✓ callback: callbackCreationDate — epoch-миллисекунды
+  ✓ callback: checksum — валидный HMAC-SHA256 (независимая проверка), sign_alias отсутствует
+  ✓ callback: checksum — hex в верхнем регистре
+  ✓ ACK 200 принят: запись done, попытка одна
+— 3DS2 frictionless (без ACS), 3DS2 challenge, МИР 18 цифр
+[alfa-mock 2026-10-15 01:32:31] заказ зарегистрирован: 81677ca7-e431-442d-b2da-5c56209aa25e orderNumber=st-mv8v6935-16 amount=10000 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:31] callback 2 queued: GET deposited status=1 order=81677ca7-e431-442d-b2da-5c56209aa25e
+[alfa-mock 2026-10-15 01:32:31] заказ 81677ca7-e431-442d-b2da-5c56209aa25e: списание 10000 коп. (orderStatus=2, одностадийная оплата)
+  ✓ frictionless: ACS не требуется — сразу 302 на returnUrl
+  ✓ frictionless: маска 18-значной карты МИР first6**last4
+[alfa-mock 2026-10-15 01:32:31] заказ зарегистрирован: 7699794e-5f7e-4528-b84b-fb967cc52dec orderNumber=st-mv8v6938-17 amount=10000 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:31] callback 3 queued: GET deposited status=1 order=7699794e-5f7e-4528-b84b-fb967cc52dec
+[alfa-mock 2026-10-15 01:32:31] заказ 7699794e-5f7e-4528-b84b-fb967cc52dec: списание 10000 коп. (orderStatus=2, одностадийная оплата)
+  ✓ 3DS2 challenge: страница ACS (подтверждение плательщика)
+  ✓ 3DS2 challenge: пароль 12345678 -> orderStatus=2
+[alfa-mock 2026-10-15 01:32:31] заказ зарегистрирован: 57e9d0ed-ea79-4192-b73e-135df808c13d orderNumber=st-mv8v693b-18 amount=10000 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:31] callback 4 queued: GET deposited status=1 order=57e9d0ed-ea79-4192-b73e-135df808c13d
+[alfa-mock 2026-10-15 01:32:31] заказ 57e9d0ed-ea79-4192-b73e-135df808c13d: списание 10000 коп. (orderStatus=2, одностадийная оплата)
+  ✓ МИР 639002000000000003 (3DS1): успех, orderStatus=2
+— отказы: -2011 (PaRes=U), 116 (недостаточно средств), 71015 (неверные данные / ACS Fail)
+[alfa-mock 2026-10-15 01:32:31] заказ зарегистрирован: 53f3dbbb-7d77-4bd8-802e-a1149656caba orderNumber=st-mv8v693f-19 amount=10000 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:31] callback 5 queued: GET declinedCardpresent status=0 order=53f3dbbb-7d77-4bd8-802e-a1149656caba
+[alfa-mock 2026-10-15 01:32:31] заказ 53f3dbbb-7d77-4bd8-802e-a1149656caba: ОТКЛОНЁН actionCode=-2011 (Отказ 3DS: PaRes=U (аутентификация невозможна))
+  ✓ -2011: после ACS заказ отклонён (orderStatus=6), редирект на failUrl
+  ✓ -2011: actionCode=-2011 с описанием PaRes=U
+[alfa-mock 2026-10-15 01:32:32] webhook 2 delivered -> http://127.0.0.1:40377/hook?amount=10000&callbackCreationDate=1792027951747&checksum=1E830B3C7BABE9DF24FC1428D3802C518AA8BF236F85DAF5431E8F4571042ECB&mdOrder=81677ca7-e431-442d-b2da-5c56209aa25e&operation=deposited&orderNumber=st-mv8v6935-16&status=1 (1 attempt(s))
+[alfa-mock 2026-10-15 01:32:32] webhook 3 delivered -> http://127.0.0.1:40377/hook?amount=10000&callbackCreationDate=1792027951750&checksum=724EB52DC5D21456DA3B3B33CB3B457F123D5796EAE99697DD986B60D899F3A8&mdOrder=7699794e-5f7e-4528-b84b-fb967cc52dec&operation=deposited&orderNumber=st-mv8v6938-17&status=1 (1 attempt(s))
+[alfa-mock 2026-10-15 01:32:32] webhook 4 delivered -> http://127.0.0.1:40377/hook?amount=10000&callbackCreationDate=1792027951754&checksum=6974BB7518FAA2860A84DBEC19EE59EA078AF22193DDE8F9D46E566495E30026&mdOrder=57e9d0ed-ea79-4192-b73e-135df808c13d&operation=deposited&orderNumber=st-mv8v693b-18&status=1 (1 attempt(s))
+[alfa-mock 2026-10-15 01:32:32] webhook 5 delivered -> http://127.0.0.1:40377/hook?amount=10000&callbackCreationDate=1792027951757&checksum=7134A0894A146DB25432CC6489FA3238E5AAEADDAEAB3778B6BB96A5ECF10CBC&mdOrder=53f3dbbb-7d77-4bd8-802e-a1149656caba&operation=declinedCardpresent&orderNumber=st-mv8v693f-19&status=0 (1 attempt(s))
+  ✓ отказ: callback declinedCardpresent status=0 (семантика операции — форк мока, задокументирован)
+[alfa-mock 2026-10-15 01:32:32] заказ зарегистрирован: bd18df76-c017-464d-93a7-1a0580c132a5 orderNumber=st-mv8v69ur-20 amount=10000 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:32] callback 6 queued: GET declinedCardpresent status=0 order=bd18df76-c017-464d-93a7-1a0580c132a5
+[alfa-mock 2026-10-15 01:32:32] заказ bd18df76-c017-464d-93a7-1a0580c132a5: ОТКЛОНЁН actionCode=116 (Недостаточно средств на карте)
+  ✓ 116: недостаточно средств (CVV 521), actionCode=116
+[alfa-mock 2026-10-15 01:32:32] заказ зарегистрирован: 17e2e8dc-3b1a-42a9-9277-2d0249e22e4f orderNumber=st-mv8v69uv-21 amount=10000 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:32] callback 7 queued: GET declinedCardpresent status=0 order=17e2e8dc-3b1a-42a9-9277-2d0249e22e4f
+[alfa-mock 2026-10-15 01:32:32] заказ 17e2e8dc-3b1a-42a9-9277-2d0249e22e4f: ОТКЛОНЁН actionCode=71015 (Тестовый ACS: выбран Fail (введённая информация неверна))
+  ✓ ACS Fail: отказ 71015 «введённая информация неверна»
+— PG-08 / MS-16: security-заголовки страниц оплаты (XFO/CSP/Referrer-Policy/nosniff)
+[alfa-mock 2026-10-15 01:32:32] заказ зарегистрирован: 220f5685-24b3-4c09-b6d5-52b0f56a8a47 orderNumber=hdr-mv8v69uz-22 amount=1234 коп. scheme=one-stage timeout=1200s
+  ✓ PG-08: GET /payment/{id} (форма) -> no-store + XFO DENY + CSP frame-ancestors + Referrer-Policy + nosniff
+  ✓ PG-08: GET /payment/{id} (статус) -> no-store + XFO DENY + CSP frame-ancestors + Referrer-Policy + nosniff
+  ✓ PG-08: POST /pay (ACS-страница) -> no-store + XFO DENY + CSP frame-ancestors + Referrer-Policy + nosniff
+  ✓ PG-08: POST /pay (перерисовка формы) -> no-store + XFO DENY + CSP frame-ancestors + Referrer-Policy + nosniff
+  ✓ PG-08: GET /admin -> no-store + XFO DENY + CSP frame-ancestors + Referrer-Policy + nosniff
+  ✓ PG-08: весь HTML платёжных страниц идёт через sendPage (ветка /3ds в общем контуре), прямых html(res, …) не осталось
+[alfa-mock 2026-10-15 01:32:32] заказ зарегистрирован: 3f9b8cfd-e7eb-4e20-913d-0a4a1dde39b5 orderNumber=st-mv8v69v3-23 amount=10000 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:32] callback 8 queued: GET declinedCardpresent status=0 order=3f9b8cfd-e7eb-4e20-913d-0a4a1dde39b5
+[alfa-mock 2026-10-15 01:32:32] заказ 3f9b8cfd-e7eb-4e20-913d-0a4a1dde39b5: ОТКЛОНЁН actionCode=71015 (Пароль ACS неверен (тестовый пароль 12345678))
+  ✓ неверный пароль ACS: отказ 71015
+[alfa-mock 2026-10-15 01:32:32] заказ зарегистрирован: 93de8408-33a1-4412-9da0-0ac13163af18 orderNumber=st-mv8v69v7-24 amount=10000 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:32] declinedCardpresent 93de8408-33a1-4412-9da0-0ac13163af18: callback URL не задан (jsonParams.callback_url / MOCK_DEFAULT_CALLBACK_URL) — сверка через getOrderStatusExtended.do
+[alfa-mock 2026-10-15 01:32:32] заказ 93de8408-33a1-4412-9da0-0ac13163af18: ОТКЛОНЁН actionCode=71015 (Введённая информация неверна (срок/CVV не совпадают с тестовой картой))
+  ✓ неверный CVV на тестовой карте: 71015 без ACS
+[alfa-mock 2026-10-15 01:32:32] заказ зарегистрирован: aa485977-311a-4499-bf21-5a59378caba6 orderNumber=st-mv8v69va-25 amount=10000 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:32] declinedCardpresent aa485977-311a-4499-bf21-5a59378caba6: callback URL не задан (jsonParams.callback_url / MOCK_DEFAULT_CALLBACK_URL) — сверка через getOrderStatusExtended.do
+[alfa-mock 2026-10-15 01:32:32] заказ aa485977-311a-4499-bf21-5a59378caba6: ОТКЛОНЁН actionCode=71015 (Введённая информация неверна (срок/CVV не совпадают с тестовой картой))
+  ✓ неверный срок на тестовой карте: 71015
+[alfa-mock 2026-10-15 01:32:32] заказ зарегистрирован: 9c8903d1-8776-4310-bc4f-bb4371986a29 orderNumber=st-mv8v69vc-26 amount=10000 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:32] declinedCardpresent 9c8903d1-8776-4310-bc4f-bb4371986a29: callback URL не задан (jsonParams.callback_url / MOCK_DEFAULT_CALLBACK_URL) — сверка через getOrderStatusExtended.do
+[alfa-mock 2026-10-15 01:32:32] заказ 9c8903d1-8776-4310-bc4f-bb4371986a29: ОТКЛОНЁН actionCode=71015 (Карта просрочена (введённая информация неверна))
+  ✓ просроченная карта: 71015
+[alfa-mock 2026-10-15 01:32:32] заказ зарегистрирован: 4c2d55aa-fb83-46c4-a015-d7e9a9a310be orderNumber=st-mv8v69ve-27 amount=10000 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:32] declinedCardpresent 4c2d55aa-fb83-46c4-a015-d7e9a9a310be: callback URL не задан (jsonParams.callback_url / MOCK_DEFAULT_CALLBACK_URL) — сверка через getOrderStatusExtended.do
+[alfa-mock 2026-10-15 01:32:32] заказ 4c2d55aa-fb83-46c4-a015-d7e9a9a310be: ОТКЛОНЁН actionCode=5 (Отклонено эмитентом: мок проводит оплату только по тестовым картам из списка)
+  ✓ неизвестный валидный PAN: отказ эмитента (actionCode=5), не успех
+[alfa-mock 2026-10-15 01:32:32] заказ зарегистрирован: fbde9615-0a16-48a2-b5d7-1babb555241e orderNumber=st-mv8v69vh-28 amount=10000 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:32] declinedCardpresent fbde9615-0a16-48a2-b5d7-1babb555241e: callback URL не задан (jsonParams.callback_url / MOCK_DEFAULT_CALLBACK_URL) — сверка через getOrderStatusExtended.do
+[alfa-mock 2026-10-15 01:32:32] заказ fbde9615-0a16-48a2-b5d7-1babb555241e: ОТКЛОНЁН actionCode=71015 (Номер карты не проходит контрольную сумму (введённая информация неверна))
+  ✓ PAN без контрольной суммы Луна: 71015
+[alfa-mock 2026-10-15 01:32:32] заказ зарегистрирован: 29ef3690-e76b-49e3-9933-f450025341ac orderNumber=st-mv8v69vj-29 amount=10000 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:32] declinedCardpresent 29ef3690-e76b-49e3-9933-f450025341ac: callback URL не задан (jsonParams.callback_url / MOCK_DEFAULT_CALLBACK_URL) — сверка через getOrderStatusExtended.do
+[alfa-mock 2026-10-15 01:32:32] заказ 29ef3690-e76b-49e3-9933-f450025341ac: ОТКЛОНЁН actionCode=5 (Операция без 3DS отклонена: SSL-разрешение мерчанта не включено)
+  ✓ карта без 3DS при выключенном SSL-разрешении: отказ (actionCode=5, SSL)
+— валидация формы: держатель карты (два слова латиницей), формат полей
+[alfa-mock 2026-10-15 01:32:32] заказ зарегистрирован: 427cdedf-2d07-4052-8f33-7f91c4c34001 orderNumber=frm-mv8v69vm-30 amount=5000 коп. scheme=one-stage timeout=1200s
+  ✓ держатель из одного слова: ошибка формы, заказ не оплачен
+  ✓ держатель кириллицей: ошибка формы (тестовый контур — латиница)
+  ✓ короткий PAN: ошибка формы «13–19 цифр»
+  ✓ срок не MMYY: ошибка формы
+  ✓ CVV не 3 цифры: ошибка формы
+  ✓ после ошибок формы заказ остаётся orderStatus=0 (не оплачен)
+[alfa-mock 2026-10-15 01:32:32] deposited 427cdedf-2d07-4052-8f33-7f91c4c34001: callback URL не задан (jsonParams.callback_url / MOCK_DEFAULT_CALLBACK_URL) — сверка через getOrderStatusExtended.do
+[alfa-mock 2026-10-15 01:32:32] заказ 427cdedf-2d07-4052-8f33-7f91c4c34001: списание 5000 коп. (orderStatus=2, одностадийная оплата)
+  ✓ форма доступна повторно: frictionless-оплата проходит
+  ✓ оплата завершённого заказа: 404 «сессия не найдена или завершена»
+  ✓ форма неизвестного заказа: 404
+— двухстадийная схема: registerPreAuth -> холд -> deposit ≤ авторизации
+[alfa-mock 2026-10-15 01:32:32] заказ зарегистрирован: ce326cab-5888-441f-8ed7-54a3fe457c07 orderNumber=st-mv8v69vu-31 amount=10000 коп. scheme=two-stage (холд) timeout=1200s
+[alfa-mock 2026-10-15 01:32:32] callback 9 queued: GET approved status=1 order=ce326cab-5888-441f-8ed7-54a3fe457c07
+[alfa-mock 2026-10-15 01:32:32] заказ ce326cab-5888-441f-8ed7-54a3fe457c07: холд 10000 коп. (orderStatus=1, two-stage) — завершение через deposit.do
+  ✓ registerPreAuth: orderId + formUrl (errorCode=0)
+  ✓ холд: orderStatus=1, authorizedAmount=10000, depositedAmount=0
+[alfa-mock 2026-10-15 01:32:33] webhook 6 delivered -> http://127.0.0.1:40377/hook?amount=10000&callbackCreationDate=1792027952742&checksum=2B8A32C18D4F394A85A789B5B5F29CFB49902E196DD97FA76B3573C5B95E31AC&mdOrder=bd18df76-c017-464d-93a7-1a0580c132a5&operation=declinedCardpresent&orderNumber=st-mv8v69ur-20&status=0 (1 attempt(s))
+[alfa-mock 2026-10-15 01:32:33] webhook 7 delivered -> http://127.0.0.1:40377/hook?amount=10000&callbackCreationDate=1792027952746&checksum=E536E26755D7FE346EF6A2FBA0E703258C33C018BA8925779A27848D2251A885&mdOrder=17e2e8dc-3b1a-42a9-9277-2d0249e22e4f&operation=declinedCardpresent&orderNumber=st-mv8v69uv-21&status=0 (1 attempt(s))
+[alfa-mock 2026-10-15 01:32:33] webhook 8 delivered -> http://127.0.0.1:40377/hook?amount=10000&callbackCreationDate=1792027952753&checksum=3076728BA086E8D0CC02B0B7ED29773A8478413591B6C854D4F55D19ADAC651A&mdOrder=3f9b8cfd-e7eb-4e20-913d-0a4a1dde39b5&operation=declinedCardpresent&orderNumber=st-mv8v69v3-23&status=0 (1 attempt(s))
+[alfa-mock 2026-10-15 01:32:33] webhook 9 delivered -> http://127.0.0.1:40377/hook?amount=10000&callbackCreationDate=1792027952780&checksum=612854C7E82851FFEEC255F2388EA54D661B15D55D99EF43CB2F11247EE73048&mdOrder=ce326cab-5888-441f-8ed7-54a3fe457c07&operation=approved&orderNumber=st-mv8v69vu-31&status=1 (1 attempt(s))
+  ✓ холд: callback approved status=1, checksum валиден
+  ✓ deposit больше авторизованной суммы: provider-shaped error (errorCode=5, HTTP 200)
+  ✓ deposit больше авторизованной суммы: field=amount
+  ✓ deposit больше авторизованной суммы: DX hint + doc
+  ✓ deposit>auth: сообщение называет суммы
+  ✓ deposit с некорректной суммой: provider-shaped error (errorCode=5, HTTP 200)
+  ✓ deposit с некорректной суммой: field=amount
+  ✓ deposit с некорректной суммой: DX hint + doc
+[alfa-mock 2026-10-15 01:32:33] callback 10 queued: GET deposited status=1 order=ce326cab-5888-441f-8ed7-54a3fe457c07
+[alfa-mock 2026-10-15 01:32:33] заказ ce326cab-5888-441f-8ed7-54a3fe457c07: deposit 6000 коп. (авторизовано 10000 коп.) -> orderStatus=2
+  ✓ частичный deposit 6000 ≤ 10000: errorCode=0
+  ✓ после частичного deposit: orderStatus=2, deposited=6000, authorized=10000
+[alfa-mock 2026-10-15 01:32:34] webhook 10 delivered -> http://127.0.0.1:40377/hook?amount=6000&callbackCreationDate=1792027953742&checksum=5DE0FCEE80C4C4095299BB38F5860F44114E5B75A1F43AB9897A4164A1D6AA53&mdOrder=ce326cab-5888-441f-8ed7-54a3fe457c07&operation=deposited&orderNumber=st-mv8v69vu-31&status=1 (1 attempt(s))
+  ✓ частичный deposit: callback deposited amount=6000
+  ✓ повторный deposit: provider-shaped error (errorCode=4, HTTP 200)
+  ✓ повторный deposit: field=orderId
+  ✓ повторный deposit: DX hint + doc
+  ✓ deposit на одностадийный заказ: provider-shaped error (errorCode=4, HTTP 200)
+  ✓ deposit на одностадийный заказ: DX hint + doc
+  ✓ deposit на одностадийный: hint объясняет разницу схем
+[alfa-mock 2026-10-15 01:32:34] заказ зарегистрирован: a9a24d23-87d8-4f29-9bf7-e0b4b68b8c43 orderNumber=upa-mv8v6bem-32 amount=3000 коп. scheme=two-stage (холд) timeout=1200s
+  ✓ registerPreAuth неоплаченного заказа принят (для негативов)
+  ✓ deposit неоплаченного холд-заказа (по orderNumber): provider-shaped error (errorCode=4, HTTP 200)
+  ✓ deposit неоплаченного холд-заказа (по orderNumber): DX hint + doc
+  ✓ deposit неоплаченного: hint объясняет, что нужен холд (orderStatus=1)
+— reverse: отмена холда и отмена оплаты до расчётов
+[alfa-mock 2026-10-15 01:32:34] заказ зарегистрирован: 2016a40d-3951-4f50-870c-59ddd7049d47 orderNumber=st-mv8v6beo-33 amount=7000 коп. scheme=two-stage (холд) timeout=1200s
+[alfa-mock 2026-10-15 01:32:34] callback 11 queued: GET approved status=1 order=2016a40d-3951-4f50-870c-59ddd7049d47
+[alfa-mock 2026-10-15 01:32:34] заказ 2016a40d-3951-4f50-870c-59ddd7049d47: холд 7000 коп. (orderStatus=1, two-stage) — завершение через deposit.do
+[alfa-mock 2026-10-15 01:32:34] callback 12 queued: GET reversed status=1 order=2016a40d-3951-4f50-870c-59ddd7049d47
+[alfa-mock 2026-10-15 01:32:34] заказ 2016a40d-3951-4f50-870c-59ddd7049d47: reverse 7000 коп. -> orderStatus=3
+  ✓ reverse холда: errorCode=0
+  ✓ reverse холда: orderStatus=3, reverseDate
+[alfa-mock 2026-10-15 01:32:35] webhook 11 delivered -> http://127.0.0.1:40377/hook?amount=7000&callbackCreationDate=1792027954756&checksum=FC9DC387F75BFC002B2C1F4AB412D6B1A3472733C17F08C722783AE1FCFEA907&mdOrder=2016a40d-3951-4f50-870c-59ddd7049d47&operation=approved&orderNumber=st-mv8v6beo-33&status=1 (1 attempt(s))
+[alfa-mock 2026-10-15 01:32:35] webhook 12 delivered -> http://127.0.0.1:40377/hook?amount=7000&callbackCreationDate=1792027954757&checksum=50E566EF893BBB41C3D609F86B28963A6F001FFAEE2D6240A3C44E7DFF50CC8E&mdOrder=2016a40d-3951-4f50-870c-59ddd7049d47&operation=reversed&orderNumber=st-mv8v6beo-33&status=1 (1 attempt(s))
+  ✓ reverse: callback reversed status=1 amount=7000 (сумма холда)
+  ✓ повторный reverse: provider-shaped error (errorCode=4, HTTP 200)
+  ✓ повторный reverse: DX hint + doc
+[alfa-mock 2026-10-15 01:32:35] заказ зарегистрирован: 19ddc79b-a90b-40ed-83e3-5960b6a2ef13 orderNumber=st-mv8v6c65-34 amount=4000 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:35] callback 13 queued: GET deposited status=1 order=19ddc79b-a90b-40ed-83e3-5960b6a2ef13
+[alfa-mock 2026-10-15 01:32:35] заказ 19ddc79b-a90b-40ed-83e3-5960b6a2ef13: списание 4000 коп. (orderStatus=2, одностадийная оплата)
+[alfa-mock 2026-10-15 01:32:35] callback 14 queued: GET reversed status=1 order=19ddc79b-a90b-40ed-83e3-5960b6a2ef13
+[alfa-mock 2026-10-15 01:32:35] заказ 19ddc79b-a90b-40ed-83e3-5960b6a2ef13: reverse 4000 коп. -> orderStatus=3
+  ✓ reverse одностадийной оплаты (orderStatus=2): errorCode=0
+  ✓ reverse оплаты: orderStatus=3
+  ✓ reverse неоплаченного заказа: provider-shaped error (errorCode=4, HTTP 200)
+  ✓ reverse неоплаченного заказа: DX hint + doc
+— refund: полный и частичные возвраты, лимит по списанному
+[alfa-mock 2026-10-15 01:32:35] заказ зарегистрирован: bc557372-8f75-4b1b-88b7-aae4825c14d6 orderNumber=st-mv8v6c6b-35 amount=10000 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:35] callback 15 queued: GET deposited status=1 order=bc557372-8f75-4b1b-88b7-aae4825c14d6
+[alfa-mock 2026-10-15 01:32:35] заказ bc557372-8f75-4b1b-88b7-aae4825c14d6: списание 10000 коп. (orderStatus=2, одностадийная оплата)
+  ✓ refund больше списанного: provider-shaped error (errorCode=5, HTTP 200)
+  ✓ refund больше списанного: field=amount
+  ✓ refund больше списанного: DX hint + doc
+  ✓ refund>deposited: сообщение называет доступный остаток
+  ✓ refund без amount: provider-shaped error (errorCode=5, HTTP 200)
+  ✓ refund без amount: field=amount
+  ✓ refund без amount: DX hint + doc
+[alfa-mock 2026-10-15 01:32:35] callback 16 queued: GET refunded status=1 order=bc557372-8f75-4b1b-88b7-aae4825c14d6
+[alfa-mock 2026-10-15 01:32:35] заказ bc557372-8f75-4b1b-88b7-aae4825c14d6: refund 3000 коп. (всего возвращено 3000 из 10000) -> orderStatus=4
+  ✓ частичный refund 3000: errorCode=0
+  ✓ после частичного возврата: orderStatus=4, refundedAmount=3000
+[alfa-mock 2026-10-15 01:32:35] callback 17 queued: GET refunded status=1 order=bc557372-8f75-4b1b-88b7-aae4825c14d6
+[alfa-mock 2026-10-15 01:32:35] заказ bc557372-8f75-4b1b-88b7-aae4825c14d6: refund 3000 коп. (всего возвращено 6000 из 10000) -> orderStatus=4
+  ✓ второй частичный refund 3000: errorCode=0 (накопительно 6000)
+  ✓ refund сверх остатка (4000): provider-shaped error (errorCode=5, HTTP 200)
+  ✓ refund сверх остатка (4000): DX hint + doc
+[alfa-mock 2026-10-15 01:32:35] callback 18 queued: GET refunded status=1 order=bc557372-8f75-4b1b-88b7-aae4825c14d6
+[alfa-mock 2026-10-15 01:32:35] заказ bc557372-8f75-4b1b-88b7-aae4825c14d6: refund 4000 коп. (всего возвращено 10000 из 10000) -> orderStatus=4
+  ✓ возврат остатка 4000: errorCode=0
+  ✓ итог: refundedAmount=10000, depositedAmount=10000
+[alfa-mock 2026-10-15 01:32:36] webhook 13 delivered -> http://127.0.0.1:40377/hook?amount=4000&callbackCreationDate=1792027955744&checksum=69C87164DEF2C8F8FFC02229D527FE42829CCB2991692F4E3DD40A02BCA0563D&mdOrder=19ddc79b-a90b-40ed-83e3-5960b6a2ef13&operation=deposited&orderNumber=st-mv8v6c65-34&status=1 (1 attempt(s))
+[alfa-mock 2026-10-15 01:32:36] webhook 14 delivered -> http://127.0.0.1:40377/hook?amount=4000&callbackCreationDate=1792027955745&checksum=159CE3FC819C1F6281D7E80826AC4FD63A3943A009DB9E25ABC6306AACCB5CA0&mdOrder=19ddc79b-a90b-40ed-83e3-5960b6a2ef13&operation=reversed&orderNumber=st-mv8v6c65-34&status=1 (1 attempt(s))
+[alfa-mock 2026-10-15 01:32:36] webhook 15 delivered -> http://127.0.0.1:40377/hook?amount=10000&callbackCreationDate=1792027955750&checksum=EA68B280F1E41C836302D82B7B9E8BDC9F9321594603B8D92A76A1233A34D0D2&mdOrder=bc557372-8f75-4b1b-88b7-aae4825c14d6&operation=deposited&orderNumber=st-mv8v6c6b-35&status=1 (1 attempt(s))
+[alfa-mock 2026-10-15 01:32:36] webhook 16 delivered -> http://127.0.0.1:40377/hook?amount=3000&callbackCreationDate=1792027955753&checksum=62D604D8033D50050D258E381C6BCE3005F47083FDB37BBB61EDD157389788C9&mdOrder=bc557372-8f75-4b1b-88b7-aae4825c14d6&operation=refunded&orderNumber=st-mv8v6c6b-35&status=1 (1 attempt(s))
+[alfa-mock 2026-10-15 01:32:36] webhook 17 delivered -> http://127.0.0.1:40377/hook?amount=3000&callbackCreationDate=1792027955755&checksum=7FCE64368BE124623916510B948A6E95EB42EE56E5084BC46392808CA17B7A06&mdOrder=bc557372-8f75-4b1b-88b7-aae4825c14d6&operation=refunded&orderNumber=st-mv8v6c6b-35&status=1 (1 attempt(s))
+[alfa-mock 2026-10-15 01:32:36] webhook 18 delivered -> http://127.0.0.1:40377/hook?amount=4000&callbackCreationDate=1792027955757&checksum=E21A703DA03FE828A940F417C38C8C0D5401A02997FD0EC05CA2EF40C243A10B&mdOrder=bc557372-8f75-4b1b-88b7-aae4825c14d6&operation=refunded&orderNumber=st-mv8v6c6b-35&status=1 (1 attempt(s))
+  ✓ каждый возврат — свой callback refunded (3000/3000/4000, status=1)
+  ✓ refund после reverse (orderStatus=3): provider-shaped error (errorCode=4, HTTP 200)
+  ✓ refund после reverse (orderStatus=3): DX hint + doc
+[alfa-mock 2026-10-15 01:32:36] заказ зарегистрирован: 93a01396-f467-4d6c-9896-36d98957821f orderNumber=st-mv8v6cxx-36 amount=2000 коп. scheme=two-stage (холд) timeout=1200s
+[alfa-mock 2026-10-15 01:32:36] approved 93a01396-f467-4d6c-9896-36d98957821f: callback URL не задан (jsonParams.callback_url / MOCK_DEFAULT_CALLBACK_URL) — сверка через getOrderStatusExtended.do
+[alfa-mock 2026-10-15 01:32:36] заказ 93a01396-f467-4d6c-9896-36d98957821f: холд 2000 коп. (orderStatus=1, two-stage) — завершение через deposit.do
+  ✓ refund на холд (orderStatus=1): provider-shaped error (errorCode=4, HTTP 200)
+  ✓ refund на холд (orderStatus=1): DX hint + doc
+  ✓ refund на холд: hint направляет к deposit/reverse
+  ✓ refund неоплаченного заказа: provider-shaped error (errorCode=4, HTTP 200)
+  ✓ refund неоплаченного заказа: DX hint + doc
+— getOrderStatus(Extended).do: orderId/orderNumber, неизвестный заказ
+  ✓ getOrderStatus по orderNumber находит заказ
+  ✓ базовый getOrderStatus: без сумм авторизации/списания (они — в Extended)
+  ✓ неизвестный orderId: provider-shaped error (errorCode=3, HTTP 200)
+  ✓ неизвестный orderId: field=orderId
+  ✓ неизвестный orderId: DX hint + doc
+  ✓ неизвестный orderNumber: provider-shaped error (errorCode=3, HTTP 200)
+  ✓ неизвестный orderNumber: field=orderNumber
+  ✓ неизвестный orderNumber: DX hint + doc
+  ✓ без orderId и orderNumber: provider-shaped error (errorCode=3, HTTP 200)
+  ✓ без orderId и orderNumber: field=orderId, orderNumber
+  ✓ без orderId и orderNumber: DX hint + doc
+  ✓ неоплаченный заказ: orderStatus=0, actionCode=0, описание статуса
+— callback: ретраи до HTTP 200, ACK ровно 200 (204 — не успех), дубли, подавление
+[alfa-mock 2026-10-15 01:32:36] заказ зарегистрирован: 968e795a-d08c-4d41-a740-fea83521db0b orderNumber=st-mv8v6cy5-37 amount=2500 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:36] callback 19 queued: GET deposited status=1 order=968e795a-d08c-4d41-a740-fea83521db0b
+[alfa-mock 2026-10-15 01:32:36] заказ 968e795a-d08c-4d41-a740-fea83521db0b: списание 2500 коп. (orderStatus=2, одностадийная оплата)
+[alfa-mock 2026-10-15 01:32:37] webhook 19 failed status=500, retry in 1000ms
+[alfa-mock 2026-10-15 01:32:39] webhook 19 delivered -> http://127.0.0.1:40377/flaky?amount=2500&callbackCreationDate=1792027956751&checksum=1BBE7F01298BFA4BAB111140CA78C6694AF24310CA30F5CC6130D07271E8FDF8&mdOrder=968e795a-d08c-4d41-a740-fea83521db0b&operation=deposited&orderNumber=st-mv8v6cy5-37&status=1 (2 attempt(s))
+  ✓ первая доставка 500 -> ретрай: attempts ≥ 2, итог done
+  ✓ ретраи шли до HTTP 200 (последний статус 200)
+  ✓ приёмник получил обе попытки (500 и 200) с одним mdOrder
+[alfa-mock 2026-10-15 01:32:39] заказ зарегистрирован: a0503d28-d77f-44a3-b119-9f7f4ca279b8 orderNumber=st-mv8v6f9d-38 amount=1500 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:39] callback 20 queued: GET deposited status=1 order=a0503d28-d77f-44a3-b119-9f7f4ca279b8
+[alfa-mock 2026-10-15 01:32:39] заказ a0503d28-d77f-44a3-b119-9f7f4ca279b8: списание 1500 коп. (orderStatus=2, одностадийная оплата)
+[alfa-mock 2026-10-15 01:32:40] webhook 20 failed status=204, retry in 1000ms
+[alfa-mock 2026-10-15 01:32:42] webhook 20 failed status=204, retry in 1000ms
+[alfa-mock 2026-10-15 01:32:44] webhook 20 failed status=204, retry in 1000ms
+[alfa-mock 2026-10-15 01:32:46] callback 20 сброшен после 4 попыток
+[alfa-mock 2026-10-15 01:32:46] webhook 20 failed status=204, retry in 1000ms
+  ✓ ACK 204 НЕ засчитан: запись не done, ретраи до лимита и dumped
+  ✓ 204 зафиксирован как последний статус доставки
+[alfa-mock 2026-10-15 01:32:46] заказ зарегистрирован: b22674cc-d263-43ec-b4be-94da3470ccfa orderNumber=st-mv8v6knt-39 amount=1200 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:46] callback 21 queued: GET deposited status=1 order=b22674cc-d263-43ec-b4be-94da3470ccfa
+[alfa-mock 2026-10-15 01:32:46] callback 22 queued: GET deposited status=1 order=b22674cc-d263-43ec-b4be-94da3470ccfa
+[alfa-mock 2026-10-15 01:32:46] заказ b22674cc-d263-43ec-b4be-94da3470ccfa: списание 1200 коп. (orderStatus=2, одностадийная оплата)
+[alfa-mock 2026-10-15 01:32:47] webhook 21 delivered -> http://127.0.0.1:40377/hook?amount=1200&callbackCreationDate=1792027966748&checksum=16A14C4292EAECC4FAC99C19F5344B0C67CFE60F59E6F0271952D7E0D48A7970&mdOrder=b22674cc-d263-43ec-b4be-94da3470ccfa&operation=deposited&orderNumber=st-mv8v6knt-39&status=1 (1 attempt(s))
+[alfa-mock 2026-10-15 01:32:47] webhook 22 delivered -> http://127.0.0.1:40377/hook?amount=1200&callbackCreationDate=1792027966748&checksum=16A14C4292EAECC4FAC99C19F5344B0C67CFE60F59E6F0271952D7E0D48A7970&mdOrder=b22674cc-d263-43ec-b4be-94da3470ccfa&operation=deposited&orderNumber=st-mv8v6knt-39&status=1 (1 attempt(s))
+  ✓ webhook-duplicate: две копии уведомления с одним mdOrder
+  ✓ дубли подписаны одинаково (приёмник обязан быть идемпотентным)
+[alfa-mock 2026-10-15 01:32:47] заказ зарегистрирован: 863a7366-5dac-4fbc-a0ee-e6d898d668c3 orderNumber=st-mv8v6lf7-40 amount=1100 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:47] callback 23 SUPPRESSED (webhook-drop): GET deposited status=1 order=863a7366-5dac-4fbc-a0ee-e6d898d668c3
+[alfa-mock 2026-10-15 01:32:47] заказ 863a7366-5dac-4fbc-a0ee-e6d898d668c3: списание 1100 коп. (orderStatus=2, одностадийная оплата)
+  ✓ webhook-drop: уведомление подавлено (0 доставок), сверка через REST
+  ✓ webhook-drop: запись suppressed видна в состоянии
+— callback без адреса: уведомление не уходит, заказ сверяется через REST
+[alfa-mock 2026-10-15 01:32:49] заказ зарегистрирован: 9506ed95-9bd5-4def-98f5-0a5eeb7d3db4 orderNumber=st-mv8v6ml0-41 amount=900 коп. scheme=one-stage timeout=1200s
+[alfa-mock 2026-10-15 01:32:49] deposited 9506ed95-9bd5-4def-98f5-0a5eeb7d3db4: callback URL не задан (jsonParams.callback_url / MOCK_DEFAULT_CALLBACK_URL) — сверка через getOrderStatusExtended.do
+[alfa-mock 2026-10-15 01:32:49] заказ 9506ed95-9bd5-4def-98f5-0a5eeb7d3db4: списание 900 коп. (orderStatus=2, одностадийная оплата)
+  ✓ без callback_url/MOCK_DEFAULT_CALLBACK_URL: доставок нет, orderStatus=2
+— sessionTimeoutSecs: истечение по виртуальным часам -> declinedByTimeout
+[alfa-mock 2026-10-15 01:32:50] заказ зарегистрирован: 7f528257-3c76-47a1-ab5f-1a1007748d45 orderNumber=tmo-mv8v6nih-42 amount=800 коп. scheme=one-stage timeout=30s
+  ✓ заказ с sessionTimeoutSecs=30 зарегистрирован
+[alfa-mock 2026-10-15 01:32:50] callback 24 queued: GET declinedByTimeout status=0 order=7f528257-3c76-47a1-ab5f-1a1007748d45
+[alfa-mock 2026-10-15 01:32:50] заказ 7f528257-3c76-47a1-ab5f-1a1007748d45: отклонён по таймауту сессии (declinedByTimeout)
+  ✓ POST /mock/time advance +31s принят
+[alfa-mock 2026-10-15 01:32:50] webhook 24 delivered -> http://127.0.0.1:40377/hook?amount=800&callbackCreationDate=1792028001445&checksum=B681B4829B15A7963F2C0464E2D74EAFE5B4D9796C2B8B539E6E884A21B2C3E7&mdOrder=7f528257-3c76-47a1-ab5f-1a1007748d45&operation=declinedByTimeout&orderNumber=tmo-mv8v6nih-42&status=0 (1 attempt(s))
+  ✓ истёк sessionTimeoutSecs: orderStatus=6, описание «Истёк срок оплаты»
+  ✓ declinedByTimeout: status=0, checksum валиден
+  ✓ оплата просроченного заказа невозможна (404)
+  ✓ форма просроченного заказа показывает отказ
+— сценарии: fail (errorCode 6, HTTP 200), hang, latency, http-500/504, правила /mock/scenarios
+  ✓ X-Mock-Scenario: fail на register.do: provider-shaped error (errorCode=6, HTTP 200)
+  ✓ X-Mock-Scenario: fail на register.do: DX hint + doc
+  ✓ fail: errorMessage отмечает симуляцию
+[alfa-mock 2026-10-15 01:32:50] заказ зарегистрирован: 66cfbc40-dff9-455e-90d9-ddce3a4f4d70 orderNumber=failsc-mv8v6njf-43 amount=1000 коп. scheme=one-stage timeout=1200s
+  ✓ fail не создал заказ: тот же orderNumber регистрируется
+  ✓ X-Mock-Scenario: hang — ответ не приходит (клиент таймаутится)
+[alfa-mock 2026-10-15 01:32:52] заказ зарегистрирован: d5b6d9e2-cd34-487a-8015-f552a86229e1 orderNumber=lat-mv8v6o2y-44 amount=1000 коп. scheme=one-stage timeout=1200s
+  ✓ X-Mock-Scenario: latency:1200ms задерживает ответ (≥1100 мс) и не ломает его
+  ✓ X-Mock-Scenario: http-500 — честный HTTP 500 + errorCode 6: provider-shaped error (errorCode=6, HTTP 500)
+  ✓ X-Mock-Scenario: http-500 — честный HTTP 500 + errorCode 6: DX hint + doc
+  ✓ X-Mock-Scenario: http-504 — честный HTTP 504 + errorCode 6: provider-shaped error (errorCode=6, HTTP 504)
+  ✓ X-Mock-Scenario: http-504 — честный HTTP 504 + errorCode 6: DX hint + doc
+  ✓ POST /mock/scenarios: правило fail на target=deposit (times=1)
+[alfa-mock 2026-10-15 01:32:52] заказ зарегистрирован: ab263736-6d73-4ccf-b9bc-290ff419c150 orderNumber=st-mv8v6p0g-45 amount=2200 коп. scheme=two-stage (холд) timeout=1200s
+[alfa-mock 2026-10-15 01:32:52] approved ab263736-6d73-4ccf-b9bc-290ff419c150: callback URL не задан (jsonParams.callback_url / MOCK_DEFAULT_CALLBACK_URL) — сверка через getOrderStatusExtended.do
+[alfa-mock 2026-10-15 01:32:52] заказ ab263736-6d73-4ccf-b9bc-290ff419c150: холд 2200 коп. (orderStatus=1, two-stage) — завершение через deposit.do
+  ✓ правило сработало: первый deposit — errorCode 6
+[alfa-mock 2026-10-15 01:32:52] deposited ab263736-6d73-4ccf-b9bc-290ff419c150: callback URL не задан (jsonParams.callback_url / MOCK_DEFAULT_CALLBACK_URL) — сверка через getOrderStatusExtended.do
+[alfa-mock 2026-10-15 01:32:52] заказ ab263736-6d73-4ccf-b9bc-290ff419c150: deposit 2200 коп. (авторизовано 2200 коп.) -> orderStatus=2
+  ✓ times=1 исчерпан: второй deposit успешен
+  ✓ GET /mock/scenarios: правила и история срабатываний
+  ✓ POST /mock/scenarios без scenario: 400 с DX-hint
+  ✓ DELETE /mock/scenarios очищает правила
+  ✓ #52: правила песочницы A не видны B
+[alfa-mock 2026-10-15 01:32:52] заказ зарегистрирован: 80cb6e9c-9ae1-4a9d-aa76-cef582240c6d orderNumber=sc52b-mv8v6p0p-46 amount=2000 коп. scheme=one-stage timeout=1200s
+  ✓ #52 PG-04: правило A не срабатывает на register B
+[alfa-mock 2026-10-15 01:32:52] заказ зарегистрирован: 2147b202-7c7b-43bc-afbb-24c5bf7ae5bf orderNumber=sc52bh-mv8v6p0q-47 amount=2000 коп. scheme=one-stage timeout=1200s
+  ✓ #52: история B не видна A, своя история у B есть
+  ✓ #52 PB-13: журнал A видит только свои записи, B — свои
+  ✓ #52 PG-09/PB-13: reset A очистил только A, правила/история/журнал B целы
+  ✓ #52: правило >8 KiB -> 400 + code rule_too_large
+  ✓ #52: update правила по id; oversized update -> 400 без затирания старого
+  ✓ #52: cap 200 правил на песочницу; 201-е -> 400 + code rule_cap_exceeded
+— журнал /payment/rest: curl form-urlencoded, креды редактированы, PAN не хранится
+  ✓ журнал содержит POST /payment/rest/register.do со статусом 200
+  ✓ журнал: креды в выжимке тела редактированы ([REDACTED])
+  ✓ журнал: curl-сниппет — form-urlencoded и password=[REDACTED]
+  ✓ журнал: только /payment/rest/* (платёжная форма не журналируется)
+  ✓ в журнале нет полных PAN тестовых карт
+  ✓ в состоянии нет полных PAN (только маска first6**last4) — F-10
+— песочницы (namespaces): изоляция, formUrl c ?sandbox=, health по арендатору
+[alfa-mock 2026-10-15 01:32:52] заказ зарегистрирован: fc229329-e606-4ab6-8862-c581915a0aea orderNumber=sbx-mv8v6p2h-49 amount=1500 коп. scheme=one-stage timeout=1200s
+  ✓ register в песочнице sbx-ci: errorCode=0
+  ✓ formUrl песочницы содержит ?sandbox=sbx-ci
+  ✓ health песочницы: sandbox=sbx-ci, счётчики свои
+  ✓ изоляция: заказ sbx-ci не виден из default (errorCode 3)
+  ✓ POST /sandboxes (namespaces): переключение активно
+  ✓ POST /mock/reset песочницы
+— /mock/state экспорт/импорт, /mock/reset
+  ✓ GET /mock/state: снимок состояния default-песочницы
+  ✓ POST /mock/reset очищает заказы
+  ✓ после reset: orders=0
+  ✓ POST /mock/state: импорт снимка
+  ✓ после импорта заказы восстановлены
+  ✓ восстановленный заказ читается: orderStatus=2
+  ✓ импорт битого JSON: 400 + DX
+— env-флаги: MOCK_TWO_STAGE=false, MOCK_SSL_PERMITTED=true, MOCK_PARTIAL_REFUND=false, MOCK_CALLBACK_CHECKSUM=false
+  ✓ MOCK_TWO_STAGE=false: health twoStage=false
+  ✓ двухстадийная схема выключена: registerPreAuth отклонён: provider-shaped error (errorCode=5, HTTP 200)
+  ✓ двухстадийная схема выключена: registerPreAuth отклонён: DX hint + doc
+  ✓ выключенная двухстадийная схема: hint объясняет (включается банком / MOCK_TWO_STAGE)
+  ✓ одностадийная регистрация при выключенной двухстадийной схеме работает
+  ✓ стартовый лог печатает СИНТЕТИЧЕСКИЕ креды (требование #41)
+  ✓ стартовый лог отмечает границы: асимметричный checksum вне области
+  ✓ MOCK_SSL_PERMITTED=true: карта без 3DS успешна (orderStatus=2)
+  ✓ MOCK_PARTIAL_REFUND=false: частичный возврат отклонён: provider-shaped error (errorCode=5, HTTP 200)
+  ✓ MOCK_PARTIAL_REFUND=false: частичный возврат отклонён: field=amount
+  ✓ MOCK_PARTIAL_REFUND=false: частичный возврат отклонён: DX hint + doc
+  ✓ запрет частичного возврата: hint про разрешённый контур и полное возмещение
+  ✓ полный возврат при запрете частичных: errorCode=0
+  ✓ MOCK_CALLBACK_CHECKSUM=false: health checksum=off
+  ✓ неподписанный callback: checksum отсутствует, остальные параметры на месте
+  ✓ неподписанный callback: статус сверяется через REST (orderStatus=2)
+— PG-01/PG-02: кастомные env-креды не попадают ни в ответ (hint), ни в stdout
+  ✓ PG-01 [MOCK_ALFA_*]: неверный userName: provider-shaped error (errorCode=2, HTTP 200)
+  ✓ PG-01 [MOCK_ALFA_*]: неверный userName: field=userName
+  ✓ PG-01 [MOCK_ALFA_*]: неверный userName: DX hint + doc
+  ✓ PG-01 [MOCK_ALFA_*]: неверный password: provider-shaped error (errorCode=2, HTTP 200)
+  ✓ PG-01 [MOCK_ALFA_*]: неверный password: field=password
+  ✓ PG-01 [MOCK_ALFA_*]: неверный password: DX hint + doc
+  ✓ PG-01 [MOCK_ALFA_*]: дефолтные креды при env-кредах отклонены: provider-shaped error (errorCode=2, HTTP 200)
+  ✓ PG-01 [MOCK_ALFA_*]: дефолтные креды при env-кредах отклонены: DX hint + doc
+  ✓ PG-01 [MOCK_ALFA_*]: ответы errorCode=2 (3 пробы + пустые креды) не содержат фактических кредов
+  ✓ PG-01 [MOCK_ALFA_*]: hint называет только синтетические дефолты
+  ✓ PG-01 [MOCK_ALFA_*]: фактические креды по-прежнему авторизуют (register.do → orderId)
+  ✓ PG-01 [MOCK_ALFA_*]: успешный ответ тоже без кредов
+  ✓ PG-02 [MOCK_ALFA_*]: стартовый лог содержит строку creds и не содержит фактических кредов
+  ✓ PG-02 [MOCK_ALFA_*]: лог отказов авторизации не содержит фактических кредов (userName замаскирован)
+  ✓ PG-01 [ALFA_* (алиасы)]: неверный userName: provider-shaped error (errorCode=2, HTTP 200)
+  ✓ PG-01 [ALFA_* (алиасы)]: неверный userName: field=userName
+  ✓ PG-01 [ALFA_* (алиасы)]: неверный userName: DX hint + doc
+  ✓ PG-01 [ALFA_* (алиасы)]: неверный password: provider-shaped error (errorCode=2, HTTP 200)
+  ✓ PG-01 [ALFA_* (алиасы)]: неверный password: field=password
+  ✓ PG-01 [ALFA_* (алиасы)]: неверный password: DX hint + doc
+  ✓ PG-01 [ALFA_* (алиасы)]: дефолтные креды при env-кредах отклонены: provider-shaped error (errorCode=2, HTTP 200)
+  ✓ PG-01 [ALFA_* (алиасы)]: дефолтные креды при env-кредах отклонены: DX hint + doc
+  ✓ PG-01 [ALFA_* (алиасы)]: ответы errorCode=2 (3 пробы + пустые креды) не содержат фактических кредов
+  ✓ PG-01 [ALFA_* (алиасы)]: hint называет только синтетические дефолты
+  ✓ PG-01 [ALFA_* (алиасы)]: фактические креды по-прежнему авторизуют (register.do → orderId)
+  ✓ PG-01 [ALFA_* (алиасы)]: успешный ответ тоже без кредов
+  ✓ PG-02 [ALFA_* (алиасы)]: стартовый лог содержит строку creds и не содержит фактических кредов
+  ✓ PG-02 [ALFA_* (алиасы)]: лог отказов авторизации не содержит фактических кредов (userName замаскирован)
+  ✓ PG-02 (контроль): без env стартовый лог печатает синтетические дефолты
+  ✓ PG-01 (контроль): без env hint по-прежнему называет синтетические дефолты
+— песочницы (owned): свои userName/password/callbackSecret, ownerToken, изоляция
+  ✓ POST /sandboxes (owned): 201, id + ownerToken + url
+  ✓ owned: свои креды — userName ALFASBX*, password, callbackSecret (секрет checksum)
+  ✓ owned: hint — сохранить ownerToken (показывается один раз)
+  ✓ register в своей песочнице со своими кредами: errorCode=0
+  ✓ formUrl своей песочницы содержит ?sandbox=
+  ✓ дефолтные креды стенда в owned-песочнице не работают: provider-shaped error (errorCode=2, HTTP 200)
+  ✓ дефолтные креды стенда в owned-песочнице не работают: DX hint + doc
+  ✓ без ownerToken доступ к default закрыт (MOCK_SANDBOX_TOKEN): 401
+  ✓ знание id ≠ доступ: 401 объясняет owner-token
+  ✓ GET /sandboxes (owned) без токена: 401
+  ✓ GET /sandboxes со своим ownerToken: видна только своя песочница
+  ✓ GET /sandboxes/me: свои креды (включая callbackSecret)
+  ✓ форма песочницы открывается по formUrl (capability-ссылка, owner-token не нужен) и сохраняет ?sandbox= в action
+  ✓ оплата в owned-песочнице проходит: 302 на returnUrl
+  ✓ checksum callback подписан СЕКРЕТОМ ПЕСОЧНИЦЫ (не глобальным)
+  ✓ POST /sandboxes sandbox=team-b: создан с заданным id
+  ✓ повторное создание team-b: 409
+  ✓ изоляция: заказ песочницы A не виден из песочницы B: provider-shaped error (errorCode=3, HTTP 200)
+  ✓ изоляция: заказ песочницы A не виден из песочницы B: DX hint + doc
+  ✓ #98 owned: X-Sandbox-Token приоритетнее постороннего Authorization: Bearer (не-Bearer адаптер)
+  ✓ #98 owned: чужой X-Sandbox-Token → 401 «знание ID ≠ доступ» (не-Bearer адаптер)
+  ✓ #98 owned: Bearer <owner-token> без явных заголовков → 200 (fallback сохранён, не-Bearer адаптер)
+  ✓ #98 owned: оператор по Bearer обслужит песочницу даже с чужим X-Sandbox-Token
+  ✓ POST /sandboxes/me/reset-creds: новые userName/password/callbackSecret, ownerToken сохранён
+  ✓ старые креды после reset-creds не работают: provider-shaped error (errorCode=2, HTTP 200)
+  ✓ старые креды после reset-creds не работают: DX hint + doc
+  ✓ новые креды после reset-creds работают
+  ✓ DELETE /sandboxes/me: песочница удалена
+  ✓ после удаления песочница не найдена: 404 + hint «POST /sandboxes»
+— квота состояния по байтам (PD-02, owned)
+  ✓ PD-02: 4 заказа по 2 МБ (≈8 МиБ состояния) проходят квоту документов и байтов
+  ✓ PD-02: 5-й заказ отклонён квотой по байтам (errorCode=5, текст про объём состояния, не про документы)
+— control-plane: MOCK_ADMIN_TOKEN / MOCK_OPERATOR_TOKEN, hosted fail-closed
+  ✓ /admin без токена: 200 — форма входа (MS-06)
+  ✓ /admin/login: 302 + Set-Cookie HttpOnly (MS-06)
+  ✓ /admin с X-Admin-Token: 200 HTML-консоль
+  ✓ /admin/journal без токена: 401
+  ✓ /admin/journal с токеном: 200 {entries}
+  ✓ /mock/time без operator-токена: 401
+  ✓ /mock/time с X-Operator-Token: 200, offsetMs>0
+  ✓ бизнес-маршруты *.do токенов не требуют
+  ✓ /health открыт
+  ✓ hosted без токенов: /mock/time закрыт (fail-closed): provider-shaped error (errorCode=2, HTTP 401)
+  ✓ hosted без токенов: /mock/time закрыт (fail-closed): DX hint + doc
+  ✓ hosted: сообщение объясняет fail-closed
+  ✓ hosted: /health открыт
+  ✓ hosted: бизнес-регистрация работает
+— персистентность: рестарт с MOCK_STATE_FILE сохраняет заказы
+  ✓ до рестарта: заказ оплачен (orderStatus=2)
+  ✓ после рестарта заказ читается из state-файла: orderStatus=2, depositedAmount=4321
+  ✓ уникальность orderNumber переживает рестарт (errorCode 1)
+— PA-50 / PG-03 / PG-10 / PA-54 / PA-55: авторизация явного target и гонка TTL-sweep
+  ✓ PA-50 / PG-03: чужой GET /mock/state?sandbox=victim-b -> 401 без утечки
+  ✓ PA-50 / PG-03: чужой POST /mock/state -> 401
+  ✓ PA-50 / PG-03: чужой POST /mock/reset -> 401
+  ✓ PA-50 / PG-03: чужой DELETE /sandboxes -> 401
+  ✓ PA-50 / PG-03: оператор читает /mock/state?sandbox=victim-b
+  ✓ PA-54: форма защищённой default без токена -> 401
+  ✓ PA-54: публичный /health на защищённой default не раскрывает orders
+  ✓ PA-50 §7.2 / PG-10: истёкшая во время await песочница -> 410 без утечки
+— #51 PF-01 / PG-11: SSRF по умолчанию в MOCK_HOSTED=1 и защита от DNS TOCTOU
+  ✓ #51 PF-01: MOCK_HOSTED=1 в alfa-mock включает block_private_webhooks=true по умолчанию
+  ✓ #51 PG-11 / §7.3: DNS TOCTOU rebinding блокируется с SSRF_BLOCKED и 0 соединений к loopback
+  ✓ PG-07: SSRF-блок терминален — запись dumped, попытки не растут, доставок нет
+  ✓ PG-07: терминальный лог SSRF напечатан один раз (не тишина), повторов «retry in …» нет
+— PB-11: env-парсер alfa (суффиксы времени и семантика нуля)
+  ✓ PB-11: MOCK_SESSION_TIMEOUT_SECS=1h -> session_timeout=3600s (не 1 с)
+  ✓ PB-11: MOCK_CALLBACK_RETRY_MS=1h -> retry 3600000ms (не 1000 мс)
+  ✓ PB-11: MAX_ATTEMPTS=0 — WARN и минимум одна попытка (не тихий дефолт)
+  ✓ PB-14: MOCK_SANDBOX_CREATE_LIMIT=2 -> третий POST /sandboxes отдаёт 429 + DX
+  ✓ PB-12: MOCK_SANDBOX_MAX_DOCUMENTS=2 -> два register.do успешны (индекс orderNumbers квоту не жжёт)
+  ✓ PB-12/PB-14: третий register.do отклонён квотой документов (errorCode=5, «2/2»)
+— PB-11: RETRY_MS=0 — повтор без паузы (терминальный dumped после лимита попыток)
+  ✓ PB-11: RETRY_MS=0 честно доезжает до конфига (retry 0ms x3, не 10000ms)
+  ✓ PB-11: RETRY_MS=0 -> повторы без пауз до лимита, затем dumped (0 — определённая семантика)
+— PB-14: негативы ядра на alfa (413 / CSRF / proto-import / non-REST сценарий)
+  ✓ PB-14 / F-02: тело > 5 MiB -> HTTP 413 + errorCode=6, field=body, hint про байты
+  ✓ PB-14: POST /admin/action без CSRF -> 403 + errorCode=2, field=_csrf
+  ✓ PB-14: POST /mock/state с __proto__ -> 400 + errorCode=6, field=state, hint про опасные ключи
+  ✓ PB-14: POST /mock/state с constructor -> 400 + отказ в hint
+  ✓ PB-14: отклонённые импорты не меняют состояние и не загрязняют Object.prototype
+  ✓ PB-14: X-Mock-Scenario не действует вне REST/form-маршрутов (/health -> 200)
+— PB-14: TTL-песочница истекла -> 410 без утечки состояния
+  ✓ PB-14: истёкшая песочница -> 410 + errorCode=3 + hint «POST /sandboxes»
+
+ИТОГ: 371 passed, 0 failed · callback-доставок: 32
+SELFTEST PASSED ✅
+
+> mock-services@0.7.0 test:sber
+> node services/sber-mock/selftest.js
+
+
+== sber-mock selftest on :45409 (Ecom REST v1.1.11.1) ==
+
+— health, OpenAPI, синтетические креды
+  ✓ GET /health: ok, API JSON, callback POST без подписи
+  ✓ health: 3105 contract defaults — 20m TTL, 3 attempts, 3 payment attempts
+  ✓ GET /openapi.json: OpenAPI 3.1 + register.do + getOrderStatusExtended.do + form
+— register.do: JSON, errorCode=0 ≠ оплата, уникальность orderNumber
+  ✓ register.do: HTTP 200, errorCode=0 + orderId/formUrl
+  ✓ register.do: hint прямо говорит errorCode=0 ≠ успешная оплата
+  ✓ до оплаты getOrderStatusExtended: orderStatus=0; errorCode=0 не трактуется как success
+  ✓ formUrl: hosted-форма предлагает официальные тестовые карты с PAN-масками
+  ✓ повтор orderNumber: provider-shaped error (HTTP 200, errorCode=1, errorMessage + DX)
+  ✓ callback created: POST JSON, Content-Type application/json, mdOrder/orderNumber/operation/status
+  ✓ Ecom callback: нет checksum/signature; additionalParams переданы (редактируемая структура)
+— успешная оплата, 3DS preAuth, deposit/reverse/refund/decline
+  ✓ register → тестовая карта frictionless → redirect в магазин
+  ✓ getOrderStatusExtended — источник истины: orderStatus=2, actionCode=0, списано 15000
+  ✓ callback deposited для одностадийной оплаты
+  ✓ registerPreAuth.do → {orderId, formUrl}
+  ✓ 3DS challenge enters intermediate orderStatus=5, not final
+  ✓ ACS 111111 confirms preAuth and redirects
+  ✓ preAuth success: orderStatus=1 (hold), authorizedAmount=9000, depositedAmount=0
+  ✓ deposit выше авторизации: provider-shaped error (HTTP 200, errorCode=5, errorMessage + DX)
+  ✓ deposit 6000 ≤ authorization 9000: errorCode=0
+  ✓ после deposit: orderStatus=2, depositedAmount=6000
+  ✓ reverse.do оплаченного заказа: errorCode=0
+  ✓ после reverse: orderStatus=3
+  ✓ refund выше списания: provider-shaped error (HTTP 200, errorCode=5, errorMessage + DX)
+  ✓ частичный refund.do: errorCode=0
+  ✓ после partial refund: orderStatus=4, refundedAmount=5000
+  ✓ полный возврат остатка после частичного: errorCode=0
+  ✓ decline.do до ввода карточных данных: errorCode=0
+  ✓ decline.do переводит заказ в orderStatus=6
+  ✓ refund до оплаты: provider-shaped error (HTTP 200, errorCode=4, errorMessage + DX)
+— повторяемая карта 116, три попытки и numeric orderStatus не actionCode
+  ✓ карта 116: попытка 1 учтена отдельно от orderStatus
+  ✓ карта 116: попытка 2 учтена отдельно от orderStatus
+  ✓ карта 116: попытка 3 учтена отдельно от orderStatus
+  ✓ после третьей попытки платёжная форма больше не принимает платёж
+  ✓ официальная повторяемая карта 101: actionCode=101, начальный отказ не маскируется под orderStatus
+— order TTL 20 минут на виртуальных часах
+  ✓ по умолчанию TTL заказа ровно 1200 секунд
+  ✓ виртуальные часы +20m: заказ истёк, orderStatus=6 / declinedByTimeout
+— callbacks: ACK ровно 200, retry 3×60s, no-ACK 204, duplicate
+  ✓ webhook-duplicate: получены две одинаковые callback-копии
+  ✓ ACK 200: успешный callback помечается доставленным
+  ✓ первая доставка 503 не считается ACK; запись ждёт повтора
+  ✓ вторая попытка через виртуальные 60 секунд с HTTP 200 закрывает callback
+  ✓ callback: ровно 3 попытки (первая + две через 60s), затем dumped
+  ✓ HTTP 204 — не ACK: callback не помечен done, status=204
+  ✓ ACK 200 only: ответ 204 повторяется по расписанию
+— сценарии и журнал принадлежат своей песочнице
+  ✓ scenario registry: правило fail видно только sandbox A
+  ✓ правило scenario fail: provider-shaped error (HTTP 200, errorCode=6, errorMessage + DX)
+  ✓ scenario A не ломает sandbox B
+  ✓ journal per-sandbox: REST-запросы разделены
+  ✓ form PAN не попадает в state export
+— ошибки/транспортные ограничения
+  ✓ неверные креды: provider-shaped error (HTTP 200, errorCode=2, errorMessage + DX)
+  ✓ currency != 643: provider-shaped error (HTTP 200, errorCode=5, errorMessage + DX)
+  ✓ дробные копейки: provider-shaped error (HTTP 200, errorCode=5, errorMessage + DX)
+  ✓ не-JSON REST body отклонён как неверный transport: provider-shaped error (HTTP 415, errorCode=6, errorMessage + DX)
+  ✓ неизвестный orderId: provider-shaped error (HTTP 200, errorCode=3, errorMessage + DX)
+  ✓ decline.do после начала оплаты недопустим: provider-shaped error (HTTP 200, errorCode=4, errorMessage + DX)
+  ✓ admin action: POST без CSRF/Origin получает 403
+  ✓ GET /admin отдаёт HTML-консоль
+— callback targeted URL и статусный контракт операций
+  ✓ все операции callback покрыты: created/approved/deposited/reversed/refunded
+  ✓ order TTL custom + virtual clock yields orderStatus=6
+  ✓ callback operation declinedByTimeout/status=0
+— SSRF-отказ терминален, один вызов и никакого retry
+  ✓ SSRF_BLOCKED помечает callback terminal/dumped после первой попытки
+  ✓ SSRF отказ не открывает соединение к loopback приёмнику
+— env-парсеры и скрытие env-кредов
+  ✓ env parser: 1h → TTL 3600s / retry 3600000ms; attempts=0 нормализовано в 1
+  ✓ start log hides custom Sber creds
+  ✓ auth DX response never echoes effective env creds
+  ✓ auth log remains free of custom env creds
+— hosted control-plane fail-closed
+  ✓ hosted: /admin без токена отдает форму входа
+  ✓ hosted: /mock/time без токена закрыт, /health открыт
+
+ИТОГ: 67 passed, 0 failed · callback requests: 21
+SELFTEST PASSED ✅
+
+> mock-services@0.7.0 test:vtb
+> node services/vtb-mock/selftest.js
+
+
+== vtb-mock selftest on :35175 (SMB E-commerce API) ==
+
+— health, OpenAPI, синтетические креды
+  ✓ health: 200 ok, api smb-ecommerce-json, base /openapi/smb/efcp/e-commerce/v1/
+  ✓ health: token TTL 170с, order TTL 1200с, callback POST без подписи
+  ✓ openapi.json: 3.1.0 с orders и refunds
+— OAuth2 client_credentials: выдача, отказы, истечение и обновление
+  ✓ token: access_token + Bearer + expires_in=170
+  ✓ token: неверный client_secret: provider-shaped error (HTTP 401, error=invalid_client, error_description + DX)
+  ✓ token: не client_credentials grant: provider-shaped error (HTTP 400, error=unsupported_grant_type, error_description + DX)
+  ✓ token: JSON вместо form-urlencoded → 415
+— бизнес-заголовки: Bearer и X-IBM-Client-Id (lowercase, без @ext.vtb.ru)
+  ✓ без Bearer: provider-shaped error (HTTP 401, error=invalid_token, error_description + DX)
+  ✓ неизвестный Bearer: provider-shaped error (HTTP 401, error=invalid_token, error_description + DX)
+  ✓ без X-IBM-Client-Id: provider-shaped error (HTTP 401, error=invalid_client, error_description + DX)
+  ✓ X-IBM-Client-Id с @ext.vtb.ru/uppercase отклонён: provider-shaped error (HTTP 401, error=invalid_client, error_description + DX)
+— POST /orders: десятичные рубли, payUrl, идемпотентный orderId
+  ✓ orders: 200, status.value=CREATED, amount.value=10.56 (десятичные рубли, не копейки)
+  ✓ orders: payUrl ведёт на /pay/{orderId}
+  ✓ orders: expire с tz/мс (ISO)
+  ✓ orders: повтор orderId идемпотентен — тот же ордер, X-Mock-Replayed, не второй
+  ✓ amount.value дробь >2 знаков → invalid_amount: provider-shaped error (HTTP 400, error=invalid_amount, error_description + DX)
+  ✓ amount.value отрицательная сумма → invalid_amount: provider-shaped error (HTTP 400, error=invalid_amount, error_description + DX)
+  ✓ amount.value ноль → invalid_amount: provider-shaped error (HTTP 400, error=invalid_amount, error_description + DX)
+  ✓ amount.value строка с запятой → invalid_amount: provider-shaped error (HTTP 400, error=invalid_amount, error_description + DX)
+  ✓ amount.value exp-строка → invalid_amount: provider-shaped error (HTTP 400, error=invalid_amount, error_description + DX)
+  ✓ amount.code USD отклонён (только RUB): provider-shaped error (HTTP 400, error=invalid_amount, error_description + DX)
+  ✓ GET /orders/{orderId}: status.value ордера на своём уровне, payments[]/refunds[]
+  ✓ неизвестный orderId: provider-shaped error (HTTP 404, error=order_not_found, error_description + DX)
+— happy-path: payUrl → PAID → PAYMENT callback (Status) → GET-сверка
+  ✓ payUrl: синтетическая [FORK]-карта → 302 returnUrl
+  ✓ после оплаты: order.status.value=PAID, payment.status.value=CONFIRMED (не смешиваются)
+  ✓ PAYMENT callback: оболочка {"type":"PAYMENT","object":{...}}, POST JSON
+  ✓ PAYMENT callback: ключ статуса Status (заглавная) сохранён без нормализации
+  ✓ PAYMENT callback: amount.value десятичные рубли, paymentId/orderId на месте
+  ✓ GET-сверка после callback: уведомление — не единственный источник истины
+— refunds: частичный и полный, REFUND callback (status), дубль refundId
+  ✓ refunds: частичный возврат 4.56 → refund status.value=CONFIRMED, order PARTIALLY_REFUNDED
+  ✓ REFUND callback: ключ статуса status (строчная) сохранён — Status/status не нормализуются
+  ✓ REFUND callback: refundId/paymentId/amount на месте
+  ✓ refunds: полный возврат остатка → order REFUNDED
+  ✓ GET /refunds/{refundId}: status.value возврата на своём уровне
+  ✓ дубль refundId (не идемпотентен, в отличие от orderId): provider-shaped error (HTTP 409, error=duplicate_refund_id, error_description + DX)
+  ✓ refund > списания (остаток 0): provider-shaped error (HTTP 409, error=amount_exceeds_limit, error_description + DX)
+  ✓ неизвестный refundId: provider-shaped error (HTTP 404, error=refund_not_found, error_description + DX)
+— preauth → complete (≤ авторизации) и cancel
+  ✓ preauth: ордер создан (twoStageParams сохранён), payment ещё нет
+  ✓ preauth payUrl: 302, холд держится payment.status.value=NEW, ордер остаётся CREATED
+  ✓ complete > авторизации: provider-shaped error (HTTP 409, error=amount_exceeds_limit, error_description + DX)
+  ✓ complete = авторизации: order PAID, payment CONFIRMED
+  ✓ complete: PAYMENT callback отправлен после подтверждения (не на холде)
+  ✓ cancel: CREATED → CANCELED, cancelReason сохранён
+  ✓ cancel уже отменённого → invalid_order_state: provider-shaped error (HTTP 409, error=invalid_order_state, error_description + DX)
+  ✓ cancel оплаченного → invalid_order_state (после оплаты — /refunds): provider-shaped error (HTTP 409, error=invalid_order_state, error_description + DX)
+— order TTL 20 минут и токен TTL по expires_in на виртуальных часах
+  ✓ после +21m: незакрытый ордер CANCELED (20 мин TTL, expire)
+  ✓ payUrl истёкшего ордера не принимает карту
+  ✓ истёкший access_token → invalid_token (TTL по expires_in): provider-shaped error (HTTP 401, error=invalid_token, error_description + DX)
+  ✓ обновление токена по client_credentials восстанавливает доступ
+— карточные отказы [FORK] и expire-сценарий карты
+  ✓ [FORK]-карта отказа: форма остаётся, ордер CREATED без платежей
+  ✓ expire-сценарий карты: просроченная карта → отказ
+  ✓ официальная истёкшая карта ВТБ (4111…) не принимается моком
+— callbacks: webhook-drop / webhook-duplicate на оплате
+  ✓ webhook-drop: оплата прошла, callback подавлен
+  ✓ webhook-duplicate: доставлено два одинаковых PAYMENT
+— сценарии status-lowercase / reconciled (SBP-варианты для парсеров)
+  ✓ status-lowercase: PAYMENT уходит с ключом status (СБП-вариант), payload не нормализуется
+  ✓ reconciled: payment.status.value=RECONCILED на уровне операции
+— негативы и транспортные ограничения
+  ✓ DELETE /orders/{id} → 405
+  ✓ Content-Type не JSON → 415
+  ✓ битый JSON → 400 invalid_request
+  ✓ неизвестный маршрут REST → 404
+  ✓ chaos abortStatus http-500: транспортный сбой до операции
+— сценарии и состояние принадлежат своей песочнице
+  ✓ песочница: ордер создан в X-Mock-Sandbox
+  ✓ default-песочница не видит чужой ордер (404)
+  ✓ правило сценария живёт в своей песочнице
+  ✓ /mock/reset очищает сценарии песочницы
+— SSRF-отказ терминален, один вызов и никакого retry
+  ✓ SSRF_BLOCKED помечает callback terminal/dumped после первой попытки
+— env-парсеры и скрытие env-кредов
+  ✓ env parser: 1h → retry 3600000ms; attempts=0 нормализовано в 1
+  ✓ start log hides custom VTB creds
+  ✓ кастомные env-креды работают в token endpoint
+  ✓ auth DX response never echoes effective env creds
+— hosted control-plane fail-closed
+  ✓ hosted: /admin без токена отдает форму входа
+  ✓ hosted: /mock/time без токена закрыт, /health открыт
+— #98 owned: Bearer-адаптер — приоритет X-Sandbox-Token над Authorization: Bearer
+  ✓ #98 hosted: POST /sandboxes — id, ownerToken и креды песочницы
+  ✓ #98 hosted: креды песочницы выдают access_token
+  ✓ #98 hosted: Bearer <access_token> + X-Sandbox-Token <owner-token> → 200 (было 401 «знание ID ≠ доступ»)
+  ✓ #98 hosted: /mock/state владельца с бизнес-Bearer → 200 (control-plane не теряется)
+  ✓ #98 hosted: чужой X-Sandbox-Token → 401 «знание ID ≠ доступ»
+  ✓ #98 hosted: только ID + access_token → 401 (бизнес-Bearer — не owner-token)
+  ✓ #98 hosted: чужой токен не открывает состояние песочницы (401, state не выдаётся)
+  ✓ #98 hosted: Bearer <owner-token> без явных заголовков → 200 (fallback сохранён)
+  ✓ #98 hosted: оператор по Bearer обслужит песочницу даже с чужим X-Sandbox-Token
+
+ИТОГ: 81 passed, 0 failed · callback requests: 8
+SELFTEST PASSED ✅
+
+> mock-services@0.7.0 test:first-ofd
+> node services/first-ofd-mock/selftest.js
+
+
+== first-ofd-mock selftest on :35425 (облачная касса OKassa) ==
+
+— health, OpenAPI, синтетические креды
+  ✓ health: 200 ok, api=okassa-queue, база очереди /api/external/queue/v1/
+  ✓ health: TTL токена 86400 с (24 ч), callback POST без подписи, операции с EXPENCE
+  ✓ health: статусы очереди IN_PROGRESS/COMPLETED/ERROR и пять типов заявок
+  ✓ openapi.json: 3.1.0 с transaction/{type} и /api/external/receipts
+— getToken: выдача, отказы, квирк примера PDF, повторная выдача
+  ✓ getToken: token + X-Mock-Token-TTL-Secs=86400, объекта error на успехе нет
+  ✓ getToken с неверным pass: provider-shaped error (HTTP 401, error.code=invalid_credentials, text + DX)
+  ✓ getToken без login: provider-shaped error (HTTP 400, error.code=invalid_request, text + DX)
+  ✓ getToken: Content-Type не JSON → 415 (срез фиксирует application/json; charset=utf-8)
+  ✓ getToken: GET → 405
+  ✓ getToken-error-quirk: пример PDF воспроизведён ({token, error:{code:0,text}}) — семантика не угадывается
+  ✓ повторная выдача: прежний токен остаётся валидным до TTL (поведение мока, [VERIFY]) — 401 только по request_not_found
+  ✓ повторная выдача: новый токен отличается от прежнего
+— Bearer-авторизация очереди
+  ✓ без заголовка Authorization: provider-shaped error (HTTP 401, error.code=invalid_token, text + DX)
+  ✓ неизвестный Bearer: provider-shaped error (HTTP 401, error.code=invalid_token, text + DX)
+  ✓ API-ключ UUID вместо bearer-токена: provider-shaped error (HTTP 401, error.code=invalid_token, text + DX)
+— receipt INCOME: requestId → IN_PROGRESS → COMPLETED + payload
+  ✓ POST transaction/receipt: 200 и requestId (не финальный результат)
+  ✓ сразу после подачи: status=IN_PROGRESS, payload=null, поля результата объявлены
+  ✓ после сдвига виртуальных часов: COMPLETED и payload фискального документа
+  ✓ payload: операция и transactionType сохранены, ошибок нет
+  ✓ GET transaction/{requestId}: полная заявка + результат
+  ✓ неизвестный requestId в transaction/{requestId}: provider-shaped error (HTTP 404, error.code=request_not_found, text + DX)
+— операции чека: INCOME_RETURN, EXPENCE, EXPENCE_RETURN (написание как в схеме)
+  ✓ receipt INCOME_RETURN: принят и COMPLETED (INCOME_RETURN)
+  ✓ receipt EXPENCE: принят и COMPLETED (EXPENCE)
+  ✓ receipt EXPENCE_RETURN: принят и COMPLETED (EXPENCE_RETURN)
+  ✓ EXPENSE (английское написание) отклонён — схема требует EXPENCE: provider-shaped error (HTTP 400, error.code=invalid_operation_type, text + DX)
+  ✓ неизвестный vatCode отклонён: provider-shaped error (HTTP 400, error.code=invalid_vat_code, text + DX)
+— строгие схемы по типу заявки и обязательные поля
+  ✓ отсутствует cashboxParameters.userInn (обязателен для ReceiptRequest): provider-shaped error (HTTP 400, error.code=invalid_request, text + DX)
+  ✓ отсутствует requestMetadata.userGroup: provider-shaped error (HTTP 400, error.code=invalid_request, text + DX)
+  ✓ неверный userGroup (нет в каталоге стенда): provider-shaped error (HTTP 400, error.code=unknown_user_group, text + DX)
+  ✓ отсутствует document: provider-shaped error (HTTP 400, error.code=invalid_request, text + DX)
+  ✓ document.items — объект, а не массив (расхождение среза №2): provider-shaped error (HTTP 400, error.code=invalid_request, text + DX)
+  ✓ у позиции отсутствует vatCode: provider-shaped error (HTTP 400, error.code=invalid_item, text + DX)
+  ✓ отсутствует document.totalSum: provider-shaped error (HTTP 400, error.code=invalid_request, text + DX)
+  ✓ userInn не той длины: provider-shaped error (HTTP 400, error.code=invalid_request, text + DX)
+  ✓ неизвестный тип заявки: provider-shaped error (HTTP 400, error.code=unknown_transaction_type, text + DX)
+  ✓ receipt-тело в openShift (смешивать схемы нельзя): provider-shaped error (HTTP 400, error.code=invalid_request, text + DX)
+  ✓ receiptCorrection без document.correctionCause: provider-shaped error (HTTP 400, error.code=invalid_request, text + DX)
+  ✓ receiptCorrection: hint объясняет обязательность correctionCause
+  ✓ DELETE status/{requestId} → 405
+— ReceiptCorrectionRequest и смены (StateCommandRequest)
+  ✓ receiptCorrection: COMPLETED, payload содержит correctionCause
+  ✓ openShift: COMPLETED, смена открыта (shiftState=OPEN)
+  ✓ openShift: GET transaction отдаёт эхо request (StateCommandRequest «как принят»)
+  ✓ openShift повторно: ERROR слоя ККТ (SHIFT_ALREADY_OPEN) с errorCode/errorType/details
+  ✓ currentStateReport: COMPLETED, состояние смены в payload
+  ✓ closeShift: COMPLETED, shiftState=CLOSED
+  ✓ closeShift повторно: ERROR ККТ (SHIFT_NOT_OPEN) — оба слоя ошибок разделяются
+— сценарии слоя API/ККТ и chaos
+  ✓ сценарий kkt-error: ERROR со слоем ККТ и mock-local errorCode
+  ✓ сценарий api-error: ERROR со слоем API (второй слой ошибок, срез)
+  ✓ chaos http-500: транспортный сбой до операции
+  ✓ chaos http-504: таймаут шлюза до очереди
+— statuses по externalId+groupId и повторный externalId ([VERIFY])
+  ✓ повторный externalId в той же группе создаёт НОВУЮ заявку (идемпотентность не обещана [VERIFY])
+  ✓ GET statuses: обе заявки найдены по externalId+groupId
+  ✓ GET statuses: фильтр status необязателен и работает
+  ✓ GET statuses: фильтр status=IN_PROGRESS не находит завершённые заявки
+  ✓ statuses без groupId: provider-shaped error (HTTP 400, error.code=missing_parameter, text + DX)
+  ✓ GET statuses: заявки другой группы не попадают в выборку
+— /receipts: фискальные документы за период, фильтры и пагинация
+  ✓ /receipts: список фискальных документов с пагинацией {items,total,page,pageSize}
+  ✓ /receipts: документ содержит requestId, РНМ, ФН, ФПД (фискальные реквизиты)
+  ✓ /receipts: page/pageSize работают (pageSize=1&page=2 → один документ, не тот же)
+  ✓ /receipts: фильтр transactionType=openShift возвращает отчёт об открытии смены
+  ✓ /receipts: фильтр groupId не смешивает группы
+  ✓ /receipts: фильтр kkmRegId работает
+  ✓ /receipts: пустой период даёт пустой список
+  ✓ /receipts без from/to: provider-shaped error (HTTP 400, error.code=missing_parameter, text + DX)
+  ✓ /receipts: from > to: provider-shaped error (HTTP 400, error.code=invalid_request, text + DX)
+— callback: доставка без подписи, сверка статусом, drop/duplicate
+  ✓ callback: POST application/json на requestMetadata.callbackUrl без подписи
+  ✓ callback: результат заявки как есть (requestId/transactionType/status/payload)
+  ✓ сверка после callback: GET status/{requestId} — источник истины (статус совпал)
+  ✓ webhook-drop: заявка обработана, callback подавлен
+  ✓ webhook-duplicate: доставлено два одинаковых уведомления
+  ✓ callback 503: повтор по локальному графику и сброс после лимита попыток (ACK-условие 2xx — [FORK])
+  ✓ после сброса callback заявка всё ещё сверяется статусом
+— SSRF-отказ терминален, один вызов и никакого retry
+  ✓ SSRF_BLOCKED помечает callback terminal/dumped после первой попытки
+— расхождения среза: callbackUrl (http vs https) и токен
+  ✓ callbackUrl с недопустимой схемой ftp://: provider-shaped error (HTTP 400, error.code=invalid_request, text + DX)
+  ✓ callbackUrl с userinfo: provider-shaped error (HTTP 400, error.code=invalid_request, text + DX)
+  ✓ MOCK_FIRST_OFD_CALLBACK_HTTPS_ONLY: http:// отклонён (расхождение PDF vs примеры зафиксировано)
+  ✓ MOCK_FIRST_OFD_CALLBACK_HTTPS_ONLY: https:// проходит валидацию
+— TTL токена 24 ч на виртуальных часах и заявка «в работе»
+  ✓ MOCK_FIRST_OFD_PROCESS_MS=1h: заявка остаётся IN_PROGRESS до срока обработки
+  ✓ после +1h заявка обработана (задержка очереди на виртуальных часах)
+  ✓ токен истёк через 24 ч виртуальных часов: provider-shaped error (HTTP 401, error.code=invalid_token, text + DX)
+  ✓ после истечения токена новый getToken восстанавливает доступ
+  ✓ MOCK_FIRST_OFD_TOKEN_SINGLE=1: повторная выдача аннулирует прежний токен ([VERIFY]-режим)
+— env-парсеры и скрытие env-кредов
+  ✓ env parser: retry 1h → 3600000ms; attempts=0 нормализовано в 1; processMs=0 разрешён
+  ✓ env parser: MOCK_FIRST_OFD_USER_GROUPS=* принимает любую группу
+  ✓ start log hides custom creds
+  ✓ кастомные env-креды работают в getToken
+  ✓ auth DX response never echoes effective env creds
+  ✓ MOCK_FIRST_OFD_USER_GROUPS=* : заявка с произвольной группой принята
+— сценарии, состояние и песочницы
+  ✓ песочница: заявка создана в X-Mock-Sandbox
+  ✓ default-песочница не видит чужую заявку (404)
+  ✓ правило сценария живёт в своей песочнице
+  ✓ /mock/reset очищает сценарии песочницы
+— журнал и hosted control-plane
+  ✓ журнал: записаны обращения к API очереди с curl и статусом
+  ✓ hosted: /admin без токена отдает форму входа
+  ✓ hosted: /mock/time без токена закрыт, /health открыт
+— #98 owned: Bearer-адаптер — приоритет X-Sandbox-Token над Authorization: Bearer
+  ✓ #98 hosted: POST /sandboxes — id, ownerToken и креды песочницы
+  ✓ #98 hosted: креды песочницы выдают токен очереди
+  ✓ #98 hosted: Bearer <токен очереди> + X-Sandbox-Token <owner-token> → 200 (было 401 «знание ID ≠ доступ»)
+  ✓ #98 hosted: /mock/state владельца с бизнес-Bearer → 200 (control-plane не теряется)
+  ✓ #98 hosted: чужой X-Sandbox-Token → 401 «знание ID ≠ доступ»
+  ✓ #98 hosted: только ID + токен очереди → 401 (бизнес-Bearer — не owner-token)
+  ✓ #98 hosted: чужой токен не открывает состояние песочницы (401, state не выдаётся)
+  ✓ #98 hosted: Bearer <owner-token> без явных заголовков → 200 (fallback сохранён)
+  ✓ #98 hosted: оператор по Bearer обслужит песочницу даже с чужим X-Sandbox-Token
+
+ИТОГ: 104 passed, 0 failed · callback requests: 18
+SELFTEST PASSED ✅
+
+> mock-services@0.7.0 test:kontur-ofd
+> node services/kontur-ofd-mock/selftest.js
+
+  ✓ health
+  ✓ OpenAPI 3.1 served
+  ✓ UTF-8 plaintext password → Sid
+  ✓ bad login/password rejected
+  ✓ bad login/password rejected
+  ✓ missing Sid → 401002
+  ✓ unknown Sid → 401002
+  ✓ Bearer is not auth.sid
+  ✓ missing/unknown API key → 401003
+  ✓ missing/unknown API key → 401003
+  ✓ accessible organizations with requisites
+  ✓ cashbox registration, model, FN, address history, access boundaries
+  ✓ access/not-found 404: /v2/organizations/missing/cashboxes
+  ✓ access/not-found 403: /v2/organizations/org-restricted/cashboxes
+  ✓ access/not-found 403: /v2/organizations/org-demo/cashboxes/0000000000000002/documents?date=2026-10-11
+  ✓ access/not-found 404: /v2/organizations/org-demo/cashboxes/missing/documents?date=2026-10-11
+  ✓ access/not-found 404: /v2/organizations/org-demo/cashboxes/0000000000000001/documents/missing
+  ✓ documents for date, all ten types
+  ✓ receipt filter includes already fiscalized return
+  ✓ detail fiscal identity, items and integer KOPEKS
+  ✓ comma-separated types
+  ✓ filter fiscalReport
+  ✓ filter fiscalReportCorrection
+  ✓ filter currentStateReport
+  ✓ filter openShift
+  ✓ filter closeShift
+  ✓ filter receipt
+  ✓ filter bso
+  ✓ filter receiptCorrection
+  ✓ filter bsoCorrection
+  ✓ filter closeArchive
+  ✓ empty day is 200 []
+  ✓ pagination honors limit
+  ✓ pagination honors limit
+  ✓ pagination honors limit
+  ✓ pagination honors limit
+  ✓ pagination honors limit
+  ✓ pagination honors limit
+  ✓ walk nextOffset without missing/repeated IDs
+  ✓ exhausted cursor → empty page
+  ✓ empty period → documents[], nextOffset null
+  ✓ [FORK] inclusive period bounds, timezone-less UTC
+  ✓ invalid query &limit=1001
+  ✓ invalid query &limit=0
+  ✓ invalid query &limit=1.5
+  ✓ invalid query &offset=-1
+  ✓ invalid query &offset=2junk
+  ✓ invalid query &offset=
+  ✓ invalid query &currentOffset=0
+  ✓ invalid query &types=unknown
+  ✓ cursor mismatch has actionable hint
+  ✓ invalid date 2026-02-30
+  ✓ invalid date 2026-13-01
+  ✓ invalid date invalid
+  ✓ invalid date 2026-1-01
+  ✓ invalid date 
+  ✓ reversed period rejected
+  ✓ no receipt creation
+  ✓ no foreign write route
+  ✓ fail scenario → provider-shaped 500
+  ✓ core transport chaos
+  ✓ duplicate repeats fiscal identity
+  ✓ hang is abortable by caller
+  ✓ registry scenario consumed once
+  ✓ Sid isolated between sandboxes
+  ✓ scenario isolation
+  ✓ state export redacts session IDs
+  ✓ unsafe imported keys rejected
+  ✓ fixture amounts cannot be fractional rubles
+  ✓ rejected state import leaves existing session alive
+  ✓ mock state fixture injection
+  ✓ default maximum 1000 + nextOffset
+  ✓ 1001st document reachable
+  ✓ duplicate scenario preserves hard page cap
+  ✓ document isolation after import
+  ✓ reset revokes sessions
+  ✓ Sid TTL uses virtual clock
+  ✓ clock isolation
+  ✓ secrets absent from journal/logs
+  ✓ secrets absent from journal/logs
+  ✓ secrets absent from journal/logs
+  ✓ read-only admin
+  ✓ independent server/OpenAPI route parity
+  ✓ negative control: missing OpenAPI route detected independently
+  ✓ negative control: missing server route detected independently
+  ✓ no static default credentials
+  ✓ hosted public health
+  ✓ hosted fail-closed /admin (returns form)
+  ✓ hosted fail-closed /mock/time
+  ✓ hosted fail-closed /mock/state
+  ✓ owned sandbox provisioning generates private credentials
+  ✓ auth.sid coexists with X-Sandbox-Token
+  ✓ API keys isolated between owned sandboxes
+  ✓ sandbox ID alone grants nothing
+  ✓ foreign owner cannot access sandbox
+  ✓ owner controls own virtual clock
+  ✓ owner cannot reset foreign sandbox
+  ✓ /me does not disclose credentials
+  ✓ reset-creds rotates generated credentials
+  ✓ credential rotation revokes existing Sid
+  ✓ old password rejected after rotation
+  ✓ new password accepted
+  ✓ owned reset
+  ✓ owned delete
+  ✓ session within sandbox document quota
+  ✓ session quota enforced
+  ✓ expired sessions reclaimed before quota check
+  ✓ persist/restore session + virtual clock
+  ✓ namespace persist/restore with graceful flush
+
+kontur-ofd: 109 passed, 0 failed
+
+> mock-services@0.7.0 test:upstream
+> node scripts/sync-upstream-selftest.js
+
+sync-upstream selftest: 11 passed, 0 failed
+
+> mock-services@0.7.0 check:links
+> node scripts/check-docs-links.js
+
+docs links OK: 82 файлов, битых ссылок нет
+
+> mock-services@0.7.0 check:drift
+> node scripts/check-protocol-drift.js
+
+
+== Protocol Drift Check (tbank-eacq + ferma-ofd + atol-online + alfa-eacq + sber-ecom + vtb-smb + first-ofd-okassa + kontur-ofd) ==
+Проверено инвариантов контракта: 732, пройдено: 732, расхождений: 0
+Дрейф протоколов не обнаружен ✅
+
