@@ -204,14 +204,22 @@ GetState → CONFIRMED» работает на текущем коде.
 
 ## 10. Источники
 
-- Локальные доки банка (копии в `lovii-docs/tbank/`): oplata_multisplit.pdf (21.03.2025),
+- Локальные доки банка[^local-pdf] — oplata_multisplit.pdf (21.03.2025),
   vyplaty-multisplit.pdf, multisplit.pdf (описание продукта, 06.04.2026),
-  api_reg_upd_multisplit.pdf (16.06.2026); письмо менеджера — «Терминал Тбанк.md» (корень воркспейса).
+  api_reg_upd_multisplit.pdf (16.06.2026); письмо менеджера — «Терминал Тбанк.md».
 - TbankLib (github.com/RomarioDeveloper/TbankLib): та же документация текстом; ВНИМАНИЕ —
   его `docs/multisplit.txt` и `docs/vyplaty-multisplit.txt` — это дубль продукт-описания
   (одинаковый md5), а не выплатная дока; выплатная — только PDF.
-- core: `docs/specs/tbank-payments.md`, `config/payments.php`, `TBankClient`, `TBankSignature`,
+- core платформы[^core] — `docs/specs/tbank-payments.md`, `config/payments.php`, `TBankClient`, `TBankSignature`,
   `HandleTBankNotificationAction`, `CreateOrderPaymentAction`, `FakeTBankClient`,
   `PaymentStatus::fromBankStatus`; canon `FINANCIAL_CONTOUR.md` (§2.2, §5.5).
 - developer.tbank.ru — веб-справка; примечание: публичные страницы не полны относительно
   PDF-док Мультисплита (мультисплит-параметры Init/выплат там нет).
+
+<!-- Документы вне публичного репозитория -->
+
+[^local-pdf]: Первичные PDF Т-Банка и письмо менеджера — во внутреннем `mock-services-docs`
+    (публично не размещаются). Публичные конспекты — `docs/reference/tbank/`.
+[^core]: `docs/specs/tbank-payments.md`, `config/payments.php`, `TBankClient`,
+    `TBankSignature`, `FINANCIAL_CONTOUR.md` — код и спеки платформы-потребителя
+    (в этом репозитории их нет).

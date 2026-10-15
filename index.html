@@ -1,25 +1,61 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="ru" data-theme="light">
 <head>
   <meta charset="UTF-8">
-  <title>mock-services — тестовый контур банков и касс</title>
-  <meta name="description" content="Тестовые моки банков РФ и касс/ОФД по официальным протоколам — проверяйте свои интеграции до договора с провайдером">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
-  <link rel="stylesheet" href="site/vendor/vue.css">
+  <title>mock-services — документация: моки банков, касс и ОФД</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Публичная документация mock-services: тестовые моки банков-эквайрингов, облачных касс и ОФД по официальным протоколам — гайды «интеграция за 10 минут», OpenAPI 3.1, справочники провайдеров.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#ffffff">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="mock-services">
+  <meta property="og:title" content="mock-services — документация">
+  <meta property="og:description" content="Тестовые моки банков, касс и ОФД по официальным протоколам: гайды, OpenAPI 3.1 и справочники провайдеров.">
+  <link rel="icon" href="site/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="site/theme.css">
+  <script>
+    /* Тема применяется до первой отрисовки — без «мигания» белым. */
+    (function () {
+      var theme = null;
+      try {
+        theme = localStorage.getItem('mock-services.theme');
+      } catch (e) { /* приватный режим */ }
+      if (theme !== 'dark' && theme !== 'light') {
+        theme = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      }
+      document.documentElement.setAttribute('data-theme', theme);
+    })();
+  </script>
 </head>
 <body>
+  <header class="site-header">
+    <a class="site-header__brand" href="#/">
+      <img class="site-header__logo" src="site/favicon.svg" alt="" width="26" height="26">
+      <span>mock-services</span>
+      <span class="site-header__title-sub">документация</span>
+    </a>
+
+    <span class="site-header__spacer"></span>
+
+    <div class="site-header__actions">
+      <div id="site-search"></div>
+      <a class="site-header__link site-header__link--github" href="https://github.com/rucorp/mock-services"
+         target="_blank" rel="noopener" title="Репозиторий на GitHub">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.9 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.6 9.6 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.69-4.57 4.94.36.31.68.92.68 1.85v2.75c0 .27.18.58.69.48A10 10 0 0 0 12 2z"/></svg>
+        <span>GitHub</span>
+      </a>
+      <button class="theme-toggle" type="button" aria-label="Переключить тему" title="Тема">
+        <svg class="theme-toggle__moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12.1 22a10 10 0 0 1-1.5-19.9c-2.4 1.3-3.9 3.8-3.9 6.6a6.9 6.9 0 0 0 9.4 6.4A10 10 0 0 1 12.1 22z"/></svg>
+        <svg class="theme-toggle__sun" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10zm0-13.5 1.6 2.6h-3.2L12 3.5zM12 20.5l-1.6-2.6h3.2L12 20.5zM3.5 12l2.6-1.6v3.2L3.5 12zm17 0-2.6 1.6v-3.2L20.5 12zM5.9 5.9l3 .9-2.1 2.1-.9-3zm12.2 12.2-3-.9 2.1-2.1.9 3zM18.1 5.9l-.9 3-2.1-2.1 3-.9zM5.9 18.1l.9-3 2.1 2.1-3 .9z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="mask"></div>
   <div id="app">Загрузка документации…</div>
-  <script>
-    window.$docsify = {
-      name: 'mock-services',
-      repo: 'rucorp/mock-services',
-      homepage: 'README.md',
-      loadSidebar: true,
-      subMaxLevel: 2,
-      auto2top: true,
-      search: false,
-    };
-  </script>
+
+  <script src="site/site.js"></script>
+  <script src="site/vendor/docsify-search.min.js"></script>
   <script src="site/vendor/docsify.min.js"></script>
 </body>
 </html>
