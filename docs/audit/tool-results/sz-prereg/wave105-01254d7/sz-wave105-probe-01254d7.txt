@@ -1,0 +1,71 @@
+SZ проба PD-02 (01254d7): байтовые квоты песочниц + глобальный бюджет
+ROOT: /tmp/w-pd02
+
+== L1. env-матрица per-sandbox квоты (глобальный 0) — импорт ~100 КиБ
+  PASS L1 MAX='' (пусто → дефолт; tbank maxDocuments=0 → без лимита): импорт 100 КиБ проходит — HTTP 200
+  PASS L1 MAX='мусор' (нечисло → безопасный дефолт): импорт 100 КиБ проходит — HTTP 200
+  PASS L1 MAX='0' (квота выключена): импорт 100 КиБ проходит — HTTP 200
+  PASS L1 MAX='-5' (отрицательное → 0 → выключено): импорт 100 КиБ проходит — HTTP 200
+
+== L2. Точная граница per-sandbox: MAX=2048, GBL=0
+  PASS L2.1 used==limit проходит (ровно 2048) — pad=1629, used=2048
+  PASS L2.2 used==limit+1 → HTTP 400 — HTTP 400
+  PASS L2.3 код sandbox_state_quota_exceeded + errorCode 400 + kind=bytes — code=sandbox_state_quota_exceeded
+  PASS L2.4 used==2049, limit==2048, sandbox=default в отказе — used=2049, limit=2048, sandbox=default
+  PASS L2.5 полный откат: состояние == последний принятый (pad не применён) — bytes=2048, pad=1629
+  PASS L2.6 кэш размера: сразу после отката корректный импорт проходит — HTTP 200
+
+== L3. Глобальный бюджет: MAX=0, GBL=60000 — сумма default+A+B
+  PASS L3.1 default заполнен ровно до 25000 — HTTP 200, used=25000
+  PASS L3.2 A заполнена ровно до 20000 (сумма 45000 < 60000) — HTTP 200
+  PASS L3.3 сумма > GBL → HTTP 400 sandbox_state_budget_exceeded — HTTP 400, code=sandbox_state_budget_exceeded
+  PASS L3.4 used == точная сумма (default+A+B-кандидат), limit == 60000 — used=65000 (ожидали 65000), limit=60000
+  PASS L3.5 B: частичного применения нет (pad отсутствует) — pad len=0
+  PASS L3.6 default не тронут — bytes=25000
+
+== L4. Бизнес-записи tbank (MAX=2048, GBL=0): pre-check и persist
+  PASS L4.1 /v2/Init @ used==limit → HTTP 200 + ErrorCode 7 (provider-shaped), used/limit в сообщении — HTTP 200, ErrorCode=7, msg=Лимит объёма состояния песочницы исчерпан (байт: 2048/2048)
+  PASS L4.2 [Ф-1 ДЕФЕКТ] /av/v1/payment @ used==limit → ответ НЕ отправляется (TIMEOUT), сервер молчит — TIMEOUT за 3504мс
+  PASS L4.3 [Ф-1 ДЕФЕКТ] /av/v1/verification @ used==limit → TIMEOUT (второй инлайн-сайт) — TIMEOUT
+  PASS L4.4 подготовка: used == limit-1 — HTTP 200, used=2047 (было 2048)
+  PASS L4.5 [Ф-2 НАБЛЮДЕНИЕ] запись, ПЕРЕСЕКАЮЩАЯ per-sandbox лимит, принимается (persist без verifyPerSandbox) — HTTP 200, used после записи=2261 > 2048
+  PASS L4.6 следующая запись @ used>limit → pre-check → снова молчание [Ф-1] — TIMEOUT
+
+== L4b. Глобальный бюджет на бизнес-записи (MAX=0, GBL=60000)
+  PASS L4b.1 default заполнен ровно до бюджета (импорт при used==limit проходит) — pad=59581, used=60000
+  PASS L4b.2 запись сверх глобального бюджета → HTTP 400 sandbox_state_budget_exceeded (throw в pre-check ДО мутации) — HTTP 400, code=sandbox_state_budget_exceeded, used=60000, limit=60000
+  PASS L4b.3 мутации нет: incoming пуст — incoming=0
+
+== L5. Освобождение глобального бюджета: MAX=0, GBL=60000, TTL=5000мс
+  PASS L5.1 бюджет исчерпан: импорт в B → 400 sandbox_state_budget_exceeded — HTTP 400
+  PASS L5.2a DELETE /sandboxes?sandbox=rel-a → ок — HTTP 200
+  PASS L5.2b после remove бюджет освобождён: тот же импорт в B проходит — HTTP 200
+  PASS L5.3a бинпоиск дошёл до исчерпания: used+factory прочих == 60000 — B used=40000
+  PASS L5.3b исчерпан: +1 байт → 400 sandbox_state_budget_exceeded — HTTP 400
+  PASS L5.3c POST /mock/reset {sandbox} → ок — HTTP 200
+  PASS L5.3d после reset бюджет освобождён: B снова до исчерпания (сумма == 60000) — HTTP-импорт ok, B used=40000
+  PASS L5.4a T исчерпала бюджет: used default+B+T == 60000 ровно — T used=29999, B used=10001
+  PASS L5.4b +1 байт → 400 (бюджет впритык) — HTTP 400
+  PASS L5.4c доступ к истёкшей T → выселение (4xx) — HTTP 410
+  PASS L5.4d после TTL-выселения бюджет освобождён: размер T (−1 байт на seed-дрейф) проходит в F — HTTP 200
+
+== L6. Восстановленный default не теряет данные (MOCK_STATE_FILE + рестарт)
+  PASS L6.1 default заполнен маркером + pad ровно до 4000 (лимит 8192) — HTTP 200, pad=3559
+  PASS L6.2 файл состояния записан — /tmp/sz-pd02-78Dq3l/state.json
+  PASS L6.3 после рестарта default восстановлен с маркером — marker=sz-wave105
+  PASS L6.4 байты восстановленного состояния сохранены — bytes=4000
+  PASS L6.5 сверхлимитный импорт → 400 sandbox_state_quota_exceeded — HTTP 400
+  PASS L6.6 откат к ВОССТАНОВЛЕННОМУ состоянию (маркер жив, не {}) — marker=sz-wave105, bytes=4000
+
+== L7. Owned/hosted (first-ofd, MOCK_HOSTED=1): MAX=4096, GBL=0
+  PASS L7.1 POST /sandboxes (owned) → 201 + id + ownerToken — HTTP 201, id=rapid-ibis-429ed19bfb
+  PASS L7.2 граница per-sandbox в owned: used==4096 проходит — base=168, pad=3919, used=4096
+  PASS L7.3 +1 байт → 400 sandbox_state_quota_exceeded — HTTP 400, code=sandbox_state_quota_exceeded, used=4097, limit=4096
+  PASS L7.4 знание ID без owner-токена → 401 (квота не открывает доступ) — HTTP 401
+
+== L8. Независимость квот: MAX=2048, GBL=0
+  PASS L8.1 A ограничена: +1 байт → 400 sandbox_state_quota_exceeded — HTTP 400
+  PASS L8.2 B независимо достигает своей границы (2048), квота A не мешает — pad=1621, used=2048
+  PASS L8.3 default независимо достигает своей границы (2048) — pad=1629, used=2048
+
+ИТОГ: 49 passed, 0 failed
