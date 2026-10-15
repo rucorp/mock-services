@@ -28,6 +28,7 @@ const KNOWN_SERVICES = [
   ['3106', '/health'],   // vtb-mock
   ['3107', '/health'],   // first-ofd-mock
   ['3108', '/health'],   // kontur-ofd-mock
+  ['3109', '/health'],   // taxcom-mock
 ];
 
 const PROBES = process.env.MOCK_PORT

@@ -13,7 +13,8 @@
  *      БЕЗ переменных healthcheck) становятся healthy со стандартным
  *      HEALTHCHECK образа — F-35 (kassa слушает /healthz, а не /health); sber-mock
  *      на :3105, vtb-mock на :3106 и first-ofd-mock на :3107 также проверяются
- *      с явными портовыми парами;
+ *      с явными портовыми парами, kontur-ofd-mock (:3108) и taxcom-mock (:3109) —
+ *      с эфемерным host-портом и прогоном HTTP selftest внутри контейнера;
  *   2. процессы идут от непривилегированного UID 10001 — F-36;
  *   3. persist/restore переживает --read-only rootfs с volume /data: Init
  *      до рестарта виден после рестарта — F-36;
@@ -39,6 +40,7 @@ const NAME_SBER = `${PREFIX}-sber`;
 const NAME_VTB = `${PREFIX}-vtb`;
 const NAME_FIRST_OFD = `${PREFIX}-first-ofd`;
 const NAME_KONTUR_OFD = `${PREFIX}-kontur-ofd`;
+const NAME_TAXCOM = `${PREFIX}-taxcom`;
 const NAME_RO = `${PREFIX}-ro`;
 const NAME_HARDENED = `${PREFIX}-hardened`;
 const VOLUME = `${PREFIX}-data`;
@@ -127,7 +129,7 @@ function assertEqual(actual, expected, message) {
 }
 
 function cleanup() {
-  for (const name of [NAME_TBANK, NAME_KASSA, NAME_SBER, NAME_VTB, NAME_FIRST_OFD, NAME_KONTUR_OFD, NAME_RO, NAME_HARDENED]) {
+  for (const name of [NAME_TBANK, NAME_KASSA, NAME_SBER, NAME_VTB, NAME_FIRST_OFD, NAME_KONTUR_OFD, NAME_TAXCOM, NAME_RO, NAME_HARDENED]) {
     try { docker(['rm', '-f', name]); } catch { /* не создан */ }
   }
   try { docker(['volume', 'rm', '-f', VOLUME]); } catch { /* не создан */ }
@@ -195,6 +197,20 @@ async function main() {
   console.log(docker(['exec', NAME_KONTUR_OFD, 'node', 'services/kontur-ofd-mock/selftest.js']));
   console.log('[smoke] kontur-ofd-mock: healthy + OpenAPI + selftest ✅');
 
+  // 2f. Такском: read-only кабинет/ОФД на :3109, generic healthcheck без MOCK_PORT.
+  //     Selftest гоняется внутри контейнера БЕЗ mem_limit: проверка лимита
+  //     10 000 документов на фикстуре даёт пиковый RSS выше compose-лимита 128m.
+  console.log('[smoke] taxcom-mock: :3109, generic health + OpenAPI + HTTP selftest');
+  if (!Object.hasOwn(exposed, '3109/tcp')) throw new Error('Dockerfile не публикует EXPOSE 3109');
+  docker(['run', '-d', '--name', NAME_TAXCOM, '-p', '127.0.0.1::3109', IMAGE, 'node', 'services/taxcom-mock/server.js']);
+  await waitForHealth(NAME_TAXCOM);
+  const taxcomPort = hostPort(NAME_TAXCOM, 3109);
+  assertEqual((await request(taxcomPort, 'GET', '/health')).statusCode, 200, 'taxcom-mock /health');
+  const taxcomApi = await request(taxcomPort, 'GET', '/openapi.json');
+  assertEqual(JSON.parse(taxcomApi.body).openapi, '3.1.0', 'taxcom-mock OpenAPI в image');
+  console.log(docker(['exec', NAME_TAXCOM, 'node', 'services/taxcom-mock/selftest.js']));
+  console.log('[smoke] taxcom-mock: healthy + OpenAPI + selftest ✅');
+
   // 3. Непривилегированный runtime-пользователь (F-36).
 
   const user = docker(['inspect', '--format', '{{.Config.User}}', NAME_TBANK]);
@@ -205,6 +221,7 @@ async function main() {
   assertEqual(docker(['exec', NAME_VTB, 'id', '-u']), '10001', 'UID runtime-пользователя (vtb)');
   assertEqual(docker(['exec', NAME_FIRST_OFD, 'id', '-u']), '10001', 'UID runtime-пользователя (first-ofd)');
   assertEqual(docker(['exec', NAME_KONTUR_OFD, 'id', '-u']), '10001', 'UID runtime-пользователя (kontur-ofd)');
+  assertEqual(docker(['exec', NAME_TAXCOM, 'id', '-u']), '10001', 'UID runtime-пользователя (taxcom)');
   console.log('[smoke] непривилегированный пользователь mock (10001) ✅');
 
   // 4. persist/restore при --read-only rootfs (F-36): Init до рестарта виден

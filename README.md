@@ -42,14 +42,21 @@ SPDX-License-Identifier: Apache-2.0
 > `/receipts` за период, callback без подписи, сверка через `status/{requestId}`),
 > **Контур.ОФД** (`kontur-ofd-mock` :3108: read/reconciliation, Sid + API key,
 > организации/кассы/ФД, суммы в копейках; без создания чека и callback),
+> **Такском** (`taxcom-mock` :3109: read-only кабинет/ОФД, API v2 —
+> `POST /API/v2/Login` с `Integrator-ID` → `Session-Token` на 5 минут sliding,
+> `AccountList`, `NewDocuments` за 10 суток с курсором по `id`, ошибки 3106/2203;
+> write API не моделируется),
 > а также мульти-песочницы (`X-Mock-Sandbox`), активный экзаменатор вебхуков (`/mock/verify-merchant`), OpenAPI 3.1 (`/openapi.json`), детектор дрейфа протоколов (`npm run check:drift`) и report-only сверка ссылок первоисточников (`npm run check:upstream`).
 > Каждый адаптер следует клиентскому контракту своего провайдера, но это не делает стенд
 > совместимым с production автоматически: перед переключением проверьте
 > конфигурацию, безопасность и условия интеграции; одной смены URL недостаточно.
 
-Для нового read-only адаптера Контур.ОФД: [рецепт интеграции](docs/integration/kontur-ofd.md)
-и [README сервиса](services/kontur-ofd-mock/README.md). Внешний include регистрирует
-его в профиле `mock`; pinned GHCR-релиз ещё требует отдельной публикации владельцем.
+Для read-only адаптеров ОФД: Контур.ОФД — [рецепт интеграции](docs/integration/kontur-ofd.md)
+и [README сервиса](services/kontur-ofd-mock/README.md); Такском —
+[рецепт интеграции](docs/integration/taxcom.md) и
+[README сервиса](services/taxcom-mock/README.md). Такском зарегистрирован в корневом
+и внешнем compose (профиль `mock`); pinned GHCR-релиз новый адаптер ещё не содержит —
+публикация образа и pin отдельным решением владельца.
 
 ## Зачем
 
@@ -66,8 +73,8 @@ SPDX-License-Identifier: Apache-2.0
 ## Быстрый старт
 
 ```bash
-# 1. Стенд «банк + касса + ЮKassa + АТОЛ Онлайн + Альфа-Банк + Сбер Ecom + ВТБ SMB + Первый ОФД» целиком
-docker compose up            # tbank-mock :3100, kassa-mock :3101, yookassa-mock :3102, atol-mock :3103, alfa-mock :3104, sber-mock :3105, vtb-mock :3106, first-ofd-mock :3107
+# 1. Стенд «банк + касса + ЮKassa + АТОЛ Онлайн + Альфа-Банк + Сбер Ecom + ВТБ SMB + Первый ОФД + Такском» целиком
+docker compose up            # tbank-mock :3100, kassa-mock :3101, yookassa-mock :3102, atol-mock :3103, alfa-mock :3104, sber-mock :3105, vtb-mock :3106, first-ofd-mock :3107, taxcom-mock :3109
 # Контейнеры харденированы (MS-04): read-only rootfs, tmpfs /tmp, cap_drop ALL,
 # no-new-privileges, pids_limit 256, init; запись — только в volume /data.
 
@@ -85,8 +92,10 @@ npm run start:alfa           # http://localhost:3104
 npm run start:sber           # http://localhost:3105
 npm run start:vtb            # http://localhost:3106
 npm run start:first-ofd      # http://localhost:3107
-# Новый Контур.ОФД (креды только env; compose — через include):
+# Контур.ОФД (креды только env; compose — через include):
 npm run start:kontur-ofd     # http://localhost:3108
+# Такском (read-only кабинет/ОФД, синтетические креды в стартовом логе):
+npm run start:taxcom         # http://localhost:3109
 
 # 3. Проверить сам стенд
 npm test                     # selftest ядра + всех адаптеров
@@ -118,14 +127,16 @@ TLS-прокси — см. [`SECURITY.md`](SECURITY.md).
 (Альфа-Банк REST), [`docs/integration/sber.md`](docs/integration/sber.md)
 (Сбербанк Ecom REST), [`docs/integration/vtb.md`](docs/integration/vtb.md)
 (ВТБ SMB E-commerce API), [`docs/integration/first-ofd.md`](docs/integration/first-ofd.md)
-(Первый ОФД — облачная касса OKassa) и [`docs/integration/lovii.md`](docs/integration/lovii.md)
+(Первый ОФД — облачная касса OKassa), [`docs/integration/kontur-ofd.md`](docs/integration/kontur-ofd.md)
+(Контур.ОФД — read/reconciliation), [`docs/integration/taxcom.md`](docs/integration/taxcom.md)
+(Такском — read-only кабинет/ОФД, API v2) и [`docs/integration/lovii.md`](docs/integration/lovii.md)
 (подключение как внешнего сервиса в платформу Lovii). Контракты и переменные окружения — в README каждого сервиса
 (`services/tbank-mock`, `services/kassa-mock`, `services/yookassa-mock`, `services/atol-mock`, `services/alfa-mock`, `services/sber-mock`, `services/vtb-mock`, `services/first-ofd-mock`). Для acqapi Т-Банка тестовые Basic-креды по умолчанию `partner:partner`, а регистрация точки требует полной схемы реквизитов из `docs/reference/tbank/03-payouts-and-deals.md`. Дефолты alfa-mock (`ALFAMOCKTEST`/`mockpass123`) — синтетические креды мока, а не реквизиты банка: реальные тестовые креды Альфа-Банк выдаёт индивидуально. Дефолты sber-mock (`SBERMOCKTEST`/`mockpass123`) также синтетические; тестовые креды Сбербанка merchant получает отдельно. Дефолты vtb-mock (`vtbmocktest`/`mockpass123`) — синтетические; настоящие тестовые `client_id`/`client_secret` ВТБ выдаёт merchant отдельно. Дефолты first-ofd-mock (`firstofdmocktest` + синтетический UUID-ключ) также синтетические: публичных тестовых login/API-ключей Первого ОФД нет — реквизиты выдаются в тестовом ЛК.
 
 ### Контейнерный харденинг и graceful shutdown (MS-04)
 
 Все три compose-файла задают один и тот же набор харденинг-флагов каждому
-сервису (`docker-compose.yml` — 8 сервисов, `docker-compose.include.yml` — 9,
+сервису (`docker-compose.yml` — 9 сервисов, `docker-compose.include.yml` — 10,
 там же kontur-ofd-mock, `docker-compose.staging.yml` — tbank + kassa):
 
 | Флаг | Значение | Зачем |
@@ -212,13 +223,14 @@ docker-compose.include.yml — внешний compose-модуль (профил
 | 14 | **Stage 2: третий внешний банк-адаптер — Сбербанк Ecom REST v1.1.11.1** (#81): JSON `/ecomm/gw/partner/api/v1/*.do`, `register`/`registerPreAuth`, hosted form/ACS `111111`, deposit/reverse/refund/decline/status 0…6, callbacks **POST JSON без подписи** (ACK 200, три попытки × 60s), TTL 20 минут/три оплаты, сценарии/часы/журнал/RFC-001; `protocols/sber-ecom.json` + drift, OpenAPI 3.1, `test:sber` в `npm test`, compose + healthcheck :3105, гайд «за 10 минут». `paymentOrder.do` не включён без разрешения; полный errorCode mapping помечен [VERIFY]/[FORK] | ✅ 0.6.0 |
 | 15 | **Stage 2: четвёртый внешний банк-адаптер — ВТБ SMB E-commerce API** (#87): JSON `/openapi/smb/efcp/e-commerce/v1/` (OAuth 2.0 `client_credentials` + `X-IBM-Client-Id`), `orders`/`preauth`/`complete`/`cancel`/`refunds`, десятичные рубли, `status.value` ордера/операции, TTL ордера 20 мин, callbacks **POST JSON `{"type","object"}` без подписи** (Status/status не нормализуются), hosted-форма с синтетическими [FORK]-картами (официальная тестовая карта ВТБ истекла), сценарии/часы/журнал/RFC-001; `protocols/vtb-smb.json` + drift, OpenAPI 3.1, `test:vtb` в `npm test`, compose + healthcheck :3106, гайд «за 10 минут». legacy RBS и СБП-QR вне области; схема ошибок бизнес-уровня и ответы callback в публичных срезах не зафиксированы — помечены [FORK]/[VERIFY] | ✅ 0.6.0 |
 | 16 | **Stage 2: второй внешний касса-адаптер — Первый ОФД (облачная касса OKassa API)** (#92): `POST /getToken` (`{login, pass}` — API-ключ UUID) → Bearer-токен на 24 ч виртуальных часов, асинхронная очередь `/api/external/queue/v1/transaction/{type}` (`receipt`/`receiptCorrection`/`openShift`/`closeShift`/`currentStateReport`) → `requestId`, строгие схемы `ReceiptRequest`/`ReceiptCorrectionRequest`/`StateCommandRequest` (без «универсального» объекта), операции `INCOME`/`INCOME_RETURN`/`EXPENCE`/`EXPENCE_RETURN` — написание **как в схеме**, статусы `IN_PROGRESS → COMPLETED\|ERROR` с раздельными слоями ошибок API/ККТ (`errorCode`/`errorType`/`details`/`payload`), сверка `transaction/{requestId}`, `status/{requestId}`, `statuses?externalId&groupId`, документы `/api/external/receipts` за период с пагинацией, unsigned callback на `requestMetadata.callbackUrl` (подпись/ACK/повторы не выдумываются, SSRF-политика ядра, сверка через статус), сценарии/часы/журнал/RFC-001-песочницы; `protocols/first-ofd-okassa.json` + drift, OpenAPI 3.1, `test:first-ofd` в `npm test`, compose + healthcheck :3107, гайд «за 10 минут». Расхождения среза (`requestMetadata` required vs optional, `items` массив vs объект, `http://` vs `https://` callback, квирк `getToken`, тег ATOL Online V5), идемпотентность `externalId` и production base не подтверждены — помечены [VERIFY]/[FORK] | ✅ Unreleased |
+| 17 | **Stage 2: десятый сервис — Такском, read-only кабинет/ОФД (API v2)** (#112): `POST /API/v2/Login` (заголовок `Integrator-ID`, тело — консервативная форма `{login, password}` с пометкой [VERIFY]: схема `Login_Request` публично не раскрыта) → временный marker в `Session-Token` с TTL **300 с sliding** на виртуальных часах и `401` по истечении; `GET /API/v2/AccountList` (договоры и права), `GET /API/v2/NewDocuments` (последние **10 суток**, не более **10 000** за вызов, сортировка по времени приёма, курсор по `id`, хвост → пустой ответ, ошибки **3106** «нет доступной ККТ» и **2203** «некорректный курсор»), типы: смены, состояние расчётов, чек, чек коррекции, БСО, БСО коррекции; write API не моделируется (405/404 с подсказкой), сценарии/часы/журнал/RFC-001-песочницы; `protocols/taxcom-ofd.json` + drift, OpenAPI 3.1, `test:taxcom` в `npm test`, compose (root + include) + healthcheck :3109, гайд «за 10 минут». Повторный Login выдаёт новый marker ([FORK] против формулировки среза), HTTP-статусы 3106/2203, имена полей и суммы в копейках — [FORK]/[VERIFY] | ✅ Unreleased |
 
 Детали, оценки и приоритеты — в [аудите](docs/audit/AUDIT-2026-10-08.md) §9.
 
 ## Тестирование
 
 ```bash
-npm test              # всё (core + tbank + kassa + yookassa + atol + alfa + sber + vtb + first-ofd + kontur-ofd + offline upstream selftest + check:links + check:drift)
+npm test              # всё (core + tbank + kassa + yookassa + atol + alfa + sber + vtb + first-ofd + kontur-ofd + taxcom + offline upstream selftest + check:links + check:drift)
 npm run test:core     # ядро (42 проверки): restore/очередь (POST и GET-доставка)/каталог ошибок/часы/сценарии/песочницы RFC-001/экзаменатор/access-control/SSRF/tenancy/CSRF
 npm run test:tbank    # 48 сценариев контракта Т-Банка (вкл. E2C TerminalKey, CSRF, чарджбэки, СБП, рекурренты, изоляцию песочниц)
 npm run test:kassa    # 141 проверка Ferma/54-ФЗ (вкл. tenancy, CSRF, owner-token admin, ОФД/ФН, изоляцию песочниц)
@@ -228,14 +240,15 @@ npm run test:alfa     # 287 проверок Альфа-Банк REST (вкл. r
 npm run test:sber     # selftest Сбер Ecom REST (register/preAuth, карты/ACS 101/116, операции, TTL, JSON callbacks/retry/SSRF, песочницы, control-plane)
 npm run test:vtb      # selftest ВТБ SMB E-commerce (OAuth client_credentials + Bearer/X-IBM-Client-Id, orders/preauth/complete/cancel/refunds, decimal-рубли, идемпотентный orderId, payUrl/карты, callback {type,object} без нормализации Status/status, песочницы, control-plane)
 npm run test:kontur-ofd # Контур.ОФД read/reconciliation: Sid/API key, документы, пагинация, ошибки, песочницы
+npm run test:taxcom    # Такском read-only API v2: Login/Integrator-ID, Session-Token TTL 300 с sliding и 401, AccountList, NewDocuments (10 суток, курсор по id, хвост, лимит 10 000, 3106/2203, сортировка по времени приёма), read-only 405/404, песочницы owned, persist/restore
 npm run test:first-ofd # selftest Первого ОФД/OKassa (getToken + TTL 24 ч на виртуальных часах, очередь transaction/{type} IN_PROGRESS → COMPLETED|ERROR, строгие схемы по типу, операции с написанием EXPENCE, смены StateCommandRequest, statuses/receipts, callback без подписи + сверка, песочницы, control-plane)
 npm run check:links   # относительные ссылки markdown-документации разрешаются (docs/providers упразднён — канон docs/reference)
-npm run check:drift   # 644 инварианта: protocols/*.json <-> server.js <-> OpenAPI 3.1 <-> docs/reference/guide
+npm run check:drift   # 828 инвариантов: protocols/*.json <-> server.js <-> OpenAPI 3.1 <-> docs/reference/guide
 npm run test:upstream  # офлайн selftest синхронизатора snapshot
 npm --silent run check:upstream -- --json # JSON-отчёт; без --silent npm печатает служебный баннер
 npm run check:upstream -- --update # явное обновление snapshot после просмотра
-npm run test:docker  # image smoke (нужен docker): tbank/kassa/sber/vtb/first-ofd healthchecks, непривилегированный UID, persist/restore при --read-only rootfs, MS-04: харденированный контейнер + SIGTERM → exit 0 ≤ 2 с
-npm run test:compose  # black-box selftest против контейнеров compose (:3100–:3107)
+npm run test:docker  # image smoke (нужен docker): tbank/kassa/sber/vtb/first-ofd healthchecks, kontur-ofd/taxcom (эфемерный порт + selftest в контейнере), непривилегированный UID, persist/restore при --read-only rootfs, MS-04: харденированный контейнер + SIGTERM → exit 0 ≤ 2 с
+npm run test:compose  # black-box selftest против контейнеров compose (:3100–:3107; kontur-ofd и taxcom покрываются image smoke и `test:kontur-ofd`/`test:taxcom`)
 ```
 
 CI гоняет то же на Node 18/20/22 и проверяет, что compose-стенд поднимается. Отдельный weekly/ручной workflow сравнивает HTTP-отпечатки ссылок из `docs/reference/external-links.md` с `protocols/upstream-snapshot.json`; он только публикует отчёт, не создаёт issue и не ломает сборку при сетевых сбоях. Снимок изменяется только явной командой `npm run check:upstream -- --update` после просмотра отчёта. SPA-страницы и источник с обязательной авторизацией помечены `mode: "skip"` с причиной.
@@ -270,7 +283,7 @@ Apache-2.0 (см. `LICENSE`, `NOTICE`). Протоколы провайдеро�
 
 ### Общий бюджет состояния песочниц (PD-02)
 
-Все 9 адаптеров и `docker-compose.include.yml` поддерживают
+Все 10 адаптеров и `docker-compose.include.yml` поддерживают
 `MOCK_SANDBOX_MAX_STATE_BYTES` (байты JSON одной песочницы; пусто — прежний
 дефолт 8 МиБ при квоте документов, иначе без лимита) и
 `MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES` (байты JSON всех песочниц одного сервиса,

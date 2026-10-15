@@ -10,11 +10,13 @@
 #      в production (без COMPOSE_PROFILES=mock или `--profile mock`) ни один мок-контейнер
 #      не создаётся и не запускается.
 #   2. Имена сервисов фиксированы (`tbank-mock`, `kassa-mock`, `yookassa-mock`, `atol-mock`,
-#      `alfa-mock`, `sber-mock`, `vtb-mock`, `first-ofd-mock`, `kontur-ofd-mock`) — внутренние
+#      `alfa-mock`, `sber-mock`, `vtb-mock`, `first-ofd-mock`, `kontur-ofd-mock`,
+#      `taxcom-mock`) — внутренние
 #      URL `http://tbank-mock:3100/v2`, `http://kassa-mock:3101`, `http://yookassa-mock:3102/v3`,
 #      `http://atol-mock:3103/possystem/v4`, `http://alfa-mock:3104/payment/rest`,
 #      `http://sber-mock:3105/ecomm/gw/partner/api/v1/`, `http://vtb-mock:3106/openapi/smb/efcp/e-commerce/v1/`,
-#      `http://first-ofd-mock:3107`, `http://kontur-ofd-mock:3108` не меняются.
+#      `http://first-ofd-mock:3107`, `http://kontur-ofd-mock:3108`,
+#      `http://taxcom-mock:3109` не меняются.
 #   3. Никакие домены потребителя не зашиты: Caddy-лейблы и публичные URL задаются
 #      переменными окружения (по умолчанию пустые / localhost).
 #   4. Релиз закреплён дайджестом (F-37): `MOCK_IMAGE_DIGEST` по умолчанию —
@@ -585,6 +587,63 @@ services:
     mem_limit: "${MOCK_MEM_LIMIT:-128m}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3108,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    restart: unless-stopped
+
+  taxcom-mock:
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.7.0}${MOCK_IMAGE_DIGEST-@sha256:f877d3d9ebae35e36cda98573046aca5f85c0103b737856b94a04b5e45ab2484}
+    profiles: ["mock"]
+    working_dir: /app
+    command: ["node", "services/taxcom-mock/server.js"]
+    ports:
+      - "${MOCK_TAXCOM_BIND_IP:-127.0.0.1}:${MOCK_TAXCOM_HOST_PORT:-3109}:3109"
+    environment:
+      MOCK_HOST: "0.0.0.0"
+      MOCK_PORT: "3109"
+      MOCK_HEALTH_PATH: "/health"
+      # Синтетические дефолты: публичных тестовых login/password/Integrator-ID
+      # Такском нет, их выдаёт техподдержка/кабинет. Production-креды не публикуются.
+      MOCK_TAXCOM_LOGIN: "${MOCK_TAXCOM_LOGIN:-taxcommocktest}"
+      MOCK_TAXCOM_PASSWORD: "${MOCK_TAXCOM_PASSWORD:-mockpass123}"
+      MOCK_TAXCOM_INTEGRATOR_ID: "${MOCK_TAXCOM_INTEGRATOR_ID:-TAXCOMMOCKTEST}"
+      MOCK_TAXCOM_SESSION_TTL_SECS: "${MOCK_TAXCOM_SESSION_TTL_SECS:-300}"
+      MOCK_TAXCOM_PUBLIC_BASE_URL: "${MOCK_TAXCOM_PUBLIC_BASE_URL:-http://localhost:${MOCK_TAXCOM_HOST_PORT:-3109}}"
+      MOCK_SANDBOX_SWEEP_MS: "${MOCK_SANDBOX_SWEEP_MS:-60000}"
+      MOCK_VIRTUAL_CLOCK: "${MOCK_VIRTUAL_CLOCK:-}"
+      MOCK_ADMIN_TOKEN: "${MOCK_ADMIN_TOKEN:-}"
+      MOCK_OPERATOR_TOKEN: "${MOCK_OPERATOR_TOKEN:-}"
+      MOCK_HOSTED: "${MOCK_HOSTED:-false}"
+      MOCK_TENANCY: "${MOCK_TENANCY:-}"
+      MOCK_SANDBOX_TOKEN: "${MOCK_SANDBOX_TOKEN:-}"
+      MOCK_SANDBOX_TTL_MS: "${MOCK_SANDBOX_TTL_MS:-}"
+      MOCK_SANDBOX_MAX: "${MOCK_SANDBOX_MAX:-}"
+      MOCK_SANDBOX_MAX_DOCUMENTS: "${MOCK_SANDBOX_MAX_DOCUMENTS:-}"
+      # Квота per-sandbox ≠ память контейнера; общий бюджет по умолчанию 64 МиБ (<128m).
+      MOCK_SANDBOX_MAX_STATE_BYTES: "${MOCK_SANDBOX_MAX_STATE_BYTES:-}"
+      MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES: "${MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES:-}"
+      MOCK_SANDBOX_HOST_SUFFIX: "${MOCK_SANDBOX_HOST_SUFFIX:-}"
+      MOCK_SANDBOX_CREATE_LIMIT: "${MOCK_SANDBOX_CREATE_LIMIT:-}"
+      MOCK_STATE_FILE: "/data/taxcom-state.json"
+      MOCK_SANDBOX_FILE: "/data/taxcom-sandboxes.json"
+    volumes:
+      - mock-services-data:/data
+    labels:
+      caddy: "${MOCK_TAXCOM_CADDY_DOMAIN:-}"
+      caddy.reverse_proxy: "{{upstreams 3109}}"
+    # MS-04: контейнерный харденинг. Root filesystem только для чтения,
+    # единственная запись — volume /data (state), /tmp — tmpfs.
+    init: true
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: "${MOCK_MEM_LIMIT:-128m}"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3109,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 10s
       timeout: 3s
       retries: 3

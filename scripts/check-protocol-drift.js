@@ -12,8 +12,9 @@
  * эталонные выжимки документации (`docs/reference/**`) и фактическую
  * реализацию в `services/tbank-mock/server.js`, `services/kassa-mock/server.js`,
  * `services/atol-mock/server.js`, `services/alfa-mock/server.js`,
- * `services/sber-mock/server.js`, `services/vtb-mock/server.js` и
- * `services/first-ofd-mock/server.js`.
+ * `services/sber-mock/server.js`, `services/vtb-mock/server.js`,
+ * `services/first-ofd-mock/server.js`, `services/kontur-ofd-mock/server.js` и
+ * `services/taxcom-mock/server.js`.
  *
  * Запуск:
  *   node scripts/check-protocol-drift.js [--json]
@@ -1026,6 +1027,161 @@ function main() {
       && readText('docker-compose.include.yml').includes('services/kontur-ofd-mock/server.js')
       && readJson('package.json').scripts.test.includes('test:kontur-ofd'));
 
+  // Такском read-only (taxcom-ofd.json <-> server.js <-> OpenAPI 3.1 <-> guide):
+  // dispatch-таблица и OpenAPI сверяются НЕЗАВИСИМО (services/taxcom-mock/drift.js).
+  const taxcomManifest = readJson('protocols/taxcom-ofd.json');
+  const taxcomServer = readText('services/taxcom-mock/server.js');
+  const taxcomOpenApi = readJson(taxcomManifest.openapi);
+  const taxcomGuide = readText(taxcomManifest.guide);
+  const taxcomReadme = readText(taxcomManifest.readme);
+  const { verifyRoutes: taxcomRoutes } = require('../services/taxcom-mock/drift');
+
+  for (const route of taxcomRoutes(taxcomServer, taxcomOpenApi, taxcomManifest)) {
+    assertCheck('taxcom:route', `${route.method} ${route.path}`, route.inServer && route.inOpenApi,
+      `server=${route.inServer}, openapi=${route.inOpenApi}`);
+  }
+  for (const doc of taxcomManifest.upstreamDocs) {
+    assertCheck('taxcom:reference', doc, fs.existsSync(path.join(ROOT, doc)), 'public slice exists');
+  }
+  assertCheck('taxcom:openapi', 'OpenAPI 3.1', taxcomOpenApi.openapi === '3.1.0');
+  for (const { method, path: taxcomPath, errors } of taxcomManifest.routes) {
+    const op = taxcomOpenApi.paths[taxcomPath]?.[method.toLowerCase()];
+    for (const code of errors) {
+      assertCheck('taxcom:response', `${taxcomPath}: ${code}`, Boolean(op?.responses[code]));
+    }
+  }
+  assertCheck('taxcom:security', 'Login — заголовок Integrator-ID, чтение — Session-Token',
+    taxcomOpenApi.paths['/API/v2/Login'].post.security.some((s) => 'IntegratorId' in s)
+      && taxcomOpenApi.paths['/API/v2/AccountList'].get.security.some((s) => 'SessionToken' in s)
+      && taxcomOpenApi.paths['/API/v2/NewDocuments'].get.security.some((s) => 'SessionToken' in s)
+      && taxcomOpenApi.components.securitySchemes.IntegratorId.name === taxcomManifest.auth.integratorHeader
+      && taxcomOpenApi.components.securitySchemes.SessionToken.name === taxcomManifest.auth.sessionHeader
+      && taxcomServer.includes("req.headers['integrator-id']") && taxcomServer.includes("req.headers['session-token']"),
+    'заголовки провайдера закреплены в OpenAPI и в server.js');
+  for (const type of taxcomManifest.documentTypes) {
+    const inServer = taxcomServer.includes(`'${type}'`);
+    const inOpenApi = taxcomOpenApi.components.schemas.Document.properties.type.enum.includes(type);
+    assertCheck('taxcom:type', type, inServer && inOpenApi, `server=${inServer}, openapi=${inOpenApi}`);
+  }
+
+  const taxcomInvariants = [
+    ['taxcom:invariant', `Session-Token TTL ${taxcomManifest.auth.sessionTtlSecsDefault} с на виртуальных часах`,
+      taxcomServer.includes(`SESSION_TTL_DEFAULT_SECS = ${taxcomManifest.auth.sessionTtlSecsDefault}`)
+        && taxcomServer.includes('expiresAt: now + SESSION_TTL_SECS * 1000') && taxcomServer.includes('clock.now()')],
+    ['taxcom:invariant', 'TTL sliding от последнего использования',
+      taxcomServer.includes('session.expiresAt = clock.now() + SESSION_TTL_SECS * 1000')
+        && taxcomServer.includes('Sliding') && taxcomGuide.includes('sliding')],
+    ['taxcom:invariant', 'просроченный Session-Token → HTTP 401 и удаление сессии',
+      taxcomServer.includes('session.expiresAt <= clock.now()') && taxcomServer.includes('delete state.sessions[token]')
+        && taxcomServer.includes('истёк')],
+    ['taxcom:invariant', '[VERIFY] тело Login_Request — консервативная форма {login, password}',
+      taxcomServer.includes('[VERIFY] Форма тела Login_Request') && taxcomServer.includes("k !== 'login' && k !== 'password'")
+        && taxcomOpenApi.components.schemas.LoginRequest.additionalProperties === false
+        && taxcomOpenApi.components.schemas.LoginRequest.required.join(',') === 'login,password'],
+    ['taxcom:invariant', '[FORK] повторный Login выдаёт новый marker, прежний живёт до TTL',
+      taxcomServer.includes('[FORK] Новый marker при каждом Login') && taxcomServer.includes(' crypto.randomBytes(24)')
+        && taxcomGuide.includes('Повторный Login') && taxcomGuide.includes('[FORK]')],
+    ['taxcom:invariant', `окно NewDocuments — ${taxcomManifest.pagination.windowDays} суток (нижняя граница включена)`,
+      taxcomServer.includes(`WINDOW_DAYS = ${taxcomManifest.pagination.windowDays}`)
+        && taxcomServer.includes('received >= from && received <= now') && taxcomGuide.includes('10 суток')],
+    ['taxcom:invariant', `не более ${taxcomManifest.pagination.maximumPerCall} документов за вызов`,
+      taxcomServer.includes(`PAGE_LIMIT_MAX = ${taxcomManifest.pagination.maximumPerCall}`)
+        && taxcomServer.includes('start + PAGE_LIMIT_MAX') && taxcomGuide.includes('10 000')],
+    ['taxcom:invariant', 'сортировка по времени приёма (receivedAt), а не по фискальному dateTime',
+      taxcomServer.includes('dateValue(a.receivedAt) - dateValue(b.receivedAt)') && taxcomGuide.includes('receivedAt')],
+    ['taxcom:invariant', 'курсор по id последнего полученного документа, хвост → пустой ответ',
+      taxcomServer.includes("selection.findIndex((d) => d.id === q.get('id'))") && taxcomServer.includes('start = index + 1')
+        && taxcomGuide.includes('последнего полученного документа')],
+    ['taxcom:invariant', `3106 «нет доступной ККТ» → HTTP ${taxcomManifest.apiErrorCodes['3106'].httpStatus}`,
+      taxcomServer.includes(`error(res, ${taxcomManifest.apiErrorCodes['3106'].httpStatus}, API_ERRORS[3106], 3106`)
+        && taxcomServer.includes('3106:') && taxcomGuide.includes('3106')],
+    ['taxcom:invariant', `2203 «некорректный курсор» → HTTP ${taxcomManifest.apiErrorCodes['2203'].httpStatus}`,
+      taxcomServer.includes(`error(res, ${taxcomManifest.apiErrorCodes['2203'].httpStatus}, API_ERRORS[2203], 2203`)
+        && taxcomServer.includes('2203:') && taxcomGuide.includes('2203')],
+    ['taxcom:invariant', 'write API не моделируется: 405 для известного маршрута, 404 с подсказкой для неизвестного',
+      taxcomServer.includes("error(res, 405, 'Метод не поддерживается')")
+        && taxcomServer.includes('write API не моделируется') && taxcomGuide.includes('не моделируется')],
+    ['taxcom:invariant', 'нет исходящей поверхности: очередь доставки и SSRF-guard не подключаются',
+      !taxcomServer.includes('createDeliveryQueue') && !taxcomServer.includes('postJson')
+        && !taxcomServer.includes('MOCK_BLOCK_PRIVATE_WEBHOOKS') && taxcomReadme.includes('исходящих HTTP-запросов нет')],
+    ['taxcom:invariant', 'синтетические креды по умолчанию, env переопределяет и скрывается в логе',
+      taxcomServer.includes(`DEFAULT_LOGIN = '${taxcomManifest.testCredentials.login}'`)
+        && taxcomServer.includes(`DEFAULT_PASSWORD = '${taxcomManifest.testCredentials.password}'`)
+        && taxcomServer.includes(`DEFAULT_INTEGRATOR_ID = '${taxcomManifest.testCredentials.integratorId}'`)
+        && taxcomServer.includes('credLogView') && taxcomServer.includes('не реквизиты Такском')],
+    ['taxcom:invariant', 'журнал и экспорт состояния не раскрывают секреты',
+      taxcomServer.includes('snapshot.state.sessions = {}')
+        && taxcomServer.includes('Не журналируем тело Login (пароль), Session-Token, Integrator-ID')],
+    ['taxcom:invariant', 'виртуальные часы, сценарии, chaos и журнал подключены из core',
+      taxcomServer.includes('core.createVirtualClock') && taxcomServer.includes('createScenarioRegistry')
+        && taxcomServer.includes('applyRequestChaos') && taxcomServer.includes('journal.record')],
+    ['taxcom:invariant', 'control-plane fail-closed в hosted (checkControlAccess)',
+      taxcomServer.includes('checkControlAccess')],
+    ['taxcom:invariant', 'чужой контракт не подмешивается: нет Ferma/АТОЛ/OKassa/Контур-маршрутов и подписей',
+      !taxcomServer.includes('/possystem/') && !taxcomServer.includes('/auth/authenticate-by-pass')
+        && !taxcomServer.includes('/getToken') && !/createHmac|createSign/.test(taxcomServer)],
+    ['taxcom:invariant', 'graceful shutdown общим хелпером ядра (MS-04)',
+      taxcomServer.includes('core.installGracefulShutdown')],
+  ];
+  for (const [category, item, okFlag] of taxcomInvariants) {
+    assertCheck(category, item, Boolean(okFlag), okFlag ? 'инвариант соблюдён' : 'инвариант нарушен в server.js');
+  }
+
+  for (const [needle, label] of [
+    ['Integrator-ID', 'заголовок интегратора'],
+    ['Session-Token', 'заголовок сессии'],
+    ['Login_Request', 'пометка о нераскрытой схеме тела'],
+    ['300', 'TTL маркера 5 минут'],
+    ['10 суток', 'окно выдачи документов'],
+    ['10 000', 'лимит документов за вызов'],
+    ['3106', 'нет доступной ККТ'],
+    ['2203', 'некорректный курсор'],
+    ['api-tlk-ofd.taxcom.ru', 'тестовый host провайдера'],
+    ['api-lk-ofd.taxcom.ru', 'production host провайдера'],
+    ['не чаще раза в минуту', 'рекомендация частоты опроса'],
+    ['AccountList', 'discovery договоров'],
+    ['NewDocuments', 'поток новых документов'],
+    ['копейках', 'единицы сумм'],
+    ['22-122', 'ставки НДС v2.17 не раскрыты по именам полей'],
+    ['[VERIFY]', 'незакрытые места среза'],
+    ['[FORK]', 'локальные решения мока'],
+    ['3109', 'порт стенда'],
+  ]) {
+    const inGuide = taxcomGuide.includes(needle);
+    assertCheck('taxcom:guide-point', `${label} (${needle})`, inGuide, inGuide ? 'есть в docs/integration/taxcom.md' : 'гайд не содержит обязательную оговорку');
+  }
+
+  const taxcomLimits = taxcomManifest.limits || {};
+  assertCheck('taxcom:limits', `sessionTtlSecsDefault=${taxcomLimits.sessionTtlSecsDefault}`,
+    taxcomServer.includes(`SESSION_TTL_DEFAULT_SECS = ${taxcomLimits.sessionTtlSecsDefault}`)
+      && taxcomGuide.includes(String(taxcomLimits.sessionTtlSecsDefault)),
+    'TTL маркера совпадает в манифесте, адаптере и guide');
+  assertCheck('taxcom:limits', `windowDays=${taxcomLimits.windowDays}`,
+    taxcomServer.includes(`WINDOW_DAYS = ${taxcomLimits.windowDays}`) && taxcomGuide.includes('10 суток'),
+    'окно 10 суток совпадает в манифесте, адаптере и guide');
+  assertCheck('taxcom:limits', `pageMaxPerCall=${taxcomLimits.pageMaxPerCall}`,
+    taxcomServer.includes(`PAGE_LIMIT_MAX = ${taxcomLimits.pageMaxPerCall}`) && taxcomGuide.includes('10 000'),
+    'лимит 10 000 документов совпадает в манифесте, адаптере и guide');
+  assertCheck('taxcom:verify', 'манифест фиксирует незакрытые места среза ([VERIFY])',
+    (taxcomManifest.verify || []).length >= 5 && taxcomGuide.includes('[VERIFY]'),
+    `verify=${(taxcomManifest.verify || []).length}`);
+
+  assertCheck('taxcom:negative-control', 'missing server fails independently of OpenAPI',
+    taxcomRoutes('', taxcomOpenApi, taxcomManifest).every((r) => !r.inServer && r.inOpenApi));
+  assertCheck('taxcom:negative-control', 'missing OpenAPI fails independently of server',
+    taxcomRoutes(taxcomServer, { paths: {} }, taxcomManifest).every((r) => r.inServer && !r.inOpenApi));
+  assertCheck('taxcom:readme', 'сервисный README фиксирует Login/Session-Token, границы и порт',
+    taxcomReadme.includes('Integrator-ID') && taxcomReadme.includes('Session-Token') && taxcomReadme.includes('3109')
+      && taxcomReadme.includes('[VERIFY]') && taxcomReadme.includes('[FORK]'),
+    'README должен объяснять авторизацию, read-only границы и известные пробелы среза');
+  assertCheck('taxcom:registration', 'порт 3109: Dockerfile EXPOSE, healthcheck, оба compose и test:taxcom',
+    /^EXPOSE .*\b3109\b/m.test(readText('Dockerfile'))
+      && readText('scripts/docker-healthcheck.js').includes("['3109', '/health']")
+      && readText('docker-compose.include.yml').includes('services/taxcom-mock/server.js')
+      && readText('docker-compose.yml').includes('services/taxcom-mock/server.js')
+      && readJson('package.json').scripts.test.includes('test:taxcom'),
+    'регистрация сервиса в образе, healthcheck, compose и npm test');
+
   const summary = {
     ok: driftIssues.length === 0,
     checkedAt: new Date().toISOString(),
@@ -1038,7 +1194,7 @@ function main() {
   if (jsonOutput) {
     console.log(JSON.stringify(summary, null, 2));
   } else {
-    console.log(`\n== Protocol Drift Check (tbank-eacq + ferma-ofd + atol-online + alfa-eacq + sber-ecom + vtb-smb + first-ofd-okassa + kontur-ofd) ==`);
+    console.log(`\n== Protocol Drift Check (tbank-eacq + ferma-ofd + atol-online + alfa-eacq + sber-ecom + vtb-smb + first-ofd-okassa + kontur-ofd + taxcom-ofd) ==`);
     console.log(`Проверено инвариантов контракта: ${summary.totalChecks}, пройдено: ${summary.passedChecks}, расхождений: ${summary.driftCount}`);
     if (driftIssues.length > 0) {
       console.error('\nОбнаружены расхождения (drift):');

@@ -370,5 +370,60 @@ services:
       start_period: 3s
     restart: unless-stopped
 
+  taxcom-mock:
+    build: .
+    image: mock-services:local
+    working_dir: /app
+    command: node services/taxcom-mock/server.js
+    # Безопасный локальный default; сетевой bind включается явно.
+    ports: ["${MOCK_TAXCOM_BIND_IP:-127.0.0.1}:${MOCK_TAXCOM_HOST_PORT:-3109}:3109"]
+    environment:
+      MOCK_HOST: "0.0.0.0"
+      MOCK_PORT: "3109"
+      MOCK_HEALTH_PATH: "/health"
+      MOCK_STATE_FILE: "/data/taxcom-state.json"
+      MOCK_SANDBOX_FILE: "/data/taxcom-sandboxes.json"
+      # Дефолты синтетические: публичных тестовых login/password/Integrator-ID
+      # Такском нет (их выдаёт техподдержка/кабинет). Production-креды не публикуются.
+      MOCK_TAXCOM_LOGIN: "${MOCK_TAXCOM_LOGIN:-taxcommocktest}"
+      MOCK_TAXCOM_PASSWORD: "${MOCK_TAXCOM_PASSWORD:-mockpass123}"
+      MOCK_TAXCOM_INTEGRATOR_ID: "${MOCK_TAXCOM_INTEGRATOR_ID:-TAXCOMMOCKTEST}"
+      MOCK_TAXCOM_SESSION_TTL_SECS: "${MOCK_TAXCOM_SESSION_TTL_SECS:-300}"
+      MOCK_TAXCOM_PUBLIC_BASE_URL: "${MOCK_TAXCOM_PUBLIC_BASE_URL:-http://localhost:${MOCK_TAXCOM_HOST_PORT:-3109}}"
+      MOCK_SANDBOX_SWEEP_MS: "${MOCK_SANDBOX_SWEEP_MS:-60000}"
+      MOCK_VIRTUAL_CLOCK: "${MOCK_VIRTUAL_CLOCK:-}"
+      MOCK_ADMIN_TOKEN: "${MOCK_ADMIN_TOKEN:-}"
+      MOCK_OPERATOR_TOKEN: "${MOCK_OPERATOR_TOKEN:-}"
+      MOCK_HOSTED: "${MOCK_HOSTED:-false}"
+      MOCK_TENANCY: "${MOCK_TENANCY:-}"
+      MOCK_SANDBOX_TOKEN: "${MOCK_SANDBOX_TOKEN:-}"
+      MOCK_SANDBOX_TTL_MS: "${MOCK_SANDBOX_TTL_MS:-}"
+      MOCK_SANDBOX_MAX: "${MOCK_SANDBOX_MAX:-}"
+      MOCK_SANDBOX_MAX_DOCUMENTS: "${MOCK_SANDBOX_MAX_DOCUMENTS:-}"
+      MOCK_SANDBOX_MAX_STATE_BYTES: "${MOCK_SANDBOX_MAX_STATE_BYTES:-}"
+      MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES: "${MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES:-}"
+      MOCK_SANDBOX_HOST_SUFFIX: "${MOCK_SANDBOX_HOST_SUFFIX:-}"
+      MOCK_SANDBOX_CREATE_LIMIT: "${MOCK_SANDBOX_CREATE_LIMIT:-}"
+    volumes: ["mock-data:/data"]
+    labels:
+      caddy: "${MOCK_TAXCOM_CADDY_DOMAIN:-}"
+      caddy.reverse_proxy: "{{upstreams 3109}}"
+    # MS-04: контейнерный харденинг. Root filesystem только для чтения,
+    # единственная запись — volume /data (state), /tmp — tmpfs.
+    init: true
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: "${MOCK_MEM_LIMIT:-128m}"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:3109,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    restart: unless-stopped
+
 volumes:
   mock-data:
