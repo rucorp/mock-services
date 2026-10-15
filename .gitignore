@@ -5,3 +5,7 @@ data/
 .DS_Store
 **/.DS_Store
 .zcode/
+/dist/
+/dist-root/
+/site-build/node_modules/
+/site-build/.work/

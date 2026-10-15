@@ -30,7 +30,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Документация
 
-Полный сайт: **<https://rucorp.github.io/mock-services/>** (офлайн, docsify).
+Полный сайт: **<https://rucorp.github.io/mock-services/>** (статический HTML из Markdown, контент доступен без JavaScript).
 
 | Что нужно | Где |
 |---|---|

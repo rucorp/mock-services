@@ -63,7 +63,7 @@ CI ([`.github/workflows/ci.yml:69-184`](.github/workflows/ci.yml)); локаль
 | Проверки | `scripts/*.js` | `check-protocol-drift.js`, `check-docs-links.js`, `compose-selftest.js`, `docker-smoke.js` |
 | Контейнеры | `Dockerfile`, `docker-compose.yml`, `docker-compose.include.yml` | include — artifact потребителей, менять осторожно |
 | Документация продукта | `README.md`, `SECURITY.md`, `CHANGELOG.md`, `docs/{overview.md,integration,rfc,reference,openapi}` | внутренние документы — в закрытом `mock-services-docs` (§10) |
-| Сайт документации (GitHub Pages) | `index.html`, `_sidebar.md`, `site/theme.css`, `site/site.js` | docsify без сборки, вендоренные скрипты в `site/vendor/`; тема и плагины — только свои |
+| Сайт документации (GitHub Pages) | `_sidebar.md`, `site-build/.vitepress/`, `site-build/scripts/` | VitePress генерирует самостоятельные HTML-страницы; build-зависимости изолированы в `site-build/` |
 
 ## 4. Формальные требования к файлам
 
