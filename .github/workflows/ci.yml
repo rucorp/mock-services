@@ -59,6 +59,8 @@ jobs:
         run: npm run test:upstream
       - name: проверка относительных ссылок документации
         run: npm run check:links
+      - name: проверка структуры сайта документации (ссылки сайдбара, самодостаточность)
+        run: npm run check:site
       - name: детектор дрейфа протоколов и OpenAPI 3.1
         run: npm run check:drift
 
