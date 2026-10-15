@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 Все три compose-файла задают одинаковый набор харденинг-флагов каждому сервису:
 
-- `docker-compose.yml` — 9 сервисов (без kontur-ofd, он в include)
+- `docker-compose.yml` — 10 сервисов (весь контур, из исходников)
 - `docker-compose.include.yml` — 10 сервисов (включая kontur-ofd-mock)
 - `docker-compose.staging.yml` — 2 сервиса (tbank + kassa)
 

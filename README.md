@@ -150,7 +150,7 @@ index.html               — точка входа сайта (GitHub Pages)
 _sidebar.md              — навигация сайта
 .github/workflows/ci.yml — CI: selftest Node 18/20/22 + compose + GHCR
 Dockerfile               — образ для всех сервисов
-docker-compose.yml       — root compose (9 сервисов, kontur-ofd в include)
+docker-compose.yml       — root compose (10 сервисов, из исходников)
 docker-compose.include.yml — внешний compose-модуль (профиль mock, 10 сервисов)
 docker-compose.staging.yml — стенд одной командой (tbank + kassa)
 ```
