@@ -8,8 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 фискализированных документов: это не очередь печати, не Ferma и не OKassa.
 Node ≥18, CommonJS, zero dependencies, общее ядро `packages/core` не изменено.
 
-Источники (2026-10-11): [auth/access](../../docs/reference/kontur-ofd/01-auth-and-access.md),
-[documents](../../docs/reference/kontur-ofd/02-document-retrieval.md).
+Источник (2026-10-11): официальная документация Контур.ОФД (auth/access, документы).
 [Рецепт интеграции, curl, сценарии и полный список `[FORK]`](../../docs/integration/kontur-ofd.md),
 [OpenAPI](../../docs/openapi/kontur-ofd-mock.openapi.json),
 [drift-манифест](../../protocols/kontur-ofd.json).

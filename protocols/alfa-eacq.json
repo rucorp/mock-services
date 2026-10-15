@@ -3,9 +3,9 @@
   "title": "Альфа-Банк — интернет-эквайринг (REST *.do, платформа RBS)",
   "version": "2026.10",
   "upstreamDocs": [
-    "docs/reference/alfa/01-payment-api.md",
-    "docs/reference/alfa/02-notifications-and-signature.md",
-    "docs/reference/alfa/03-test-contour.md"
+    "mock-services-docs/docs/reference/alfa/01-payment-api.md",
+    "mock-services-docs/docs/reference/alfa/02-notifications-and-signature.md",
+    "mock-services-docs/docs/reference/alfa/03-test-contour.md"
   ],
   "upstreamSources": [
     {
@@ -42,7 +42,10 @@
   },
   "auth": {
     "type": "per-request",
-    "fields": ["userName", "password"],
+    "fields": [
+      "userName",
+      "password"
+    ],
     "note": "Креды передаются в каждом запросе (токенов нет). Логин без префикса; r-логин и i-логин могут иметь разные координаты и инструкции."
   },
   "restMethods": [
@@ -86,9 +89,30 @@
     "/sandboxes/me/reset-creds",
     "/mock/sandboxes"
   ],
-  "registerFields": ["userName", "password", "orderNumber", "amount", "returnUrl"],
-  "registerOptionalFields": ["failUrl", "clientId", "email", "phone", "sessionTimeoutSecs", "jsonParams", "orderBundle", "description", "currency"],
-  "registerResponse": ["orderId", "formUrl", "errorCode", "errorMessage"],
+  "registerFields": [
+    "userName",
+    "password",
+    "orderNumber",
+    "amount",
+    "returnUrl"
+  ],
+  "registerOptionalFields": [
+    "failUrl",
+    "clientId",
+    "email",
+    "phone",
+    "sessionTimeoutSecs",
+    "jsonParams",
+    "orderBundle",
+    "description",
+    "currency"
+  ],
+  "registerResponse": [
+    "orderId",
+    "formUrl",
+    "errorCode",
+    "errorMessage"
+  ],
   "orderStatuses": {
     "0": "заказ зарегистрирован, не оплачен",
     "1": "сумма захолдирована (двухстадийная схема)",
@@ -98,21 +122,50 @@
     "5": "начата аутентификация через ACS эмитента",
     "6": "авторизация отклонена"
   },
-  "orderStatusNote": "Нумерация orderStatus — общая для платформы RBS (таблица снята в docs/reference/sber/01-payment-api.md для того же семейства шлюзов; тестовый контур Альфы — alfa.rbsuat.com). В альфа-конспекте своя таблица не зафиксирована — это документированная интерпретация мока, см. services/alfa-mock/README.md («Границы и форки»).",
+  "orderStatusNote": "Нумерация orderStatus — общая для платформы RBS (таблица снята в документации Сбербанк Ecom для того же семейства шлюзов; тестовый контур Альфы — alfa.rbsuat.com). В альфа-конспекте своя таблица не зафиксирована — это документированная интерпретация мока, см. services/alfa-mock/README.md («Границы и форки»).",
   "errorCodeSemantics": "errorCode=0 — результат обработки API-вызова, не эквивалент финального статуса оплаты; после возврата браузера, таймаута или callback сверять заказ через getOrderStatus(Extended).do.",
-  "errorCodes": [0, 1, 2, 3, 4, 5, 6],
+  "errorCodes": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
   "errorCodeNote": "Классическая таблица кодов RBS (0—6) в альфа-конспекте не снята. Маппинг частных случаев мока (неизвестный заказ → 3, лимиты суммы deposit/refund → 5, недоступная двухстадийная схема → 5) — интерпретация по общей таблице платформы; задокументирована в README сервиса и отчёте PR.",
   "callback": {
     "method": "GET",
-    "params": ["mdOrder", "orderNumber", "operation", "status", "amount", "callbackCreationDate", "checksum"],
-    "statusValues": { "1": "операция успешна", "0": "операция завершилась ошибкой" },
-    "operations": ["approved", "deposited", "reversed", "refunded", "declinedByTimeout", "declinedCardpresent"],
+    "params": [
+      "mdOrder",
+      "orderNumber",
+      "operation",
+      "status",
+      "amount",
+      "callbackCreationDate",
+      "checksum"
+    ],
+    "statusValues": {
+      "1": "операция успешна",
+      "0": "операция завершилась ошибкой"
+    },
+    "operations": [
+      "approved",
+      "deposited",
+      "reversed",
+      "refunded",
+      "declinedByTimeout",
+      "declinedCardpresent"
+    ],
     "operationNote": "declinedCardpresent в опубликованном PDF перечислена без детальной семантики; мок отправляет её при отказе карточной авторизации (форма/ACS) со status=0. Сверка — getOrderStatusExtended.do (orderStatus=6, actionCode).",
     "ack": "ровно HTTP 200 OK; любой иной код считается неуспехом",
     "retries": "повтор до HTTP 200 либо до максимального числа подряд неуспешных попыток; число попыток и интервал в PDF НЕ указаны — мок использует собственную конфигурацию (MOCK_CALLBACK_RETRY_MS × MOCK_CALLBACK_MAX_ATTEMPTS), а не параметры Т-Банка/Сбера",
     "unsignedNote": "callback может быть без контрольной суммы; неподписанное уведомление можно подделать — обработка обязана сверять актуальный статус через REST и не считать callback единственным источником истины.",
     "checksum": {
-      "modes": ["symmetric", "asymmetric"],
+      "modes": [
+        "symmetric",
+        "asymmetric"
+      ],
       "implemented": "symmetric",
       "algorithm": [
         "удалить checksum и sign_alias из набора параметров",
@@ -142,7 +195,12 @@
   ],
   "acsPassword": "12345678",
   "cardholderNote": "Владелец карты в тесте — минимум два слова латиницей.",
-  "actionCodes": [-2011, 116, 71015, 5],
+  "actionCodes": [
+    -2011,
+    116,
+    71015,
+    5
+  ],
   "actionCodeNote": "-2011 — 3DS отказ PaRes=U; 116 — недостаточно средств; 71015 — «введённая информация неверна» (неверный срок/CVV либо Fail на тестовом ACS); 5 — общий отказ эмитента (мок: неизвестная валидная карта, операция без 3DS при выключенном SSL-разрешении).",
   "sslNote": "Карта 5555555555555599 — без 3DS: отказ, но успех при включённом SSL-разрешении (env MOCK_SSL_PERMITTED; разрешение выдаёт банк).",
   "twoStage": {
@@ -173,7 +231,7 @@
     "userName": "ALFAMOCKTEST",
     "password": "mockpass123",
     "callbackSecret": "mocksecret123",
-    "note": "Синтетические креды мока по образцу TBANKMOCKTEST. Реальные тестовые userName/password Альфа-Банка выдаются индивидуально при подключении и в дефолтах конфига НЕ используются (docs/reference/alfa/03-test-contour.md)."
+    "note": "Синтетические креды мока по образцу TBANKMOCKTEST. Реальные тестовые userName/password Альфа-Банка выдаются индивидуально при подключении и в дефолтах конфига НЕ используются (документации Альфа-Банк)."
   },
   "outOfScope": [
     "асимметричный checksum (неоднозначность SHA-256/SHA-512 в официальном PDF — не домысливать)",
@@ -183,5 +241,6 @@
     "различия координат r-/i-логинов",
     "/mock/verify-merchant (активный экзаменатор вебхук-приёмника не реализован: ядро рассчитано на POST-JSON, callback Альфа-Банка — GET с query-параметрами; форк задокументирован в README сервиса)",
     "третий банк (Сбер/ВТБ) — следующая волна"
-  ]
+  ],
+  "$upstreamNote": "Конспекты upstream-доки живут в приватном репозитории rucorp/mock-services-docs; в публичном репо — только официальные URL в docs/integration."
 }

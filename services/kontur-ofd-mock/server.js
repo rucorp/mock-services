@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 'use strict';
 
-// Read/reconciliation по срезу 2026-10-11: docs/reference/kontur-ofd/*.md.
+// Read/reconciliation по срезу 2026-10-11: документации Контур.ОФД*.md.
 // Очередь фискализации и callback печати вне публичного контракта.
 const http = require('http');
 const crypto = require('crypto');

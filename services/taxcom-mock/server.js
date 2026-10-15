@@ -5,7 +5,7 @@
 /*
  * taxcom-mock — мок кабинета/ОФД «Такском», read-only API v2 (Stage 2, issue #112).
  *
- * Контракт (срез 2026-10-11, docs/reference/taxcom/*): API Help v2.17,
+ * Контракт (срез 2026-10-11, документации Такском*): API Help v2.17,
  * техническое описание от 30.12.2025. Тестовый host провайдера
  * https://api-tlk-ofd.taxcom.ru, production — https://api-lk-ofd.taxcom.ru;
  * общий путь методов /API/v2/.... Это ЧТЕНИЕ уже принятых ОФД фискальных
@@ -68,7 +68,7 @@ const PUBLIC_BASE_URL = env.MOCK_TAXCOM_PUBLIC_BASE_URL || `http://localhost:${P
 const PROVIDER_DOC = 'https://lk-ofd.taxcom.ru/ApiHelp/';
 
 /* Синтетические дефолты: публичных тестовых login/password/Integrator-ID
- * Такском не публикует (docs/reference/taxcom/02-documents-and-test-limits.md) —
+ * Такском не публикует (документации Такском) —
  * их выдаёт техподдержка/кабинет. Значения ниже — креды МОКА, не реквизиты
  * провайдера; production-креды в коде/compose не публикуются. */
 const DEFAULT_LOGIN = 'taxcommocktest';

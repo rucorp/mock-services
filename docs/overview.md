@@ -24,21 +24,21 @@
 
 | Провайдер | Что эмулирует | Порт | Документы |
 |---|---|---|---|
-| **Т-Банк** | EACQ: `Init` → платёжная форма → нотификации → `Confirm`/`Cancel`; Мультирасчёты (сделки, выплаты e2c), СБП QR, рекурренты, чарджбэки, верификация счетов (AV) | 3100 | [гайд](integration/tbank-eacq.md) · [справочник](reference/tbank/01-payment-api.md) · [OpenAPI](openapi/tbank-mock.openapi.json) |
-| **ЮKassa** | REST `/v3`: Basic Auth + `Idempotence-Key`, two-stage с частичным `capture`, возвраты, confirmation-страница, вебхуки | 3102 | [гайд](integration/yookassa.md) · [справочник](reference/yookassa/01-payments-and-refunds.md) |
-| **Альфа-Банк** | интернет-эквайринг REST `/payment/rest/*.do`: `register`/`registerPreAuth` → `formUrl`, `deposit` ≤ холда, `reverse`, `refund`, callback HTTP GET с checksum HMAC-SHA256 | 3104 | [гайд](integration/alfa.md) · [справочник](reference/alfa/01-payment-api.md) · [OpenAPI](openapi/alfa-mock.openapi.json) |
-| **Сбербанк** | Ecom REST v1.1.11.1 `/ecomm/gw/partner/api/v1/*.do`: `register`, форма и ACS `111111`, `deposit`/`reverse`/`refund`/`decline`, callback JSON с ACK 200 и retry | 3105 | [гайд](integration/sber.md) · [справочник](reference/sber/01-payment-api.md) · [OpenAPI](openapi/sber-mock.openapi.json) |
-| **ВТБ** | SMB E-commerce API `/openapi/smb/efcp/e-commerce/v1/`: OAuth 2.0 `client_credentials`, `orders`/`preauth`/`complete`/`cancel`/`refunds`, ордер живёт 20 минут | 3106 | [гайд](integration/vtb.md) · [справочник](reference/vtb/01-smb-ecommerce-api.md) · [OpenAPI](openapi/vtb-mock.openapi.json) |
+| **Т-Банк** | EACQ: `Init` → платёжная форма → нотификации → `Confirm`/`Cancel`; Мультирасчёты (сделки, выплаты e2c), СБП QR, рекурренты, чарджбэки, верификация счетов (AV) | 3100 | [гайд](integration/tbank-eacq.md) · справочник (конспект во внутреннем архиве mock-services-docs) · [OpenAPI](openapi/tbank-mock.openapi.json) |
+| **ЮKassa** | REST `/v3`: Basic Auth + `Idempotence-Key`, two-stage с частичным `capture`, возвраты, confirmation-страница, вебхуки | 3102 | [гайд](integration/yookassa.md) · справочник (конспект во внутреннем архиве mock-services-docs) |
+| **Альфа-Банк** | интернет-эквайринг REST `/payment/rest/*.do`: `register`/`registerPreAuth` → `formUrl`, `deposit` ≤ холда, `reverse`, `refund`, callback HTTP GET с checksum HMAC-SHA256 | 3104 | [гайд](integration/alfa.md) · справочник (конспект во внутреннем архиве mock-services-docs) · [OpenAPI](openapi/alfa-mock.openapi.json) |
+| **Сбербанк** | Ecom REST v1.1.11.1 `/ecomm/gw/partner/api/v1/*.do`: `register`, форма и ACS `111111`, `deposit`/`reverse`/`refund`/`decline`, callback JSON с ACK 200 и retry | 3105 | [гайд](integration/sber.md) · справочник (конспект во внутреннем архиве mock-services-docs) · [OpenAPI](openapi/sber-mock.openapi.json) |
+| **ВТБ** | SMB E-commerce API `/openapi/smb/efcp/e-commerce/v1/`: OAuth 2.0 `client_credentials`, `orders`/`preauth`/`complete`/`cancel`/`refunds`, ордер живёт 20 минут | 3106 | [гайд](integration/vtb.md) · справочник (конспект во внутреннем архиве mock-services-docs) · [OpenAPI](openapi/vtb-mock.openapi.json) |
 
 ## Кассы и ОФД
 
 | Провайдер | Что эмулирует | Порт | Документы |
 |---|---|---|---|
-| **OFD Ferma** | облачная касса по 54-ФЗ: `sell`/`buy` с возвратами и коррекциями, авансы и зачёты, маркировка «Честный ЗНАК», очередь ОФД, смены ККТ 24 ч и Z-отчёты, ресурс ФН | 3101 | [гайд](integration/ferma-ofd.md) · [справочник](reference/README-kassa-mock.md) · [OpenAPI](openapi/kassa-mock.openapi.json) |
-| **АТОЛ Онлайн** | direct API v4 (ФФД 1.05): `getToken` на 24 ч, шесть операций фискализации, идемпотентность `external_id`, отчёт `wait → done\|fail` с ФД/ФП | 3103 | [гайд](integration/atol.md) · [справочник](reference/atol-online/01-api-v4-v5.md) · [OpenAPI](openapi/atol-mock.openapi.json) |
-| **Первый ОФД (OKassa)** | асинхронная очередь заявок `/api/external/queue/v1/transaction/{type}` → `requestId`, статусы `IN_PROGRESS → COMPLETED\|ERROR`, сверка чеков за период | 3107 | [гайд](integration/first-ofd.md) · [справочник](reference/first-ofd/01-okassa-api.md) · [OpenAPI](openapi/first-ofd-mock.openapi.json) |
-| **Контур.ОФД** | чтение и сверка: Sid + API key, организации, кассы, фискальные документы (суммы в копейках) — без создания чека | 3108 | [гайд](integration/kontur-ofd.md) · [справочник](reference/kontur-ofd/01-auth-and-access.md) · [OpenAPI](openapi/kontur-ofd-mock.openapi.json) |
-| **Такском** | read-only кабинет/ОФД, API v2: `POST /API/v2/Login` с `Integrator-ID` → `Session-Token` на 5 минут, `AccountList`, `NewDocuments` за 10 суток | 3109 | [гайд](integration/taxcom.md) · [справочник](reference/taxcom/01-api-auth-and-discovery.md) · [OpenAPI](openapi/taxcom-mock.openapi.json) |
+| **OFD Ferma** | облачная касса по 54-ФЗ: `sell`/`buy` с возвратами и коррекциями, авансы и зачёты, маркировка «Честный ЗНАК», очередь ОФД, смены ККТ 24 ч и Z-отчёты, ресурс ФН | 3101 | [гайд](integration/ferma-ofd.md) · справочник (конспект во внутреннем архиве mock-services-docs) · [OpenAPI](openapi/kassa-mock.openapi.json) |
+| **АТОЛ Онлайн** | direct API v4 (ФФД 1.05): `getToken` на 24 ч, шесть операций фискализации, идемпотентность `external_id`, отчёт `wait → done\|fail` с ФД/ФП | 3103 | [гайд](integration/atol.md) · справочник (конспект во внутреннем архиве mock-services-docs) · [OpenAPI](openapi/atol-mock.openapi.json) |
+| **Первый ОФД (OKassa)** | асинхронная очередь заявок `/api/external/queue/v1/transaction/{type}` → `requestId`, статусы `IN_PROGRESS → COMPLETED\|ERROR`, сверка чеков за период | 3107 | [гайд](integration/first-ofd.md) · справочник (конспект во внутреннем архиве mock-services-docs) · [OpenAPI](openapi/first-ofd-mock.openapi.json) |
+| **Контур.ОФД** | чтение и сверка: Sid + API key, организации, кассы, фискальные документы (суммы в копейках) — без создания чека | 3108 | [гайд](integration/kontur-ofd.md) · справочник (конспект во внутреннем архиве mock-services-docs) · [OpenAPI](openapi/kontur-ofd-mock.openapi.json) |
+| **Такском** | read-only кабинет/ОФД, API v2: `POST /API/v2/Login` с `Integrator-ID` → `Session-Token` на 5 минут, `AccountList`, `NewDocuments` за 10 суток | 3109 | [гайд](integration/taxcom.md) · справочник (конспект во внутреннем архиве mock-services-docs) · [OpenAPI](openapi/taxcom-mock.openapi.json) |
 
 > Read-only адаптеры (Контур.ОФД, Такском) не умеют создавать чеки: они
 > предназначены для сверки уже пробитых документов. Write API Такскома
@@ -49,7 +49,7 @@
 | Слой | Где лежит | Для чего |
 |---|---|---|
 | **Гайды «за 10 минут»** | [`docs/integration/`](integration/tbank-eacq.md) | Поднять сервис, провести первый платёж/чек, увидеть сценарии отказов |
-| **Справочники провайдеров** | [`docs/reference/<provider>/`](reference/README-stage1-issue-6.md) | Конспект официальной доки: эндпоинты, поля, подписи, статусы, даты сверки |
+| **Справочники провайдеров** | `внутренних конспектов (приватный mock-services-docs)<provider>/` (конспект во внутреннем архиве mock-services-docs) | Конспект официальной доки: эндпоинты, поля, подписи, статусы, даты сверки |
 | **OpenAPI 3.1** | [`docs/openapi/`](openapi/tbank-mock.openapi.json) | Машинкочитаемые спецификации; на живом стенде — `GET /openapi.json` |
 | **Манифесты протоколов** | `protocols/<provider>.json` | Декларация операций для детектора дрейфа (`npm run check:drift`) |
 | **Сервисы** | [`services/<provider>-mock/`](../services/tbank-mock/README.md) | Env-переменные, эндпоинты управления (`/mock/*`), сценарии, журнал |
@@ -82,7 +82,7 @@
 документации при этом самодостаточна.
 
 Ссылки на официальные источники провайдеров собраны отдельно —
-[`docs/reference/external-links.md`](reference/external-links.md).
+`внутренних конспектов (приватный mock-services-docs)` (конспект во внутреннем архиве mock-services-docs).
 
 ---
 

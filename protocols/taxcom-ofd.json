@@ -4,8 +4,8 @@
   "title": "Такском — read-only кабинет/ОФД (API v2)",
   "version": "2026.10",
   "upstreamDocs": [
-    "docs/reference/taxcom/01-api-auth-and-discovery.md",
-    "docs/reference/taxcom/02-documents-and-test-limits.md"
+    "mock-services-docs/docs/reference/taxcom/01-api-auth-and-discovery.md",
+    "mock-services-docs/docs/reference/taxcom/02-documents-and-test-limits.md"
   ],
   "guide": "docs/integration/taxcom.md",
   "readme": "services/taxcom-mock/README.md",
@@ -16,33 +16,129 @@
     "mock": "http://localhost:3109"
   },
   "routes": [
-    { "method": "POST", "path": "/API/v2/Login", "errors": [400, 401, 405, 413, 429, 500] },
-    { "method": "GET", "path": "/API/v2/AccountList", "errors": [401, 405, 500] },
-    { "method": "GET", "path": "/API/v2/NewDocuments", "errors": [400, 401, 403, 404, 405, 500] }
+    {
+      "method": "POST",
+      "path": "/API/v2/Login",
+      "errors": [
+        400,
+        401,
+        405,
+        413,
+        429,
+        500
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/API/v2/AccountList",
+      "errors": [
+        401,
+        405,
+        500
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/API/v2/NewDocuments",
+      "errors": [
+        400,
+        401,
+        403,
+        404,
+        405,
+        500
+      ]
+    }
   ],
   "mockRoutes": [
-    { "method": "GET", "path": "/health" },
-    { "method": "GET", "path": "/openapi.json" },
-    { "method": "GET", "path": "/admin" },
-    { "method": "GET", "path": "/admin/journal" },
-    { "method": "GET", "path": "/mock/time" },
-    { "method": "POST", "path": "/mock/time" },
-    { "method": "GET", "path": "/mock/state" },
-    { "method": "PUT", "path": "/mock/state" },
-    { "method": "POST", "path": "/mock/reset" },
-    { "method": "GET", "path": "/mock/scenarios" },
-    { "method": "POST", "path": "/mock/scenarios" },
-    { "method": "DELETE", "path": "/mock/scenarios" },
-    { "method": "GET", "path": "/mock/sandboxes" },
-    { "method": "POST", "path": "/mock/sandboxes" },
-    { "method": "DELETE", "path": "/mock/sandboxes" },
-    { "method": "GET", "path": "/sandboxes" },
-    { "method": "POST", "path": "/sandboxes" },
-    { "method": "DELETE", "path": "/sandboxes" },
-    { "method": "GET", "path": "/sandboxes/me" },
-    { "method": "DELETE", "path": "/sandboxes/me" },
-    { "method": "POST", "path": "/sandboxes/me/reset" },
-    { "method": "POST", "path": "/sandboxes/me/reset-creds" }
+    {
+      "method": "GET",
+      "path": "/health"
+    },
+    {
+      "method": "GET",
+      "path": "/openapi.json"
+    },
+    {
+      "method": "GET",
+      "path": "/admin"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/journal"
+    },
+    {
+      "method": "GET",
+      "path": "/mock/time"
+    },
+    {
+      "method": "POST",
+      "path": "/mock/time"
+    },
+    {
+      "method": "GET",
+      "path": "/mock/state"
+    },
+    {
+      "method": "PUT",
+      "path": "/mock/state"
+    },
+    {
+      "method": "POST",
+      "path": "/mock/reset"
+    },
+    {
+      "method": "GET",
+      "path": "/mock/scenarios"
+    },
+    {
+      "method": "POST",
+      "path": "/mock/scenarios"
+    },
+    {
+      "method": "DELETE",
+      "path": "/mock/scenarios"
+    },
+    {
+      "method": "GET",
+      "path": "/mock/sandboxes"
+    },
+    {
+      "method": "POST",
+      "path": "/mock/sandboxes"
+    },
+    {
+      "method": "DELETE",
+      "path": "/mock/sandboxes"
+    },
+    {
+      "method": "GET",
+      "path": "/sandboxes"
+    },
+    {
+      "method": "POST",
+      "path": "/sandboxes"
+    },
+    {
+      "method": "DELETE",
+      "path": "/sandboxes"
+    },
+    {
+      "method": "GET",
+      "path": "/sandboxes/me"
+    },
+    {
+      "method": "DELETE",
+      "path": "/sandboxes/me"
+    },
+    {
+      "method": "POST",
+      "path": "/sandboxes/me/reset"
+    },
+    {
+      "method": "POST",
+      "path": "/sandboxes/me/reset-creds"
+    }
   ],
   "auth": {
     "loginRoute": "/API/v2/Login",
@@ -88,10 +184,23 @@
     "pageMaxPerCall": 10000,
     "pollingRecommendation": "не чаще раза в минуту (рекомендация документации, не правило мока)"
   },
-  "errors": [400, 401, 403, 404, 405, 500],
+  "errors": [
+    400,
+    401,
+    403,
+    404,
+    405,
+    500
+  ],
   "apiErrorCodes": {
-    "3106": { "httpStatus": 403, "meaning": "Нет доступной ККТ" },
-    "2203": { "httpStatus": 400, "meaning": "Некорректный курсор" }
+    "3106": {
+      "httpStatus": 403,
+      "meaning": "Нет доступной ККТ"
+    },
+    "2203": {
+      "httpStatus": 400,
+      "meaning": "Некорректный курсор"
+    }
   },
   "verify": [
     "[VERIFY] Тело Login_Request: официальная схема приложения к API Help публично не раскрыта — реализована консервативная форма {login, password} (оба поля обязательны, неизвестные ключи → 400). Решение владельца до кода; пересверить при выдаче доступа к кабинету.",
@@ -117,5 +226,6 @@
     "расписания ретраев, не зафиксированные публично",
     "метод чтения одного ФД по ID (публичный URL не подтверждён)",
     "имитация Ferma/АТОЛ/OKassa под именем Такском"
-  ]
+  ],
+  "$upstreamNote": "Конспекты upstream-доки живут в приватном репозитории rucorp/mock-services-docs; в публичном репо — только официальные URL в docs/integration."
 }

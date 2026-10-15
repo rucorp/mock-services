@@ -30,9 +30,9 @@
  * (OPENSSL_ALGO_SHA512) — о SHA-512; режим подтверждается банком (вне #41).
  *
  * Источники (конспекты проекта):
- *   docs/reference/alfa/01-payment-api.md
- *   docs/reference/alfa/02-notifications-and-signature.md
- *   docs/reference/alfa/03-test-contour.md
+ *   документации Альфа-Банк
+ *   документации Альфа-Банк
+ *   документации Альфа-Банк
  *
  * ЧЕМ ОТЛИЧАЕТСЯ ОТ tbank-mock — НЕ drop-in, хотя предметная модель похожа:
  *   1. база и маршруты: POST /payment/rest/*.do с form-параметрами (Т-Банк —
@@ -45,7 +45,7 @@
  *      подписанный POST с Token и телом-ACK «OK»);
  *   5. статусы: числовые orderStatus 0…6 (Т-Банк — строковые NEW/AUTHORIZED/…).
  *   Использовать tbank-маршруты или алгоритм подписи Token как совместимую
- *   замену нельзя (docs/reference/alfa/01-payment-api.md).
+ *   замену нельзя (документации Альфа-Банк).
  *
  * ВНЕ ОБЛАСТИ (не домысляем): асимметричный checksum, привязки карт
  * (bindingId), orderBundle (принимается, но не моделируется),
@@ -88,12 +88,12 @@ const {
   MOCK_CALLBACK_RETRY_MS = '10000',
   MOCK_CALLBACK_MAX_ATTEMPTS = '24',
   // Двухстадийная схема (registerPreAuth.do + deposit.do) включается банком —
-  // на стенде env-флаг (docs/reference/alfa/01-payment-api.md).
+  // на стенде env-флаг (документации Альфа-Банк).
   MOCK_TWO_STAGE = 'true',
   // Частичное возмещение — «в разрешённом контуре»; на стенде env-флаг.
   MOCK_PARTIAL_REFUND = 'true',
   // SSL-разрешение (операции без 3DS): карта 5555555555555599 успешна только
-  // при включённом разрешении (docs/reference/alfa/03-test-contour.md).
+  // при включённом разрешении (документации Альфа-Банк).
   MOCK_SSL_PERMITTED = 'false',
   // Дефолт 20 минут — общая практика платформы RBS; в альфа-конспекте дефолт
   // не зафиксирован (см. protocols/alfa-eacq.json, limits.sessionTimeoutNote).
@@ -121,7 +121,7 @@ const {
  * Дефолты мока — СИНТЕТИЧЕСКИЕ креды по образцу TBANKMOCKTEST (требование #41):
  * реальные тестовые userName/password Альфа-Банка выдаёт индивидуально при
  * подключении, и ставить их в дефолты конфига нельзя
- * (docs/reference/alfa/03-test-contour.md).
+ * (документации Альфа-Банк).
  */
 const DEFAULT_USER_NAME = 'ALFAMOCKTEST';
 const DEFAULT_PASSWORD = 'mockpass123';
@@ -342,7 +342,7 @@ const clearSandboxChildState = (record) => {
 /* ------------------------------------------------------- тестовые карты */
 
 /**
- * Тестовые карты Альфа-Банка (docs/reference/alfa/03-test-contour.md):
+ * Тестовые карты Альфа-Банка (документации Альфа-Банк):
  * 3DS1/SSL, 3DS2 challenge/frictionless, отказы -2011 (PaRes=U) и 116
  * (недостаточно средств). Срок/CVV из таблицы — тестовые данные; ACS-пароль
  * 12345678; неверный срок/CVV либо Fail на ACS — шлюзовой код 71015
@@ -368,7 +368,7 @@ const CARDS = {
   '2201382000000062': { tds: '3ds2-frictionless', outcome: 'success', exp: '1234', cvv: '123', label: 'МИР — 3DS2 frictionless (без подтверждения)' },
 };
 
-// ACS-пароль тестового контура (docs/reference/alfa/03-test-contour.md).
+// ACS-пароль тестового контура (документации Альфа-Банк).
 const ACS_PASSWORD = '12345678';
 // «Введённая информация неверна» — неверный срок/CVV либо Fail на ACS.
 const ACTION_CODE_INVALID_INFO = 71015;
@@ -397,7 +397,7 @@ function luhnValid(pan) {
 
 /**
  * Состояния заказа (общая нумерация платформы RBS; таблица снята в
- * docs/reference/sber/01-payment-api.md для того же семейства шлюзов —
+ * документации Сбербанк Ecom для того же семейства шлюзов —
  * тестовый контур Альфы alfa.rbsuat.com. В альфа-конспекте своя таблица не
  * зафиксирована — это документированная интерпретация мока, см. README
  * «Границы и форки»).
@@ -532,7 +532,7 @@ function verifyCreds(body) {
 /* --------------------------------------------- callback: GET + checksum */
 
 /**
- * Каноническая строка checksum (docs/reference/alfa/02-notifications-and-signature.md):
+ * Каноническая строка checksum (документации Альфа-Банк):
  *   1. удалить checksum и sign_alias;
  *   2. отсортировать оставшиеся имена параметров в алфавитном порядке;
  *   3. построить строку «name;value;name;value;…;».
@@ -739,7 +739,7 @@ function statusView(order, extended) {
   if (!extended) return base;
   /*
    * Расширенный ответ различает состояние заказа, суммы авторизации/списания/
-   * возврата и код ответа шлюза (docs/reference/alfa/01-payment-api.md).
+   * возврата и код ответа шлюза (документации Альфа-Банк).
    * Состав полей — интерпретация мока по требованию конспекта; точная схема
    * RBS-ответа в конспекте не снята (см. README «Границы и форки»).
    */
@@ -1104,7 +1104,7 @@ function handleRegister(body, spec, twoStage) {
       orderId,
       formUrl: `${base}/payment/${orderId}${sandboxSelector}`,
       // DX-слой (не протокол): ключевая ловушка контракта — errorCode=0 не
-      // доказывает оплату (docs/reference/alfa/01-payment-api.md).
+      // доказывает оплату (документации Альфа-Банк).
       hint: 'errorCode=0 — результат обработки API-вызова, не эквивалент финального статуса оплаты: перенаправьте покупателя на formUrl, а итог сверяйте через getOrderStatusExtended.do (или callback).',
     }),
   };
@@ -1312,7 +1312,7 @@ function formPage(order, errorMsg) {
       <label>CVV</label><input type="password" id="cvv" name="cvv" value="123" required>
       <button type="submit">Оплатить ${esc(rub(order.amountK))}</button>
     </form>
-    <div class="muted">Платежи проводятся только по тестовым картам из списка (docs/reference/alfa/03-test-contour.md). ACS-пароль <b>12345678</b>. Форма — мок: данные карт не покидают стенд и не хранятся (только маска first6**last4).</div>`);
+    <div class="muted">Платежи проводятся только по тестовым картам из списка (документации Альфа-Банк). ACS-пароль <b>12345678</b>. Форма — мок: данные карт не покидают стенд и не хранятся (только маска first6**last4).</div>`);
 }
 
 function acsPage(order, errorMsg) {
@@ -1383,7 +1383,7 @@ function processCardPay(order, body, spec) {
 
   if (card) {
     // Известная тестовая карта: срок/CVV обязаны совпадать с таблицей —
-    // иначе отказ 71015 (docs/reference/alfa/03-test-contour.md).
+    // иначе отказ 71015 (документации Альфа-Банк).
     if (exp !== card.exp || cvv !== card.cvv) {
       return declineNow(order, ACTION_CODE_INVALID_INFO, 'Введённая информация неверна (срок/CVV не совпадают с тестовой картой)', pan, { spec });
     }
@@ -2056,7 +2056,7 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
   }));
 }
 
-/** REST-методы шлюза (docs/reference/alfa/01-payment-api.md). */
+/** REST-методы шлюза (документации Альфа-Банк). */
 const REST_METHODS = [
   'register.do',
   'registerPreAuth.do',

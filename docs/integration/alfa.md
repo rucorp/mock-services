@@ -9,8 +9,7 @@ form-параметрами, платёжная страница `formUrl` с т
 статусы `getOrderStatus(Extended).do`, двухстадийная схема
 (`registerPreAuth` → `deposit`), `reverse`, полный/частичный `refund` и
 callback-уведомления **HTTP GET** с симметричным checksum **HMAC-SHA256**.
-Источники: конспекты [`docs/reference/alfa/`](../reference/alfa/01-payment-api.md),
-официальные разделы — [REST-интерфейс](https://alfabank.ru/sme/payservice/internet-acquiring/docs/connection-options/api/rest/),
+Источники: официальные разделы — [REST-интерфейс](https://alfabank.ru/sme/payservice/internet-acquiring/docs/connection-options/api/rest/),
 [тестовые карты](https://alfabank.ru/sme/payservice/internet-acquiring/docs/connection-options/api/test-cards/).
 
 > **Это не Т-Банк и не drop-in.** Маршруты — `POST /payment/rest/*.do` с
@@ -92,7 +91,7 @@ curl -sS -X POST http://localhost:3104/payment/rest/register.do \
 ## 3. Оплатить на форме (тестовые карты)
 
 На `formUrl` — пресеты тестовых карт
-([официальный список](../reference/alfa/03-test-contour.md)): успех
+([официальный список тестовых карт](https://alfabank.ru/sme/payservice/internet-acquiring/docs/connection-options/api/test-cards/)): успех
 `4111111111111111` (3DS1), `639002000000000003` (МИР 3DS1), 3DS2-frictionless
 `2201382000000062`, 3DS2-challenge `2200000000000053` и другие; отказы
 `-2011` (3DS PaRes=U: `5555555555555557`, `4444333322221111`,

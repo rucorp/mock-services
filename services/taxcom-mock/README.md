@@ -8,9 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 уже принятых ОФД: это не очередь печати, не Ferma, не АТОЛ и не OKassa.
 Node ≥18, CommonJS, zero dependencies, общее ядро `packages/core` не изменено.
 
-Источники (2026-10-11, API Help v2.17):
-[авторизация и discovery](../../docs/reference/taxcom/01-api-auth-and-discovery.md),
-[документы, частота опроса и границы](../../docs/reference/taxcom/02-documents-and-test-limits.md).
+Источник (2026-10-11, API Help v2.17): официальная документация Такском
+(авторизация/discovery, документы, частота опроса и границы интеграции).
 [Рецепт интеграции, curl, сценарии и полный список `[VERIFY]`/`[FORK]`](../../docs/integration/taxcom.md),
 [OpenAPI](../../docs/openapi/taxcom-mock.openapi.json),
 [drift-манифест](../../protocols/taxcom-ofd.json).

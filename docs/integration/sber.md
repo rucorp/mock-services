@@ -3,9 +3,7 @@
 
 # Интеграция: Сбербанк Ecom REST через mock (10 минут)
 
-Мок воспроизводит шлюз **Сбербанк Ecom REST v1.1.11.1** по двум локальным
-срезам: [REST API](../reference/sber/01-payment-api.md) и
-[callbacks/официальным тестовым картам](../reference/sber/02-callbacks-and-test.md).
+Мок воспроизводит шлюз **Сбербанк Ecom REST v1.1.11.1** по официальной документации REST API, callbacks и тестовых карт.
 Это не legacy Secure Payments API: transport — JSON `POST
 /ecomm/gw/partner/api/v1/*.do`, callback — JSON `POST` без checksum или иной
 подписи. Ветка намеренно не включает `paymentOrder.do` (нужно разрешение
@@ -80,8 +78,7 @@ curl -sS -X POST http://localhost:3105/ecomm/gw/partner/api/v1/register.do \
 
 ## 3. Hosted-форма, карты и ACS
 
-Форма показывает официальные тестовые пресеты из
-[локального конспекта Сбера](../reference/sber/02-callbacks-and-test.md):
+Форма показывает официальные тестовые пресеты Сбербанка:
 успешные frictionless/3DS-карты, две повторяемые отказные карты (`101`, `116`),
 срок/CVV и masked PAN. Полные номера не дублируются в этом гайде. Для
 challenge-потока тестовый ACS принимает пароль `111111`; заказ остаётся в

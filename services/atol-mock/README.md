@@ -11,7 +11,7 @@
 `ofd_receipt_url`), callback результата на `service.callback_url` и
 идемпотентность `external_id` **в пределах группы**.
 
-Исходная исследовательская база — `docs/reference/atol-online/*`; публичный
+Исходная исследовательская база — `документации АТОЛ Онлайн v4*`; публичный
 гайд — [`docs/integration/atol.md`](../../docs/integration/atol.md); манифест
 контракта — `protocols/atol-online.json` (проверяется `npm run check:drift`).
 
@@ -143,7 +143,7 @@ DX-слой мока. Ошибки протокола отдаются с **HTTP
 `report`. Основной канал сверки — `report`; callback — ускорение.
 
 **Форк (задокументирован):** в публичных руководствах v4 не найдено правила для
-ACK, подписи и расписания повторов (`docs/reference/atol-online/02-testing-and-callbacks.md`).
+ACK, подписи и расписания повторов (`документации АТОЛ Онлайн v4`).
 Поэтому мок: принимает **любой 2xx** как ACK; **не добавляет подпись** (её нет
 в протоколе — выдумывать нельзя); повторяет доставку
 `MOCK_CALLBACK_RETRY_MS × MOCK_CALLBACK_MAX_ATTEMPTS`. Приёмник обязан быть

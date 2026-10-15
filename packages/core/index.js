@@ -767,7 +767,7 @@ function createJournal({ size = 200, baseUrl = '', maxEntryChars = JOURNAL_LIMIT
  * это безопасное поведение по умолчанию; схема кроме http/https отклоняется.
  *
  * `options.method = 'GET'` — исходящий GET БЕЗ тела (callback Альфа-Банка:
- * HTTP GET с query-параметрами и checksum, docs/reference/alfa/02-notifications-and-signature.md).
+ * HTTP GET с query-параметрами и checksum, документации Альфа-Банк).
  * Дефолт — POST: поведение существующих адаптеров не меняется.
  */
 const DEFAULT_WEBHOOK_RESPONSE_MAX_BYTES = 64 * 1024;

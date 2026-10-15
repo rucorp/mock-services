@@ -4,10 +4,8 @@
 # first-ofd-mock — облачная касса OKassa (Первый ОФД)
 
 Третий внешний касса-адаптер Stage 2 (issue #92, «добор kassa/OFD»), восьмой
-сервис стенда. Реализован по локальным срезам
-[OKassa API](../../docs/reference/first-ofd/01-okassa-api.md) и
-[тестового стенда/расхождений](../../docs/reference/first-ofd/02-test-and-open-issues.md)
-(срез 2026-10-11): тестовый контур `external-api-farm.1-ofd-test.ru`,
+сервис стенда. Реализован по официальной документации OKassa API
+и тестового стенда Первого ОФД (срез 2026-10-11): тестовый контур `external-api-farm.1-ofd-test.ru`,
 `getToken` → `Authorization: Bearer`, **асинхронная очередь заявок на чек**
 `POST /api/external/queue/v1/transaction/{type}` → `requestId`, статусы
 `IN_PROGRESS`/`COMPLETED`/`ERROR`.

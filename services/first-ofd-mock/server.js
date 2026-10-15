@@ -5,7 +5,7 @@
 /*
  * first-ofd-mock — мок «облачной кассы OKassa» Первого ОФД (Stage 2, issue #92).
  *
- * Контракт (срез 2026-10-11, docs/reference/first-ofd/*): тестовый контур
+ * Контракт (срез 2026-10-11, документации Первого ОФД (OKassa)*): тестовый контур
  * https://external-api-farm.1-ofd-test.ru, асинхронная ОЧЕРЕДЬ заявок на чек.
  *
  * Аутентификация: POST /getToken с Content-Type: application/json; charset=utf-8
@@ -104,7 +104,7 @@ const {
 } = process.env;
 
 /* Синтетические дефолты: реальные тестовые login/API-key Первого ОФД публично
- * не опубликованы (docs/reference/first-ofd/02-test-and-open-issues.md) и
+ * не опубликованы (документации Первого ОФД (OKassa)) и
  * выдаются в тестовом ЛК. Значения ниже — креды МОКА, не реквизиты провайдера. */
 const DEFAULT_LOGIN = 'firstofdmocktest';
 const DEFAULT_PASS = '11111111-2222-4333-8444-555555555555';
@@ -411,7 +411,7 @@ function text(value) {
   return value === undefined || value === null ? '' : String(value);
 }
 
-function firstOfdError(code, message, { field, hint, doc = 'docs/reference/first-ofd/01-okassa-api.md', layer = 'API' } = {}) {
+function firstOfdError(code, message, { field, hint, doc = 'документации Первого ОФД (OKassa)', layer = 'API' } = {}) {
   const body = { error: { code: String(code), text: String(message || ''), layer } };
   if (field) body.field = field;
   if (hint) body.hint = hint;
@@ -758,7 +758,7 @@ function validateUserGroup(raw) {
       ok: false,
       message: 'requestMetadata.userGroup обязателен',
       field: 'requestMetadata.userGroup',
-      hint: 'userGroup выбирает кассовую группу; по срезу поле обязательное (расхождение manual vs OpenAPI — см. docs/reference/first-ofd/02-test-and-open-issues.md §1).',
+      hint: 'userGroup выбирает кассовую группу; по срезу поле обязательное (расхождение manual vs OpenAPI — см. документации Первого ОФД (OKassa) §1).',
     };
   }
   if (value.length > MAX_GROUP_ID) {
@@ -779,7 +779,7 @@ function validateUserGroup(raw) {
 function validateRequestMetadata(raw) {
   // Расхождение среза №1: manual называет requestMetadata необязательным, а
   // OpenAPI держит его в required. Мок использует строгую схему OpenAPI и
-  // фиксирует выбор как [VERIFY] — см. docs/reference/first-ofd/02-*.md §1.
+  // фиксирует выбор как [VERIFY] — см. документации Первого ОФД (OKassa)*.md §1.
   if (!isPlainObject(raw)) {
     return {
       ok: false,
@@ -979,7 +979,7 @@ function validateTransactionRequest(type, body) {
         code: 'invalid_request',
         message: `Тип «${type}» принимает StateCommandRequest и не принимает document (receipt-тело)`,
         field: 'document',
-        hint: `Document с operationType/items/totalSum отправляйте в POST ${QUEUE_BASE}transaction/receipt. Состав StateCommandRequest в публичном срезе не зафиксирован ([VERIFY]) — см. docs/reference/first-ofd/01-okassa-api.md.`,
+        hint: `Document с operationType/items/totalSum отправляйте в POST ${QUEUE_BASE}transaction/receipt. Состав StateCommandRequest в публичном срезе не зафиксирован ([VERIFY]) — см. документации Первого ОФД (OKassa)`,
       };
     }
     return {

@@ -16,7 +16,7 @@
  * Callback Ecom — POST JSON без подписи (legacy-подпись Secure Payments сюда
  * не переносится): mdOrder/orderNumber/operation/status и optional
  * additionalParams; ACK — ровно HTTP 200. Протокольные источники:
- * docs/reference/sber/01-payment-api.md и 02-callbacks-and-test.md.
+ * документации Сбербанк Ecom и 02-callbacks-and-test.md.
  *
  * Не реализовано без merchant-разрешения: paymentOrder.do. Вне области:
  * SberPay/SBP Sandbox и моделирование orderBundle. Дефолтные креды — только
@@ -238,7 +238,7 @@ function clearSandboxChildState(record) {
 
 /* --------------------------------------------------------- test-card profiles */
 
-/* PAN/CVV/expiry are the synthetic test values in docs/reference/sber/02-callbacks-and-test.md.
+/* PAN/CVV/expiry are the synthetic test values in документации Сбербанк Ecom
  * Full PAN is used only for matching on the form; state, logs, and journal retain a mask. */
 const CARDS = {
   '2202205000012424': { label: 'МИР · 3DS 2.0 frictionless', exp: '0535', cvv: '669', flow: 'frictionless', outcome: 'success' },

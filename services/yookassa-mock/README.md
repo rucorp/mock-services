@@ -9,7 +9,7 @@
 `pending → waiting_for_capture → succeeded | canceled`, возвраты,
 confirmation-страница с тестовыми картами и вебхуки `{type, event, object}`
 без подписи (ACK — ровно HTTP 200). Исходная исследовательская база —
-`docs/reference/yookassa/*`; публичный гайд — `docs/integration/yookassa.md`.
+`документации ЮKassa*`; публичный гайд — `docs/integration/yookassa.md`.
 
 Node.js >= 18; внешние npm-зависимости не нужны. Все слои переиспользованы из
 `packages/core` по паттерну tbank-mock: журнал с редакцией секретов и curl,
@@ -126,7 +126,7 @@ DX-слой мока (не часть протокола ЮKassa): каждое 
 ## Confirmation-страница и тестовые карты
 
 `confirmation.confirmation_url` ведёт на `/payment/{id}` — страница с пресетами
-тестовых карт (`docs/reference/yookassa/03-testing.md`):
+тестовых карт (`документации ЮKassa`):
 
 - успех: `5555555555554444`, `4111111111111111`, `4175001000000017` (без 3DS),
   `5555555555554477`, `4793128161644804` (3DS-challenge, код — любые ≥4 цифр);

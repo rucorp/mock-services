@@ -3,7 +3,7 @@
   "info": {
     "title": "first-ofd-mock — облачная касса OKassa (Первый ОФД), мок-стенд",
     "version": "0.5.0",
-    "description": "Zero-dependency mock of the OKassa cloud cash-register API slice documented in docs/reference/first-ofd/01-okassa-api.md and 02-test-and-open-issues.md (срез 2026-10-11). Auth: POST /getToken (application/json; charset=utf-8, {login, pass}) → {token}; business calls use Authorization: Bearer <token> with a 24-hour TTL on the stand's virtual clock. Receipts are submitted to an ASYNCHRONOUS QUEUE: POST /api/external/queue/v1/transaction/{type} returns requestId, and the fiscal result is retrieved via GET transaction/{requestId} or GET status/{requestId} (IN_PROGRESS → COMPLETED | ERROR). Operations are INCOME / INCOME_RETURN / EXPENCE / EXPENCE_RETURN — the EXPENCE spelling is kept exactly as in the schema and is NOT auto-corrected. Per-type schemas are strict: ReceiptRequest, ReceiptCorrectionRequest and StateCommandRequest are not merged. Callback is an unsigned POST to requestMetadata.callbackUrl: envelope, signature, ACK code and retry schedule are NOT fixed by the public slice, so the mock invents no signature — its 2xx ACK rule and retry schedule are a mock-local [FORK]. externalId deduplication is not confirmed publicly ([VERIFY])."
+    "description": "Zero-dependency mock of the OKassa cloud cash-register API slice documented in документации Первого ОФД (OKassa) and 02-test-and-open-issues.md (срез 2026-10-11). Auth: POST /getToken (application/json; charset=utf-8, {login, pass}) → {token}; business calls use Authorization: Bearer <token> with a 24-hour TTL on the stand's virtual clock. Receipts are submitted to an ASYNCHRONOUS QUEUE: POST /api/external/queue/v1/transaction/{type} returns requestId, and the fiscal result is retrieved via GET transaction/{requestId} or GET status/{requestId} (IN_PROGRESS → COMPLETED | ERROR). Operations are INCOME / INCOME_RETURN / EXPENCE / EXPENCE_RETURN — the EXPENCE spelling is kept exactly as in the schema and is NOT auto-corrected. Per-type schemas are strict: ReceiptRequest, ReceiptCorrectionRequest and StateCommandRequest are not merged. Callback is an unsigned POST to requestMetadata.callbackUrl: envelope, signature, ACK code and retry schedule are NOT fixed by the public slice, so the mock invents no signature — its 2xx ACK rule and retry schedule are a mock-local [FORK]. externalId deduplication is not confirmed publicly ([VERIFY])."
   },
   "servers": [
     {
@@ -2246,7 +2246,7 @@
           },
           "doc": {
             "type": "string",
-            "description": "Раздел docs/reference/first-ofd/* с датой сверки"
+            "description": "Раздел документации Первого ОФД (OKassa)* с датой сверки"
           }
         }
       },

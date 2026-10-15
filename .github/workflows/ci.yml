@@ -55,8 +55,6 @@ jobs:
         run: npm run test:kontur-ofd
       - name: selftest мока Такском (read-only кабинет/ОФД, API v2)
         run: npm run test:taxcom
-      - name: офлайн selftest синхронизатора upstream snapshot
-        run: npm run test:upstream
       - name: проверка относительных ссылок документации
         run: npm run check:links
       - name: проверка структуры сайта документации (ссылки сайдбара, самодостаточность)

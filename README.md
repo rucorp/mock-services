@@ -46,7 +46,7 @@ SPDX-License-Identifier: Apache-2.0
 > `POST /API/v2/Login` с `Integrator-ID` → `Session-Token` на 5 минут sliding,
 > `AccountList`, `NewDocuments` за 10 суток с курсором по `id`, ошибки 3106/2203;
 > write API не моделируется),
-> а также мульти-песочницы (`X-Mock-Sandbox`), активный экзаменатор вебхуков (`/mock/verify-merchant`), OpenAPI 3.1 (`/openapi.json`), детектор дрейфа протоколов (`npm run check:drift`) и report-only сверка ссылок первоисточников (`npm run check:upstream`).
+> а также мульти-песочницы (`X-Mock-Sandbox`), активный экзаменатор вебхуков (`/mock/verify-merchant`), OpenAPI 3.1 (`/openapi.json`) и детектор дрейфа протоколов (`npm run check:drift`).
 > Каждый адаптер следует клиентскому контракту своего провайдера, но это не делает стенд
 > совместимым с production автоматически: перед переключением проверьте
 > конфигурацию, безопасность и условия интеграции; одной смены URL недостаточно.
@@ -69,7 +69,7 @@ SPDX-License-Identifier: Apache-2.0
 | Интеграция «за 10 минут» по провайдеру | [`docs/integration/`](docs/integration/) — таблица ниже |
 | Контракт сервиса и переменные окружения | [`services/<service>/README.md`](services/) |
 | OpenAPI 3.1 | [`docs/openapi/`](docs/openapi/) — интерактивно: `/openapi/<service>.json` |
-| Канонические доки провайдера (ссылки на первоисточники) | [`docs/reference/`](docs/reference/) |
+| Канонические доки провайдера (ссылки на первоисточники) | [`внутренних конспектов (приватный mock-services-docs)`](внутренних конспектов (приватный mock-services-docs)) |
 | Проектные решения | [`docs/rfc/`](docs/rfc/) — например, [RFC-001 «Изоляция песочниц»](docs/rfc/RFC-001-multi-tenant-sandboxes.md) |
 | Контрибуция, безопасность, правила для агентов | [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`SECURITY.md`](SECURITY.md) · [`AGENTS.md`](AGENTS.md) |
 | Что менялось между версиями | [`CHANGELOG.md`](CHANGELOG.md) |
@@ -152,14 +152,14 @@ TLS-прокси — см. [`SECURITY.md`](SECURITY.md).
 | Первый ОФД — облачная касса OKassa | `first-ofd-mock` | 3107 | [`docs/integration/first-ofd.md`](docs/integration/first-ofd.md) | [`services/first-ofd-mock/README.md`](services/first-ofd-mock/README.md) |
 | Контур.ОФД — read/reconciliation | `kontur-ofd-mock` | 3108 | [`docs/integration/kontur-ofd.md`](docs/integration/kontur-ofd.md) | [`services/kontur-ofd-mock/README.md`](services/kontur-ofd-mock/README.md) |
 | Такском — read-only кабинет/ОФД, API v2 | `taxcom-mock` | 3109 | [`docs/integration/taxcom.md`](docs/integration/taxcom.md) | [`services/taxcom-mock/README.md`](services/taxcom-mock/README.md) |
-| Платформа Lovii (подключение стенда как внешнего сервиса) | — | — | [`docs/integration/lovii.md`](docs/integration/lovii.md) | [`docs/reference/lovii/`](docs/reference/lovii/) |
+| Платформа Lovii (подключение стенда как внешнего сервиса) | — | — | [`docs/integration/lovii.md`](docs/integration/lovii.md) | — |
 
 Креды всех моков синтетические: `alfa-mock` (`ALFAMOCKTEST`/`mockpass123`),
 `sber-mock` (`SBERMOCKTEST`/`mockpass123`), `vtb-mock` (`vtbmocktest`/`mockpass123`)
 и `first-ofd-mock` (`firstofdmocktest` + UUID-ключ) — реквизиты мока, а не данные
 банка/ОФД, которые провайдер выдаёт индивидуально. Для `acqapi` Т-Банка тестовые
 Basic-креды по умолчанию `partner:partner`, а регистрация точки требует полной
-схемы реквизитов из [`docs/reference/tbank/03-payouts-and-deals.md`](docs/reference/tbank/03-payouts-and-deals.md).
+схемы реквизитов из официальной документации acqapi Т-Банка.
 
 ### Контейнерный харденинг и graceful shutdown (MS-04)
 
@@ -212,7 +212,7 @@ docs/
   rfc/                   — проектные решения (RFC-001: изоляция песочниц)
   integration/           — инструкции «интеграция за 10 минут» + миграция Lovii
   openapi/               — OpenAPI 3.1 спецификации сервисов
-  reference/             — референсы и документация адаптеров: `docs/reference/<provider>/`
+  reference/             — референсы и документация адаптеров: `внутренних конспектов (приватный mock-services-docs)<provider>/`
                            (канонический каталог доки провайдера, см. CONTRIBUTING.md)
 site/                    — сайт документации (docsify без сборки): theme.css, site.js, вендорные скрипты
 index.html               — точка входа сайта документации (GitHub Pages)
@@ -261,7 +261,7 @@ docker-compose.include.yml — внешний compose-модуль (профил
 ## Тестирование
 
 ```bash
-npm test              # всё (core + tbank + kassa + yookassa + atol + alfa + sber + vtb + first-ofd + kontur-ofd + taxcom + offline upstream selftest + check:links + check:drift)
+npm test              # всё (core + все 10 адаптеров + check:links + check:site + check:drift)
 npm run test:core     # ядро (42 проверки): restore/очередь (POST и GET-доставка)/каталог ошибок/часы/сценарии/песочницы RFC-001/экзаменатор/access-control/SSRF/tenancy/CSRF
 npm run test:tbank    # 48 сценариев контракта Т-Банка (вкл. E2C TerminalKey, CSRF, чарджбэки, СБП, рекурренты, изоляцию песочниц)
 npm run test:kassa    # 141 проверка Ferma/54-ФЗ (вкл. tenancy, CSRF, owner-token admin, ОФД/ФН, изоляцию песочниц)
@@ -273,16 +273,13 @@ npm run test:vtb      # selftest ВТБ SMB E-commerce (OAuth client_credentials
 npm run test:kontur-ofd # Контур.ОФД read/reconciliation: Sid/API key, документы, пагинация, ошибки, песочницы
 npm run test:taxcom    # Такском read-only API v2: Login/Integrator-ID, Session-Token TTL 300 с sliding и 401, AccountList, NewDocuments (10 суток, курсор по id, хвост, лимит 10 000, 3106/2203, сортировка по времени приёма), read-only 405/404, песочницы owned, persist/restore
 npm run test:first-ofd # selftest Первого ОФД/OKassa (getToken + TTL 24 ч на виртуальных часах, очередь transaction/{type} IN_PROGRESS → COMPLETED|ERROR, строгие схемы по типу, операции с написанием EXPENCE, смены StateCommandRequest, statuses/receipts, callback без подписи + сверка, песочницы, control-plane)
-npm run check:links   # относительные ссылки markdown-документации разрешаются (docs/providers упразднён — канон docs/reference)
-npm run check:drift   # 828 инвариантов: protocols/*.json <-> server.js <-> OpenAPI 3.1 <-> docs/reference/guide
-npm run test:upstream  # офлайн selftest синхронизатора snapshot
-npm --silent run check:upstream -- --json # JSON-отчёт; без --silent npm печатает служебный баннер
-npm run check:upstream -- --update # явное обновление snapshot после просмотра
+npm run check:links   # относительные ссылки markdown-документации разрешаются
+npm run check:drift   # 828 инвариантов: protocols/*.json <-> server.js <-> OpenAPI 3.1 <-> внутренних конспектов (приватный mock-services-docs)
 npm run test:docker  # image smoke (нужен docker): tbank/kassa/sber/vtb/first-ofd healthchecks, kontur-ofd/taxcom (эфемерный порт + selftest в контейнере), непривилегированный UID, persist/restore при --read-only rootfs, MS-04: харденированный контейнер + SIGTERM → exit 0 ≤ 2 с
 npm run test:compose  # black-box selftest против контейнеров compose (:3100–:3107; kontur-ofd и taxcom покрываются image smoke и `test:kontur-ofd`/`test:taxcom`)
 ```
 
-CI гоняет то же на Node 18/20/22 и проверяет, что compose-стенд поднимается. Отдельный weekly/ручной workflow сравнивает HTTP-отпечатки ссылок из `docs/reference/external-links.md` с `protocols/upstream-snapshot.json`; он только публикует отчёт, не создаёт issue и не ломает сборку при сетевых сбоях. Снимок изменяется только явной командой `npm run check:upstream -- --update` после просмотра отчёта. SPA-страницы и источник с обязательной авторизацией помечены `mode: "skip"` с причиной.
+CI гоняет то же на Node 20/22/24 и проверяет, что compose-стенд поднимается.
 
 ## Безопасность
 

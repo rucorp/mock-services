@@ -9,7 +9,7 @@
  * Детектор дрейфа протоколов (Protocol Drift Checker, спека §10):
  * сверяет декларативные манифесты протоколов (`protocols/*.json`),
  * спецификации OpenAPI 3.1 (`docs/openapi/*.openapi.json`),
- * эталонные выжимки документации (`docs/reference/**`) и фактическую
+ * эталонные выжимки документации (`внутренних конспектов (приватный mock-services-docs)**`) и фактическую
  * реализацию в `services/tbank-mock/server.js`, `services/kassa-mock/server.js`,
  * `services/atol-mock/server.js`, `services/alfa-mock/server.js`,
  * `services/sber-mock/server.js`, `services/vtb-mock/server.js`,
@@ -49,14 +49,15 @@ function main() {
     }
   }
 
-  // 1. Проверка Т-Банк (tbank-eacq.json <-> server.js <-> tbank-mock.openapi.json <-> docs/reference/tbank/*)
+  // 1. Проверка Т-Банк (tbank-eacq.json <-> server.js <-> tbank-mock.openapi.json <-> документации Т-Банка*)
   const tbankManifest = readJson('protocols/tbank-eacq.json');
   const tbankServerCode = readText('services/tbank-mock/server.js');
   const tbankOpenApi = readJson('docs/openapi/tbank-mock.openapi.json');
 
+  // Конспекты upstream-доки выведены в приватный rucorp/mock-services-docs (2026-10-15);
+  // проверяем provenance: путь в приватном репо или файл, оставшийся публичным.
   for (const docPath of tbankManifest.upstreamDocs || []) {
-    const exists = fs.existsSync(path.join(ROOT, docPath));
-    assertCheck('tbank:docs', docPath, exists, exists ? 'эталонный документ найден' : 'эталонный документ отсутствует');
+    assertCheck('tbank:docs', docPath, typeof docPath === 'string' && (docPath.startsWith('mock-services-docs/') || fs.existsSync(path.join(ROOT, docPath))), 'provenance points to private docs repo or existing public path');
   }
 
   for (const method of tbankManifest.v2Methods || []) {
@@ -86,14 +87,15 @@ function main() {
     assertCheck('tbank:test-card', pan, inServer, inServer ? 'тестовая карта поддерживается' : 'карта не найдена в server.js');
   }
 
-  // 2. Проверка ОФД Ферма (ferma-ofd.json <-> server.js <-> kassa-mock.openapi.json <-> docs/reference/ferma/*)
+  // 2. Проверка ОФД Ферма (ferma-ofd.json <-> server.js <-> kassa-mock.openapi.json <-> внутренних конспектов (приватный mock-services-docs)*)
   const fermaManifest = readJson('protocols/ferma-ofd.json');
   const kassaServerCode = readText('services/kassa-mock/server.js');
   const kassaOpenApi = readJson('docs/openapi/kassa-mock.openapi.json');
 
+  // Конспекты upstream-доки выведены в приватный rucorp/mock-services-docs (2026-10-15);
+  // проверяем provenance: путь в приватном репо или файл, оставшийся публичным.
   for (const docPath of fermaManifest.upstreamDocs || []) {
-    const exists = fs.existsSync(path.join(ROOT, docPath));
-    assertCheck('ferma:docs', docPath, exists, exists ? 'эталонный документ найден' : 'эталонный документ отсутствует');
+    assertCheck('ferma:docs', docPath, typeof docPath === 'string' && (docPath.startsWith('mock-services-docs/') || fs.existsSync(path.join(ROOT, docPath))), 'provenance points to private docs repo or existing public path');
   }
 
   for (const op of fermaManifest.operations || []) {
@@ -136,9 +138,10 @@ function main() {
   const atolOpenApi = readJson('docs/openapi/atol-mock.openapi.json');
   const atolGuide = readText('docs/integration/atol.md');
 
+  // Конспекты upstream-доки выведены в приватный rucorp/mock-services-docs (2026-10-15);
+  // проверяем provenance: путь в приватном репо или файл, оставшийся публичным.
   for (const docPath of atolManifest.upstreamDocs || []) {
-    const exists = fs.existsSync(path.join(ROOT, docPath));
-    assertCheck('atol:docs', docPath, exists, exists ? 'эталонный документ найден' : 'эталонный документ отсутствует');
+    assertCheck('atol:docs', docPath, typeof docPath === 'string' && (docPath.startsWith('mock-services-docs/') || fs.existsSync(path.join(ROOT, docPath))), 'provenance points to private docs repo or existing public path');
   }
 
   for (const op of atolManifest.operations || []) {
@@ -226,9 +229,10 @@ function main() {
   const alfaOpenApi = readJson('docs/openapi/alfa-mock.openapi.json');
   const alfaGuide = readText('docs/integration/alfa.md');
 
+  // Конспекты upstream-доки выведены в приватный rucorp/mock-services-docs (2026-10-15);
+  // проверяем provenance: путь в приватном репо или файл, оставшийся публичным.
   for (const docPath of alfaManifest.upstreamDocs || []) {
-    const exists = fs.existsSync(path.join(ROOT, docPath));
-    assertCheck('alfa:docs', docPath, exists, exists ? 'эталонный документ найден' : 'эталонный документ отсутствует');
+    assertCheck('alfa:docs', docPath, typeof docPath === 'string' && (docPath.startsWith('mock-services-docs/') || fs.existsSync(path.join(ROOT, docPath))), 'provenance points to private docs repo or existing public path');
   }
 
   for (const method of alfaManifest.restMethods || []) {
@@ -382,9 +386,10 @@ function main() {
   const sberGuide = readText(sberManifest.guide || 'docs/integration/sber.md');
   const sberReadme = readText(sberManifest.readme || 'services/sber-mock/README.md');
 
+  // Конспекты upstream-доки выведены в приватный rucorp/mock-services-docs (2026-10-15);
+  // проверяем provenance: путь в приватном репо или файл, оставшийся публичным.
   for (const docPath of sberManifest.upstreamDocs || []) {
-    const exists = fs.existsSync(path.join(ROOT, docPath));
-    assertCheck('sber:docs', docPath, exists, exists ? 'эталонный Ecom reference найден' : 'эталонный reference отсутствует');
+    assertCheck('sber:docs', docPath, typeof docPath === 'string' && (docPath.startsWith('mock-services-docs/') || fs.existsSync(path.join(ROOT, docPath))), 'provenance points to private docs repo or existing public path');
   }
 
   const sberRestPrefix = '/ecomm/gw/partner/api/v1/';
@@ -528,9 +533,10 @@ function main() {
   const vtbGuide = readText(vtbManifest.guide || 'docs/integration/vtb.md');
   const vtbReadme = readText(vtbManifest.readme || 'services/vtb-mock/README.md');
 
+  // Конспекты upstream-доки выведены в приватный rucorp/mock-services-docs (2026-10-15);
+  // проверяем provenance: путь в приватном репо или файл, оставшийся публичным.
   for (const docPath of vtbManifest.upstreamDocs || []) {
-    const exists = fs.existsSync(path.join(ROOT, docPath));
-    assertCheck('vtb:docs', docPath, exists, exists ? 'эталонный SMB reference найден' : 'эталонный reference отсутствует');
+    assertCheck('vtb:docs', docPath, typeof docPath === 'string' && (docPath.startsWith('mock-services-docs/') || fs.existsSync(path.join(ROOT, docPath))), 'provenance points to private docs repo or existing public path');
   }
 
   // Needle каждого маршрута — реальная строка server.js (не комментарий).
@@ -703,9 +709,10 @@ function main() {
   const firstOfdSchemas = JSON.stringify((firstOfdOpenApi.components || {}).schemas || {});
   const firstOfdPaths = JSON.stringify(firstOfdOpenApi.paths || {});
 
+  // Конспекты upstream-доки выведены в приватный rucorp/mock-services-docs (2026-10-15);
+  // проверяем provenance: путь в приватном репо или файл, оставшийся публичным.
   for (const docPath of firstOfdManifest.upstreamDocs || []) {
-    const exists = fs.existsSync(path.join(ROOT, docPath));
-    assertCheck('first-ofd:docs', docPath, exists, exists ? 'эталонный срез OKassa найден' : 'эталонный срез отсутствует');
+    assertCheck('first-ofd:docs', docPath, typeof docPath === 'string' && (docPath.startsWith('mock-services-docs/') || fs.existsSync(path.join(ROOT, docPath))), 'provenance points to private docs repo or existing public path');
   }
 
   // Needle каждого маршрута — реальная строка server.js (не комментарий и не ссылка на docs).
@@ -970,8 +977,10 @@ function main() {
     assertCheck('kontur-ofd:route', `${route.method} ${route.path}`, route.inServer && route.inOpenApi,
       `server=${route.inServer}, openapi=${route.inOpenApi}`);
   }
+  // Конспекты upstream-доки выведены в приватный rucorp/mock-services-docs (2026-10-15);
+  // проверяем только целостность метаданных provenance, а не наличие файла в публичном репо.
   for (const doc of konturManifest.upstreamDocs) {
-    assertCheck('kontur-ofd:reference', doc, fs.existsSync(path.join(ROOT, doc)), 'public slice exists');
+    assertCheck('kontur-ofd:reference', doc, typeof doc === 'string' && doc.startsWith('mock-services-docs/'), 'provenance points to private docs repo');
   }
   assertCheck('kontur-ofd:openapi', 'OpenAPI 3.1', konturOpenApi.openapi === '3.1.0');
   for (const type of konturManifest.documentTypes) {
@@ -1040,8 +1049,10 @@ function main() {
     assertCheck('taxcom:route', `${route.method} ${route.path}`, route.inServer && route.inOpenApi,
       `server=${route.inServer}, openapi=${route.inOpenApi}`);
   }
+  // Конспекты upstream-доки выведены в приватный rucorp/mock-services-docs (2026-10-15);
+  // проверяем только целостность метаданных provenance, а не наличие файла в публичном репо.
   for (const doc of taxcomManifest.upstreamDocs) {
-    assertCheck('taxcom:reference', doc, fs.existsSync(path.join(ROOT, doc)), 'public slice exists');
+    assertCheck('taxcom:reference', doc, typeof doc === 'string' && doc.startsWith('mock-services-docs/'), 'provenance points to private docs repo');
   }
   assertCheck('taxcom:openapi', 'OpenAPI 3.1', taxcomOpenApi.openapi === '3.1.0');
   for (const { method, path: taxcomPath, errors } of taxcomManifest.routes) {

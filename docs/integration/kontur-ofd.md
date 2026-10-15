@@ -4,8 +4,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Контур.ОФД — интеграция чтения фискальных данных
 
-Срез 2026-10-11: [доступ и auth](../reference/kontur-ofd/01-auth-and-access.md),
-[организации, кассы, документы и ошибки](../reference/kontur-ofd/02-document-retrieval.md).
+Основание — официальная документация Контур.ОФД (доступ/auth, организации, кассы, документы и ошибки).
 [Манифест](../../protocols/kontur-ofd.json),
 [OpenAPI 3.1](../openapi/kontur-ofd-mock.openapi.json),
 [README сервиса и env](../../services/kontur-ofd-mock/README.md).

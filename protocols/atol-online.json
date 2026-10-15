@@ -5,8 +5,8 @@
   "apiVersion": "v4",
   "ffd": "1.05",
   "upstreamDocs": [
-    "docs/reference/atol-online/01-api-v4-v5.md",
-    "docs/reference/atol-online/02-testing-and-callbacks.md"
+    "mock-services-docs/docs/reference/atol-online/01-api-v4-v5.md",
+    "mock-services-docs/docs/reference/atol-online/02-testing-and-callbacks.md"
   ],
   "upstreamSources": [
     {
@@ -36,7 +36,11 @@
   },
   "auth": {
     "endpoint": "/possystem/v4/getToken",
-    "request": ["login", "pass", "source"],
+    "request": [
+      "login",
+      "pass",
+      "source"
+    ],
     "tokenField": "token",
     "tokenHeader": "Token",
     "tokenTtlHours": 24,
@@ -73,8 +77,20 @@
     "/sandboxes/me/reset-creds",
     "/mock/sandboxes"
   ],
-  "documentFields": ["external_id", "timestamp", "receipt", "service.callback_url", "correction_info"],
-  "receiptFields": ["client", "company", "items", "payments", "total"],
+  "documentFields": [
+    "external_id",
+    "timestamp",
+    "receipt",
+    "service.callback_url",
+    "correction_info"
+  ],
+  "receiptFields": [
+    "client",
+    "company",
+    "items",
+    "payments",
+    "total"
+  ],
   "vatTypes": [
     "none",
     "vat0",
@@ -110,10 +126,27 @@
     "composite",
     "another"
   ],
-  "paymentTypes": [0, 1, 2, 3, 4],
+  "paymentTypes": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
   "paymentTypeNote": "Форма расчёта, ФФД тег 1081: 0 наличные, 1 электронными, 2 аванс, 3 кредит, 4 встречное предоставление. У Ferma нумерация 1..5 — не переносить.",
-  "snoTypes": ["osn", "usn_income", "usn_income_outcome", "envd", "esn", "patent"],
-  "reportStatuses": ["wait", "done", "fail"],
+  "snoTypes": [
+    "osn",
+    "usn_income",
+    "usn_income_outcome",
+    "envd",
+    "esn",
+    "patent"
+  ],
+  "reportStatuses": [
+    "wait",
+    "done",
+    "fail"
+  ],
   "payloadFields": [
     "fiscal_document_number",
     "fiscal_document_attribute",
@@ -158,7 +191,14 @@
     "moneyScale": 2,
     "quantityScale": 3
   },
-  "errorCodes": [4, 5, 10, 11, 14, 57],
+  "errorCodes": [
+    4,
+    5,
+    10,
+    11,
+    14,
+    57
+  ],
   "errorCodeNote": "Числовая таблица кодов v4 в конспекте не снята: мок использует общую таблицу кодов платформы АТОЛ/Ferma (те же коды, что в kassa-mock). Сверка с PDF API v4 5.15 не проводилась — см. services/atol-mock/README.md («Границы и форки»).",
   "testCredentials": {
     "login": "v4-online-atol-ru",
@@ -171,5 +211,6 @@
     "v5 (ФФД 1.2) — отдельный шаг после v4",
     "маркировка «Честный ЗНАК»: коды маркировки, permissive_mode, use_tspiot, tspiot_user_id, проверка КМ",
     "неопределённости v5 из конспекта не домысляются"
-  ]
+  ],
+  "$upstreamNote": "Конспекты upstream-доки живут в приватном репозитории rucorp/mock-services-docs; в публичном репо — только официальные URL в docs/integration."
 }

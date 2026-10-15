@@ -3,9 +3,8 @@
 
 # vtb-mock — ВТБ SMB E-commerce API
 
-Четвёртый внешний банк-адаптер Stage 2 (issue #87). Реализован по локальным
-конспектам [SMB E-commerce API](../../docs/reference/vtb/01-smb-ecommerce-api.md)
-и [callback/тестирования](../../docs/reference/vtb/02-callbacks-and-testing.md).
+Четвёртый внешний банк-адаптер Stage 2 (issue #87). Реализован по официальной
+документации SMB E-commerce API и callback/тестирования ВТБ.
 Это SMB API интернет-эквайринга, **не legacy RBS** (`vtb.rbsuat.com`, `*.do`):
 JSON REST base `/openapi/smb/efcp/e-commerce/v1/`, OAuth 2.0
 `client_credentials` (POST `/passport/oauth2/token`) → `Authorization: Bearer` +

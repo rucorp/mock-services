@@ -4,8 +4,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Такском — интеграция чтения фискальных данных (API v2)
 
-Срез 2026-10-11: [авторизация и discovery](../reference/taxcom/01-api-auth-and-discovery.md),
-[документы, частота опроса и границы](../reference/taxcom/02-documents-and-test-limits.md).
+Основание — официальная документация Такском API Help v2 (авторизация/discovery, документы, частота опроса, границы интеграции).
 [Манифест](../../protocols/taxcom-ofd.json),
 [OpenAPI 3.1](../openapi/taxcom-mock.openapi.json),
 [README сервиса и env](../../services/taxcom-mock/README.md).

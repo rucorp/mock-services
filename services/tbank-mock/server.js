@@ -617,7 +617,7 @@ const derr = core.createErrorCatalog({
     4: { message: 'Объект выплаты не найден', field: 'PaymentId', hint: 'Проверьте PaymentId выплаты (/e2c/v2/Init).', doc: '/e2c' },
     7: { message: 'Обязательные параметры не заполнены или невалидны', field: 'Amount, OrderId', hint: 'Проверьте: Amount — целое число в копейках больше нуля (100000 = 1000,00 ₽), OrderId — непустая строка и уникален для каждой операции (повторный Init с тем же OrderId отклоняется — как в банке), сумма Cancel/Confirm/Chargeback не больше доступной суммы платежа.', doc: '/api/init' },
     8: { message: 'Объект не найден', field: 'PaymentId | OrderId | DisputeId', hint: 'Платёж или спор не найден ни по PaymentId, ни по OrderId, ни по DisputeId. Платёжные сессии живут в состоянии стенда; после рестарта с пустым MOCK_STATE_FILE старые id недоступны.', doc: '/api/getstate' },
-    13: { message: 'Неверный Token (подпись) запроса', field: 'Token', hint: 'Подпись = sha256(значения всех top-level скаляров кроме Token/null/\'\' + Password, отсортированные по ключу, в нижнем регистре для boolean). Сверьте с conspectus docs/reference/tbank/02-notifications-signature.md.', doc: '/intro/to-api' },
+    13: { message: 'Неверный Token (подпись) запроса', field: 'Token', hint: 'Подпись = sha256(значения всех top-level скаляров кроме Token/null/\'\' + Password, отсортированные по ключу, в нижнем регистре для boolean). Сверьте с conspectus документации Т-Банка', doc: '/intro/to-api' },
     32: { message: 'Операция недоступна в текущем статусе', field: 'PaymentId | DisputeId', hint: 'Переход запрещён машиной состояний: Confirm — только из AUTHORIZED; Cancel — из NEW (CANCELED), AUTHORIZED (REVERSED/PARTIAL_REVERSED), CONFIRMED (REFUNDED/PARTIAL_REFUNDED); Chargeback — только из CONFIRMED/PARTIAL_REFUNDED по цепочке DISPUTED -> REPRESENTMENT -> ARBITRATION -> WON|LOST.', doc: '/api/confirm' },
     501: { message: 'Метод не поддерживается мок-стендом', hint: 'Стенд реализует Init/Confirm/Cancel/GetState/CheckOrder/Chargeback/Dispute + e2c/AV.', doc: '' },
     500: { message: 'Сбой шлюза (сценарий мока)', field: 'X-Mock-Scenario', hint: 'Сценарий X-Mock-Scenario: http-500 имитирует 500 шлюза до банка: запрос не выполнен, побочных эффектов нет. Уберите сценарий и повторите.', doc: '' },
@@ -1097,7 +1097,7 @@ function handleChargeback(body, reqHeaders = {}) {
  * собирался из виртуального времени (предсказуем) и нигде не валидировался, а
  * GET/PATCH регистрации были доступны анонимно. Здесь — честная модель:
  *   • Basic-креды клиента сверяются с MOCK_ACQAPI_CLIENT_ID/SECRET (дефолт
- *     эталона — `partner:partner`, docs/reference/tbank/03-payouts-and-deals.md);
+ *     эталона — `partner:partner`, документации Т-Банка);
  *   • выдаётся opaque-токен (crypto random), в state лежит только его SHA-256
  *     с scope и TTL, поэтому токен не течёт через /mock/state и журнал;
  *   • каждая операция регистрации требует действующий bearer со scope partner.
@@ -2814,7 +2814,7 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
       return sendJson(res, err(7, `Регистрация партнёра не прошла проверку схемы: ${schemaError.message}`, null, {
         field: schemaError.field,
         doc: '/e2c',
-        hint: 'Передайте обязательные shopArticleId, реквизиты ЮЛ, addresses[], ceo, founders.individuals[], bankAccount и nonResident по docs/reference/tbank/03-payouts-and-deals.md.',
+        hint: 'Передайте обязательные shopArticleId, реквизиты ЮЛ, addresses[], ceo, founders.individuals[], bankAccount и nonResident по документации Т-Банка',
       }), 400);
     }
     const descriptor = body.billingDescriptor.trim();
