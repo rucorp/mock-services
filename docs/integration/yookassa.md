@@ -83,7 +83,7 @@ curl -s -X POST http://localhost:3102/v3/refunds \
 Сверка: `GET /v3/payments/{id}` (поле `refunded_amount`) и
 `GET /v3/refunds/{id}`.
 
-## 4. Что мок теперь проверяет за вас (важно для отладки)
+## 4. Что мок проверяет за вас (важно для отладки)
 
 | Ошибка интегратора | Ответ мока |
 |---|---|
@@ -129,3 +129,11 @@ curl -s -X POST http://localhost:3102/v3/refunds \
       (частичный capture уменьшает `refundable`)
 - [ ] переход на бой = смена URL (`api.yookassa.ru`) и секретов в кабинете;
       контракт запросов не меняется
+
+## 7. Ссылки
+
+- Контракт сервиса, env и `/mock/*`: [`services/yookassa-mock/README.md`](../../services/yookassa-mock/README.md)
+- OpenAPI 3.1: спеки у ЮKassa **нет намеренно** — публичный контракт `/v3` воспроизведён по официальной
+  документации, см. раздел «OpenAPI» в [`services/yookassa-mock/README.md`](../../services/yookassa-mock/README.md)
+- Манифеста `protocols/*.json` у сервиса тоже нет: `npm run check:drift` его не проверяет (см. `AGENTS.md` §3)
+- Общая инфраструктура адаптеров (часы, песочницы, вебхуки, SSRF): [`packages/core/README.md`](../../packages/core/README.md)

@@ -233,7 +233,28 @@ Callback URL — один на ресурс: мерчант сообщает е�
   `SSRF_BLOCKED` — терминальный отказ без повторов.
 - `npm run test:vtb` — end-to-end selftest без Docker.
 
-## 10. Известная неопределённость
+## 10. Что мок проверяет за вас
+
+- OAuth: только `grant_type=client_credentials` (ошибки — RFC 6749 §5.2:
+  `invalid_client`, `unsupported_grant_type`); `X-IBM-Client-Id` — строго
+  client_id в нижнем регистре без `@ext.vtb.ru`;
+- бизнес-запросы без токена или с истёкшим (170 с на виртуальных часах) —
+  `401 invalid_token`;
+- суммы — десятичные рубли; `orderId` уникален (повтор идемпотентен,
+  `X-Mock-Replayed`), `refundId` уникален (повтор — ошибка, не replay),
+  `complete` не выше авторизации;
+- доступность `preauth` — `MOCK_VTB_PREAUTH` (иначе `preauth_disabled`),
+  срок ордера — `MOCK_VTB_ORDER_TTL_SECS` (20 минут), TTL → `CANCELED`;
+- callback: payload доставляется как есть (регистр `Status`/`status` мок не
+  нормализует), доставкой считается 2xx (`[FORK]` стенда), повторы —
+  `MOCK_VTB_CALLBACK_RETRY_MS` × `MOCK_VTB_CALLBACK_MAX_ATTEMPTS`;
+- сценарии `X-Mock-Scenario` (`fail`, `hang`, `latency`, `http-500`/`http-504`,
+  `webhook-drop`, `webhook-duplicate`, `status-lowercase`, `reconciled`),
+  `X-Mock-Sandbox` и `POST /mock/time`;
+- в hosted (`MOCK_HOSTED=1`) управляющие токены fail-closed, приватные
+  callback-адреса отсекаются (`SSRF_BLOCKED`, терминально).
+
+## 11. Известная неопределённость
 
 Публичный SMB-срез фиксирует HTTP-транспорт и примеры, но не полную схему тел
 бизнес-ошибок, форму `twoStageParams`/`paymentData`/`paymentCode` и точный
@@ -243,3 +264,10 @@ Callback URL — один на ресурс: мерчант сообщает е�
 (по образцу errorCode-форка Сбера), а не заявление о production-контракте ВТБ.
 Перед переносом в production сверяйте спецификацию подключённого merchant и
 согласуйте отличия с владельцем проекта.
+
+## 12. Ссылки
+
+- Контракт сервиса, env и `/mock/*`: [`services/vtb-mock/README.md`](../../services/vtb-mock/README.md)
+- OpenAPI 3.1: [`docs/openapi/vtb-mock.openapi.json`](../openapi/vtb-mock.openapi.json)
+- Манифест протокола для `npm run check:drift`: [`protocols/vtb-smb.json`](../../protocols/vtb-smb.json)
+- Общая инфраструктура адаптеров (часы, песочницы, вебхуки, SSRF): [`packages/core/README.md`](../../packages/core/README.md)

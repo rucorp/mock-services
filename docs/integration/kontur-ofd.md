@@ -227,7 +227,7 @@ documents:[], clockOffsetMs:0}` (или `{state: snapshot}`), отзывает �
 песочницу owner-token-ом запрещена. Стандартные квоты/TTLs — в README.
 State files содержат Sid/сгенерированные mock-креды: ограничьте доступ к volume.
 
-## 7. Границы и проверка
+## 7. Что мок проверяет за вас: границы и проверка
 
 `npm run test:kontur-ofd` — zero-dep HTTP selftest на эфемерных портах:
 доступ, каталог, все types, копейки, даты, чтение detail, пагинация 1000/1001,
@@ -242,3 +242,10 @@ rotation/reset, секреты, persist/restore и независимые нег
 Сначала согласуйте закрытые контракты с владельцем, не заменяйте их поведением
 Ferma/АТОЛ/Первого ОФД. Все локальные решения перечислены как `[FORK]` выше и
 в манифесте, проверка provider conformity не заявляется.
+
+## 8. Ссылки
+
+- Контракт сервиса, env и `/mock/*`: [`services/kontur-ofd-mock/README.md`](../../services/kontur-ofd-mock/README.md)
+- OpenAPI 3.1: [`docs/openapi/kontur-ofd-mock.openapi.json`](../openapi/kontur-ofd-mock.openapi.json)
+- Манифест протокола для `npm run check:drift`: [`protocols/kontur-ofd.json`](../../protocols/kontur-ofd.json)
+- Общая инфраструктура адаптеров (часы, песочницы, вебхуки, SSRF): [`packages/core/README.md`](../../packages/core/README.md)

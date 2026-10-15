@@ -15,14 +15,6 @@ docker compose up tbank-mock     # http://localhost:3100
 проверки укажите в Init `NotificationURL=http://host.docker.internal:PORT/webhook`
 или задайте `MOCK_DEFAULT_NOTIFICATION_URL` на стенде.
 
-## Профили
-
-`MOCK_PROFILE=plain` (по умолчанию) — классический эквайринг без сделок:
-мультирасчётные поля (DealId/CreateDealWithType/PaymentRecipientId)
-игнорируются как незнакомые банку. `MOCK_PROFILE=multisplit` — профиль со
-сделками (Мультирасчеты): платёж с `PaymentRecipientId` требует `DealId`
-или `CreateDealWithType=NN`.
-
 ## 2. Базовый флоу
 
 ```bash
@@ -45,7 +37,15 @@ curl -s http://localhost:3100/v2/Init -H 'Content-Type: application/json' -d '{
 подписаны так же; мерчант обязан проверять (мок умеет слать дубли — кнопка
 в `/admin`, для проверки идемпотентности).
 
-## 3. Что мок теперь проверяет за вас (важно для отладки)
+## 3. Профили
+
+`MOCK_PROFILE=plain` (по умолчанию) — классический эквайринг без сделок:
+мультирасчётные поля (DealId/CreateDealWithType/PaymentRecipientId)
+игнорируются как незнакомые банку. `MOCK_PROFILE=multisplit` — профиль со
+сделками (Мультирасчеты): платёж с `PaymentRecipientId` требует `DealId`
+или `CreateDealWithType=NN`.
+
+## 4. Что мок проверяет за вас (важно для отладки)
 
 Мок ведёт себя как банк там, где ошибка интегратора была бы незаметна локально:
 
@@ -61,20 +61,20 @@ curl -s http://localhost:3100/v2/Init -H 'Content-Type: application/json' -d '{
 Журнал запросов: `GET /admin/journal` (JSON) и таблица в `/admin` — видно метод,
 путь, ключевые поля, код ответа и время обработки: «что мок понял в моём запросе».
 
-## 4. Сценарии и консоль
+## 5. Сценарии и консоль
 
 `/admin` — платежи со историей статусов, сделки (баланс), поступления AV,
 верификации, нотификации (статус доставки, ретраи, кнопка «повторить»),
 кнопки сценариев: «банк подтвердил холд», «отмена платформой», «чарджбэк эмитента».
 
-## 5. Ошибки (DX)
+## 6. Ошибки (DX)
 
 Ошибка — не голый код: `Details` содержит `Field` (какое поле), `Hint`
 (рекомендация) и `Doc` (раздел официальной документации). Известные коды:
 7 (невалидные параметры), 8 (не найдено), 13 (подпись), 32 (недоступно
 в статусе), 501 (метод не реализован в моке).
 
-## 6. Чеклист готовности к бою
+## 7. Чеклист готовности к бою
 
 - [ ] все нотификации проверяют Token, ответ 200 «OK» ровно на подтверждённые
 - [ ] дубли и ретраи нотификаций обрабатываются идемпотентно (кнопка «повторить»/«дубль»)
@@ -86,3 +86,10 @@ curl -s http://localhost:3100/v2/Init -H 'Content-Type: application/json' -d '{
       (недоставленные догоняются после подъёма)
 - [ ] смена `TBANK_API_URL` на боевой хост + реальные TerminalKey/Password —
       код интеграции не меняется
+
+## 8. Ссылки
+
+- Контракт сервиса, env, профили и `/mock/*`: [`services/tbank-mock/README.md`](../../services/tbank-mock/README.md)
+- OpenAPI 3.1: [`docs/openapi/tbank-mock.openapi.json`](../openapi/tbank-mock.openapi.json)
+- Манифест протокола для `npm run check:drift`: [`protocols/tbank-eacq.json`](../../protocols/tbank-eacq.json)
+- Общая инфраструктура адаптеров (часы, песочницы, вебхуки, SSRF): [`packages/core/README.md`](../../packages/core/README.md)

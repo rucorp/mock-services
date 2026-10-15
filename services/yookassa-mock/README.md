@@ -185,7 +185,7 @@ DX-слой мока (не часть протокола ЮKassa): каждое 
 
 | Переменная | Дефолт | Назначение |
 |---|---|---|
-| `MOCK_PORT` | `3102` | порт |
+| `MOCK_HOST` / `MOCK_PORT` | `0.0.0.0` / `3102` | адрес и порт прослушивания |
 | `MOCK_SHOP_ID` / `MOCK_SECRET_KEY` | `YOOKASSAMOCKTEST` / `mockpass123` | Basic-креды (алиасы `YOOKASSA_SHOP_ID`, `YOOKASSA_SECRET_KEY`) |
 | `MOCK_PUBLIC_BASE_URL` | `http://localhost:${MOCK_YOOKASSA_HOST_PORT:-3102}` | база `confirmation_url` |
 | `MOCK_DEFAULT_WEBHOOK_URL` | — | приёмник вебхуков магазина |
@@ -196,6 +196,7 @@ DX-слой мока (не часть протокола ЮKassa): каждое 
 | `MOCK_STATE_FILE` | — | файл состояния (compose: `/data/yookassa-state.json`) |
 | `MOCK_BLOCK_PRIVATE_WEBHOOKS` | с `MOCK_HOSTED` | SSRF-guard исходящих вебхуков |
 | `MOCK_ADMIN_TOKEN`, `MOCK_OPERATOR_TOKEN`, `MOCK_HOSTED`, `MOCK_TENANCY`, `MOCK_SANDBOX_*` | — | общий control-plane (см. README ядра) |
+| `MOCK_VIRTUAL_CLOCK` | — | ISO-старт виртуальных часов стенда (TTL холда 7 дней, авто-отмена `pending`, ретраи вебхуков) |
 
 ## Границы и документированные форки
 
