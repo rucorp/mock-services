@@ -1,8 +1,0 @@
-SZ wave118 — базлайн 822b2a3 (волна #112, taxcom-mock #118), независимый полный прогон
-Node v24.21.0, свежий клон, срез строго на 822b2a3 (HEAD main)
-npm test EXIT=0:
-  core 77 · tbank PASSED (31/31) · kassa 167 · yookassa 246 · atol 224 · alfa 371
-  sber 67 · vtb 81 · first-ofd 104 · kontur-ofd 109 · taxcom 106 (новый)
-  upstream 11/0 · links 84 файлов · drift 828/828
-Дельты к fcd3b05e: taxcom 0→106, links 82→84, drift 732→828 (+96 taxcom-ofd), kassa 166→167 (MS-06 cookie/login, учтён в PR #119)
-Проба sz-wave118-taxcom-readonly.js: 22/22, EXIT=0 (C1–C5 21/21 + демонстрация Ф-1 D1)

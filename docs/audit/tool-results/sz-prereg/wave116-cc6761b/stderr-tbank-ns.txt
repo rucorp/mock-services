@@ -1,1 +1,0 @@
-[mock] sandboxes restored from /tmp/w-ms06/evidence/tbank-ns-state.json.sandboxes.records: 0

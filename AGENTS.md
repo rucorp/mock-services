@@ -6,8 +6,8 @@
 нельзя — только сверяться с первыми руками.
 
 Полные правила для людей — [`CONTRIBUTING.md`](CONTRIBUTING.md). Планирование доработок
-и статусы задач — [`docs/briefs/CLAUDE-2026-10-12-agent-brief.md`](docs/briefs/CLAUDE-2026-10-12-agent-brief.md).
-Подготовка к глубокому аудиту и карта покрытия — [`docs/audit/AUDIT-PREP-2026-10-12.md`](docs/audit/AUDIT-PREP-2026-10-12.md).
+и статусы задач — «план доработок» (бриф — во внутреннем репозитории `mock-services-docs`).
+Подготовка к глубокому аудиту и карта покрытия — пакет подготовки к аудиту (в `mock-services-docs`).
 
 ## 0. Правило конфликтов
 
@@ -90,7 +90,7 @@ CI ([`.github/workflows/ci.yml:43-93`](.github/workflows/ci.yml)); локаль�
 (env-таблица) → `SECURITY.md` (если влияет на модель угроз) → `CHANGELOG.md`.
 Исключений нет. Известная задолженность проверки: 14 переменных читаются сервисами, но
 отсутствуют в include-файле, а `MOCK_VIRTUAL_CLOCK` нет ни в одном README сервиса —
-подробности в [`docs/audit/AUDIT-PREP-2026-10-12.md`](docs/audit/AUDIT-PREP-2026-10-12.md) §2.6.
+подробности в пакет подготовки к аудиту (в `mock-services-docs`) §2.6.
 
 ## 6. Process: ветка, коммит, PR
 
@@ -144,5 +144,5 @@ CI ([`.github/workflows/ci.yml:43-93`](.github/workflows/ci.yml)); локаль�
 | любая правка кода | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`docs/canon/MOCK_SERVICES_SPEC.md`](docs/canon/MOCK_SERVICES_SPEC.md) §2, §6.2 |
 | безопасность/hosted | [`SECURITY.md`](SECURITY.md), [`docs/rfc/RFC-001-multi-tenant-sandboxes.md`](docs/rfc/RFC-001-multi-tenant-sandboxes.md), [аудит-преп](docs/audit/AUDIT-PREP-2026-10-12.md) §2, §4D |
 | протокол провайдера | `docs/reference/<provider>/**`, `protocols/<provider>.json`, `docs/integration/<provider>.md` |
-| очередь доработок | [`docs/briefs/CLAUDE-2026-10-12-agent-brief.md`](docs/briefs/CLAUDE-2026-10-12-agent-brief.md) §0.1 (статусы), §9 (волны) |
+| очередь доработок | «план доработок» (бриф — во внутреннем репозитории `mock-services-docs`) §0.1 (статусы), §9 (волны) |
 | аудит-партия | [`docs/audit/CHECKLIST-audit-party.md`](docs/audit/CHECKLIST-audit-party.md) |

@@ -1,2 +1,0 @@
-Ф-1a-v3: action POST → status=302, Location=/admin?admin_token=adm-sec-9f2
-PASS Ф-1a-v3: Location несёт admin_token — токен в URL редиректа (утечка подтверждена живой пробой)

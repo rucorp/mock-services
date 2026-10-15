@@ -11,7 +11,7 @@ SPDX-License-Identifier: Apache-2.0
 внятными подсказками «что не так в запросе и как это чинить».
 
 > Статус: **alpha (0.7.0)**. Репозиторий готовится к публикации:
-> см. [аудит](docs/audit/AUDIT-2026-10-08.md) и [дорожную карту](#дорожную-карту).
+> см. [дорожную карту](#дорожную-карту).
 > Сегодня поддерживается: эквайринг Т-Банка (обычный + Мультирасчеты Wave 2, СБП QR, рекурренты `RebillId`/`Charge`, регистрация партнёров `acqapi`, чарджбэки e2e,
 > выплаты e2c, верификация AV), облачная касса OFD Ferma (полная матрица 54-ФЗ:
 > `sell`/`buy` + возвраты и коррекции с позиционным контролем, авансы/зачёты, маркировка Честный ЗНАК,
@@ -180,10 +180,9 @@ services/
 scripts/
   compose-selftest.js    — black-box selftest против поднятого compose-стенда
 docs/
-  audit/                 — аудит 2026-10-08 и отчёты исполнения
   rfc/                   — проектные решения (RFC-001: изоляция песочниц)
-  canon/                 — внутренние спеки и карточки проектов (источник истины)
   integration/           — инструкции «интеграция за 10 минут» + миграция Lovii
+  openapi/               — OpenAPI 3.1 спецификации сервисов
   reference/             — референсы и документация адаптеров: `docs/reference/<provider>/`
                            (канонический каталог доки провайдера, см. CONTRIBUTING.md)
 .github/workflows/ci.yml — CI: selftest на Node 18/20/22 + compose-стенд + публикация GHCR
@@ -225,7 +224,7 @@ docker-compose.include.yml — внешний compose-модуль (профил
 | 16 | **Stage 2: второй внешний касса-адаптер — Первый ОФД (облачная касса OKassa API)** (#92): `POST /getToken` (`{login, pass}` — API-ключ UUID) → Bearer-токен на 24 ч виртуальных часов, асинхронная очередь `/api/external/queue/v1/transaction/{type}` (`receipt`/`receiptCorrection`/`openShift`/`closeShift`/`currentStateReport`) → `requestId`, строгие схемы `ReceiptRequest`/`ReceiptCorrectionRequest`/`StateCommandRequest` (без «универсального» объекта), операции `INCOME`/`INCOME_RETURN`/`EXPENCE`/`EXPENCE_RETURN` — написание **как в схеме**, статусы `IN_PROGRESS → COMPLETED\|ERROR` с раздельными слоями ошибок API/ККТ (`errorCode`/`errorType`/`details`/`payload`), сверка `transaction/{requestId}`, `status/{requestId}`, `statuses?externalId&groupId`, документы `/api/external/receipts` за период с пагинацией, unsigned callback на `requestMetadata.callbackUrl` (подпись/ACK/повторы не выдумываются, SSRF-политика ядра, сверка через статус), сценарии/часы/журнал/RFC-001-песочницы; `protocols/first-ofd-okassa.json` + drift, OpenAPI 3.1, `test:first-ofd` в `npm test`, compose + healthcheck :3107, гайд «за 10 минут». Расхождения среза (`requestMetadata` required vs optional, `items` массив vs объект, `http://` vs `https://` callback, квирк `getToken`, тег ATOL Online V5), идемпотентность `externalId` и production base не подтверждены — помечены [VERIFY]/[FORK] | ✅ Unreleased |
 | 17 | **Stage 2: десятый сервис — Такском, read-only кабинет/ОФД (API v2)** (#112): `POST /API/v2/Login` (заголовок `Integrator-ID`, тело — консервативная форма `{login, password}` с пометкой [VERIFY]: схема `Login_Request` публично не раскрыта) → временный marker в `Session-Token` с TTL **300 с sliding** на виртуальных часах и `401` по истечении; `GET /API/v2/AccountList` (договоры и права), `GET /API/v2/NewDocuments` (последние **10 суток**, не более **10 000** за вызов, сортировка по времени приёма, курсор по `id`, хвост → пустой ответ, ошибки **3106** «нет доступной ККТ» и **2203** «некорректный курсор»), типы: смены, состояние расчётов, чек, чек коррекции, БСО, БСО коррекции; write API не моделируется (405/404 с подсказкой), сценарии/часы/журнал/RFC-001-песочницы; `protocols/taxcom-ofd.json` + drift, OpenAPI 3.1, `test:taxcom` в `npm test`, compose (root + include) + healthcheck :3109, гайд «за 10 минут». Повторный Login выдаёт новый marker ([FORK] против формулировки среза), HTTP-статусы 3106/2203, имена полей и суммы в копейках — [FORK]/[VERIFY] | ✅ Unreleased |
 
-Детали, оценки и приоритеты — в [аудите](docs/audit/AUDIT-2026-10-08.md) §9.
+Детали, оценки и приоритеты — во внутреннем аудите проекта (материалы — в приватном репозитории команды).
 
 ## Тестирование
 
@@ -275,9 +274,7 @@ owner-token (знание id доступа не даёт), TTL и квотам�
 Issues и PR приветствуются: [`CONTRIBUTING.md`](CONTRIBUTING.md). Полезнее всего:
 расхождения с официальной докой провайдера (со ссылкой на раздел), новые
 сценарии отказов, новые адаптеры. Правила для ИИ-агентов — [`AGENTS.md`](AGENTS.md);
-план доработок перед публикацией и статусы задач —
-[`docs/briefs/CLAUDE-2026-10-12-agent-brief.md`](docs/briefs/CLAUDE-2026-10-12-agent-brief.md),
-подготовка к глубокому аудиту — [`docs/audit/AUDIT-PREP-2026-10-12.md`](docs/audit/AUDIT-PREP-2026-10-12.md).
+внутренние материалы (аудиты, брифы, верификации) — в приватном репозитории команды.
 
 ## Лицензия
 
