@@ -1,0 +1,17 @@
+{
+  "$comment": "© 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0; SPDX-License-Identifier: Apache-2.0",
+  "name": "mock-services-site-build",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Изолированная сборка статического сайта документации mock-services",
+  "type": "module",
+  "scripts": {
+    "build:pages": "node scripts/build-site.js --base=/mock-services/ --out=../dist",
+    "build:root": "node scripts/build-site.js --base=/ --out=../dist-root",
+    "check": "node scripts/check-site-build.js",
+    "test": "npm run build:pages && npm run build:root && npm run check"
+  },
+  "devDependencies": {
+    "vitepress": "1.6.4"
+  }
+}
