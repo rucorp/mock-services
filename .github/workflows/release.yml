@@ -1,0 +1,40 @@
+# © 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
+name: Release
+
+# Релиз запускается тегом `v*`: проверка согласованности, сборка архива-слепка,
+# публикация GitHub Release. Образ в GHCR публикует CI (publish-ghcr, тоже по тегам).
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Сборка архива и GitHub Release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Проверка согласованности релиза (версия ↔ тег ↔ CHANGELOG ↔ ноты)
+        run: node scripts/release-check.js
+      - name: Сборка архива (слепок репозитория на теге) и контрольной суммы
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          git archive --format=zip --prefix="mock-services-${VERSION}/" \
+            -o "mock-services-${VERSION}.zip" "${GITHUB_REF_NAME}"
+          sha256sum "mock-services-${VERSION}.zip" > "mock-services-${VERSION}.zip.sha256"
+          cat "mock-services-${VERSION}.zip.sha256"
+      - name: Публикация GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "mock-services ${VERSION}" \
+            --notes-file "docs/release-notes/${GITHUB_REF_NAME}.md" \
+            "mock-services-${VERSION}.zip" "mock-services-${VERSION}.zip.sha256"

@@ -8,6 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-16
+
 ### Added
 - **Такском — read-only кабинет/ОФД (API v2), Stage 2, #112.** Десятый сервис
   `taxcom-mock` на :3109 (zero-dep, Node ≥18): `POST /API/v2/Login` с заголовком
