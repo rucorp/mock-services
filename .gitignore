@@ -7,3 +7,4 @@ data/
 .zcode/
 /dist/
 /dist-root/
+.omo/
