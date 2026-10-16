@@ -8,6 +8,32 @@ SPDX-License-Identifier: Apache-2.0
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-10-17
+
+Релиз после вывода внутренних документов из публичного продукта и приведения
+репозитория в порядок. Протокольное поведение адаптеров не менялось.
+
+### Added
+- **Community-файлы, #145.** `.github/pull_request_template.md` (схема отчёта PR
+  по AGENTS.md §6 и напоминание `Closes #N`), `CODE_OF_CONDUCT.md`
+  (Contributor Covenant 2.1) и `SUPPORT.md`; `.gitignore` дополнен `.omo/`
+  (состояние агентской сессии). Community health GitHub: 62% → 87%.
+
+### Fixed
+- **tbank-mock, #147 / PR #148.** Подсказка HTTP 401 управляющей поверхности
+  ссылалась на удалённый `docs/rfc/RFC-001-multi-tenant-sandboxes.md`; теперь
+  ведёт на актуальный `SECURITY.md`, раздел «Изоляция песочниц». Добавлен
+  регресс-тест (401-тело не содержит `docs/rfc`, содержит `SECURITY.md`).
+
+### Removed
+- **Состав продукта v2, #141.** Из публичного продукта выведены внутренние
+  документы: удалены `docs/roadmap.md` и `docs/rfc/RFC-001-multi-tenant-sandboxes.md`
+  (содержание RFC-001 живёт в `SECURITY.md` §«Изоляция песочниц»), удалён каталог
+  `site/`; ссылки в `README.md`, `SECURITY.md`, `AGENTS.md` и `docs/overview.md`
+  де-линкованы. Служебные файлы (`scripts/*` кроме `docker-healthcheck.js`,
+  `docs/tables.md`) исключены из архивных слепков через `.gitattributes`
+  `export-ignore`; реестр таблиц пересобран (66 в 25 файлах).
+
 ## [0.8.0] — 2026-10-16
 
 ### Added

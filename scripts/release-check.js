@@ -6,7 +6,7 @@
  * Проверка согласованности релиза (R-17). Запускается в CI по тегу `v*`
  * (workflow Release) и локально:
  *
- *   node scripts/release-check.js --tag v0.8.0
+ *   node scripts/release-check.js --tag v0.9.0
  *
  * Проверяет: тег == версии package.json; в CHANGELOG есть раздел `[X.Y.Z]`;
  * существует файл нот `docs/release-notes/<тег>.md`; в CHANGELOG нет
