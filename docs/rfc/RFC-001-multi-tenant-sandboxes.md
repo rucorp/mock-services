@@ -3,12 +3,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # RFC-001. Изоляция песочниц для публичного мока
 
-> Статус: **реализовано в #8** (закрывает A-21, F-11—F-15): request-local
-> контекст, hosted tenancy за env-флагом, owner-token, target export/import,
-> TTL/лимиты/квоты (§9.1–9.4) · Дата: 2026-10-08 · Связано:
-> аудит 2026-10-08 (§3.2, дефект A-21; материалы — в приватном репозитории команды)
+> Статус: **реализовано**: request-local контекст, hosted tenancy за
+> env-флагом, owner-token, target export/import, TTL/лимиты/квоты · Дата: 2026-10-08
 >
-> Вне объёма #8 остались: лендинг/hosted-конфиг (§9.5), `/admin`-поддомены и
+> Вне области остались: лендинг/hosted-конфиг, `/admin`-поддомены и
 > браузерные `SuccessURL/FailURL` в поддоменной схеме, per-sandbox сценарные
 > правила (`/sandboxes/me/scenarios`) — см. §10 «Открытые вопросы».
 
@@ -107,7 +105,7 @@ POST /sandboxes                 → { id, url, ownerToken, creds, expiresAt }
 GET  /sandboxes/me              → текущая песочница (по ownerToken)
 POST /sandboxes/me/reset        → очистить состояние (креды сохраняются)
 POST /sandboxes/me/reset-creds  → сменить креды (проверка «а что если ключ протух»)
-POST /sandboxes/me/scenarios    → сценарный API (см. §3.3 аудита)
+POST /sandboxes/me/scenarios    → сценарный API
 DELETE /sandboxes/me            → удалить песочницу немедленно
 GET  /admin?token=ownerToken    → консоль песочницы (единственная точка, где нужен токен)
 ```
@@ -115,7 +113,7 @@ GET  /admin?token=ownerToken    → консоль песочницы (един�
 Плюс лендинг (`/`) с кнопкой «Создать песочницу» и краткой инструкцией
 «интеграция за 10 минут».
 
-**Источники owner-token** (порядок закреплён задачей #98): `X-Sandbox-Token` →
+**Источники owner-token** (порядок приоритетов): `X-Sandbox-Token` →
 `X-Owner-Token` → `Authorization: Bearer` → `?sandbox_token=`. Явный заголовок
 приоритетнее Bearer: у адаптеров, чей бизнес-контракт сам использует
 `Authorization: Bearer <токен>` (Первый ОФД — токен очереди, ВТБ — OAuth

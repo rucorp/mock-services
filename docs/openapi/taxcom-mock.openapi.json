@@ -4,7 +4,7 @@
   "info": {
     "title": "taxcom-mock — Такском, read-only кабинет/ОФД (API v2)",
     "version": "0.7.0",
-    "description": "Public slice 2026-10-11 (API Help v2.17, техническое описание от 30.12.2025). Read-only: чтение уже принятых ОФД фискальных документов. Создание/фискализация чека, возврат и callback печати в публичном срезе не найдены и НЕ моделируются (405/404 с подсказкой). [VERIFY] Тело Login_Request: официальная схема приложения к API Help публично не раскрыта, поэтому зафиксирована консервативная форма {login, password}; пересверить при выдаче доступа к кабинету. [FORK] Имена полей ответов, суммы в целых копейках, включённая нижняя граница окна 10 суток, конверт ошибок {errorCodeId, message, field, hint, doc} и соответствие 3106 → HTTP 403, 2203 → HTTP 400 — локальная форма мока, не утверждение о закрытой схеме провайдера. [FORK] Повторный Login выдаёт новый marker, прежний живёт до своего TTL (срез формулирует иначе). Session-Token TTL 300 с, sliding, на виртуальных часах стенда."
+    "description": "Public documentation as of 2026-10-11 (API Help v2.17, техническое описание от 30.12.2025). Read-only: чтение уже принятых ОФД фискальных документов. Создание/фискализация чека, возврат и callback печати в публичной документации не найдены и НЕ моделируются (405/404 с подсказкой). [VERIFY] Тело Login_Request: официальная схема приложения к API Help публично не раскрыта, поэтому зафиксирована консервативная форма {login, password}; пересверить при выдаче доступа к кабинету. [FORK] Имена полей ответов, суммы в целых копейках, включённая нижняя граница окна 10 суток, конверт ошибок {errorCodeId, message, field, hint, doc} и соответствие 3106 → HTTP 403, 2203 → HTTP 400 — локальная форма мока, не утверждение о закрытой схеме провайдера. [FORK] Повторный Login выдаёт новый marker, прежний живёт до своего TTL (документация формулирует иначе). Session-Token TTL 300 с, sliding, на виртуальных часах стенда."
   },
   "servers": [
     {
@@ -13,7 +13,7 @@
     }
   ],
   "tags": [
-    { "name": "taxcom-api", "description": "Методы публичного среза Такском API v2 (read-only)" },
+    { "name": "taxcom-api", "description": "Методы публичной документации Такском API v2 (read-only)" },
     { "name": "mock-control", "description": "Управляющая поверхность мока: часы, fixtures, сценарии, песочницы. Не является API провайдера." }
   ],
   "security": [{ "SessionToken": [] }],
@@ -319,7 +319,7 @@
       },
       "Account": {
         "type": "object",
-        "description": "Договор/личный кабинет. Состав полей — [FORK]: срез подтверждает «договоры/личные кабинеты и права», но не раскрывает схему.",
+        "description": "Договор/личный кабинет. Состав полей — [FORK]: документация подтверждает «договоры/личные кабинеты и права», но не раскрывает схему.",
         "required": ["an", "inn", "kpp", "name", "rights"],
         "properties": {
           "an": { "type": "string", "description": "Номер договора (параметр an в NewDocuments)" },
@@ -328,14 +328,14 @@
           "name": { "type": "string" },
           "rights": {
             "type": "array",
-            "description": "Права пользователя [FORK]: перечень прав срезом не раскрыт",
+            "description": "Права пользователя [FORK]: перечень прав документацией не раскрыт",
             "items": { "type": "string" }
           }
         }
       },
       "Document": {
         "type": "object",
-        "description": "Фискальный документ, принятый ОФД. Имена полей — [FORK]; суммы в целых копейках (конвенция ФФД, срез Такском единицы не закрепляет).",
+        "description": "Фискальный документ, принятый ОФД. Имена полей — [FORK]; суммы в целых копейках (конвенция ФФД, документация единицы не закрепляет).",
         "required": ["id", "an", "kktRegNumber", "type", "receivedAt", "dateTime", "fiscalDocumentNumber", "fiscalSign", "shiftNumber"],
         "properties": {
           "id": { "type": "string", "description": "ID документа — курсор NewDocuments" },
@@ -343,7 +343,7 @@
           "kktRegNumber": { "type": "string", "description": "Регистрационный номер ККТ" },
           "type": {
             "type": "string",
-            "description": "Тип документа из публичного среза",
+            "description": "Тип документа из публичной документации",
             "enum": ["openShift", "closeShift", "currentStateReport", "receipt", "receiptCorrection", "bso", "bsoCorrection"]
           },
           "receivedAt": { "type": "string", "format": "date-time", "description": "Время приёма Такскомом: ключ сортировки и окна 10 суток" },
@@ -371,7 +371,7 @@
       },
       "Error": {
         "type": "object",
-        "description": "Конверт ошибки [FORK]. errorCodeId = 3106 (нет доступной ККТ, HTTP 403) и 2203 (некорректный курсор, HTTP 400) закреплены срезом; для остальных случаев errorCodeId равен HTTP-статусу, тексты и DX-поля — локальные.",
+        "description": "Конверт ошибки [FORK]. errorCodeId = 3106 (нет доступной ККТ, HTTP 403) и 2203 (некорректный курсор, HTTP 400) закреплены документацией; для остальных случаев errorCodeId равен HTTP-статусу, тексты и DX-поля — локальные.",
         "required": ["errorCodeId", "message", "field", "hint", "doc"],
         "properties": {
           "errorCodeId": { "type": "integer", "description": "3106, 2203 либо HTTP-статус", "examples": [3106, 2203, 400, 401, 403, 404, 405, 429, 500] },
@@ -379,7 +379,7 @@
           "field": { "type": "string", "description": "Поле/заголовок запроса, к которому относится ошибка" },
           "hint": { "type": "string", "description": "Что исправить" },
           "doc": { "type": "string", "description": "Ссылка на первоисточник" },
-          "verify": { "type": "string", "description": "Пометка [VERIFY] для мест, не раскрытых публичным срезом" }
+          "verify": { "type": "string", "description": "Пометка [VERIFY] для мест, не раскрытых публичной документацией" }
         }
       }
     }

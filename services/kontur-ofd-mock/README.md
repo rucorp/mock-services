@@ -3,8 +3,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # kontur-ofd-mock — Контур.ОФД, read/reconciliation
 
-Девятый сервис стенда, касса/ОФД №4, issue #97. **Только чтение** уже
-фискализированных документов: это не очередь печати, не Ferma и не OKassa.
+**Только чтение** уже фискализированных документов: создание чеков не поддерживается.
 Node ≥18, CommonJS, zero dependencies, общее ядро `packages/core` не изменено.
 
 Источник (2026-10-11): официальная документация Контур.ОФД (auth/access, документы).
@@ -27,8 +26,7 @@ npm run test:kontur-ofd     # HTTP selftest на :0, без Docker
 
 Docker: `docker build -t mock-services:kontur-local .`, затем
 `MOCK_IMAGE=mock-services MOCK_IMAGE_TAG=kontur-local MOCK_IMAGE_DIGEST='' docker compose -f docker-compose.include.yml --profile mock up -d kontur-ofd-mock`.
-Старый pinned GHCR-релиз 0.6.0 **не содержит новый сервис**; образ и pin
-публикует владелец отдельно. Корневой `docker-compose.yml` намеренно не меняется.
+В корневом `docker-compose.yml` сервиса нет: он включается через include-контур выше.
 
 ## Контракт
 
@@ -52,7 +50,7 @@ Docker: `docker build -t mock-services:kontur-local .`, затем
 `errorCode`. Неправильные даты/параметры: 400; нет согласия: 403; неизвестный
 объект: 404; `fail`: 500. Пустой период → 200, пустой список.
 
-Документы: все 10 типов из среза; суммы **в целых копейках**; в receipt
+Документы: все 10 типов из документации; суммы **в целых копейках**; в receipt
 `items`, `operationType`, `fiscalDocumentNumber`, `fiscalSign`, `id`.
 Демо-каталог каждой песочницы: `org-demo`, касса `0000000000000001`,
 12 ФД за **2026-10-11**, включая три receipt, один из них возврат.
@@ -60,9 +58,8 @@ Docker: `docker build -t mock-services:kontur-local .`, затем
 неполностью раскрытых полей и FFD-операции — `[FORK]`.
 
 **[FORK] offset/currentOffset:** каноничен `offset`, `currentOffset` даёт 400
-с подсказкой; `nextOffset=null` завершает обход. Выбор согласован с владельцем
-до кода по URL-примерам и подтверждён **локальной** OpenAPI/selftest;
-подтверждение тестовой схемой провайдера **не получено**. Предел страницы —
+с подсказкой; `nextOffset=null` завершает обход. Выбор сделан по URL-примерам документации; подтверждение тестовой схемой
+провайдера **не получено**. Предел страницы —
 1000. UTC без timezone и включённые обе границы периода — `[FORK]`.
 
 ## Env
@@ -81,7 +78,7 @@ Docker: `docker build -t mock-services:kontur-local .`, затем
 | `MOCK_TENANCY` | `namespaces`, при hosted → `owned`; поддерживается `off` |
 | `MOCK_ADMIN_TOKEN` | пусто; защита `/admin*`, также operator access |
 | `MOCK_OPERATOR_TOKEN` | пусто; защита `/mock/*` |
-| `MOCK_SANDBOX_TOKEN` | пусто; owner-token default-песочницы; при `MOCK_HOSTED=1` без него `default` не обслуживается (MS-12) |
+| `MOCK_SANDBOX_TOKEN` | пусто; owner-token default-песочницы; при `MOCK_HOSTED=1` без него `default` не обслуживается |
 | `MOCK_SANDBOX_TTL_MS` | owned: `86400000`, иначе `0`; wall-clock TTL песочницы |
 | `MOCK_SANDBOX_MAX` | `100`; максимум именованных песочниц |
 | `MOCK_SANDBOX_MAX_DOCUMENTS` | owned: `5000`, иначе `0`; число ФД + сессий (квота ядра) |
@@ -116,7 +113,7 @@ Persist files содержат mock-сессии/креды; защищайте 
 и сценарии — явно документированные `[FORK]`, не гарантия провайдера.
 Проверка реального тестового контура/закрытой схемы не выполнена.
 
-## Байтовые квоты состояния (PD-02)
+## Байтовые квоты состояния
 
 | Env | Дефолт | Назначение |
 | --- | --- | --- |
@@ -129,4 +126,4 @@ Persist files содержат mock-сессии/креды; защищайте 
 импорте `/mock/state` → HTTP 400, `errorCode: 400`, `kind: 'bytes'`,
 `code: sandbox_state_budget_exceeded` / `sandbox_state_quota_exceeded`,
 с откатом отклонённого состояния. Правила/история/журнал остаются volatile.
-Подробности и границы — [документация ядра](../../packages/core/README.md#байтовые-квоты-песочниц-pd-02-74).
+Подробности и границы — [документация ядра](../../packages/core/README.md#байтовые-квоты-песочниц).

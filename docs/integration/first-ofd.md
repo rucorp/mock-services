@@ -8,12 +8,10 @@ SPDX-License-Identifier: Apache-2.0
 **асинхронная очередь заявок на чек** `POST /api/external/queue/v1/transaction/{type}`
 с `requestId` и статусами `IN_PROGRESS`/`COMPLETED`/`ERROR`.
 
-> **Не drop-in для АТОЛ/Фермы и не часть `kassa-mock`.** У Первого ОФД другой
-> транспорт и другая модель: токен выдаётся отдельным методом `getToken`,
-> результат печати приходит асинхронно по `requestId`, а операции чека записаны
-> как `INCOME`, `INCOME_RETURN`, `EXPENCE`, `EXPENCE_RETURN`. Тег
-> **ATOL Online V5** из тестового swagger Первого ОФД — отдельный API и вне
-> области этого адаптера.
+Токен выдаётся отдельным методом `getToken`, результат печати приходит
+асинхронно по `requestId`, а операции чека записаны как `INCOME`,
+`INCOME_RETURN`, `EXPENCE`, `EXPENCE_RETURN`. Тег **ATOL Online V5** из
+тестового swagger Первого ОФД — отдельный API и вне области этого адаптера.
 
 ## 1. Запустить
 
@@ -32,7 +30,7 @@ env-секреты в стартовый лог не печатаются. По�
 
 ## 2. Получить токен: `getToken`
 
-Срез фиксирует транспорт `application/json; charset=utf-8` и тело
+Документация фиксирует транспорт `application/json; charset=utf-8` и тело
 `{login, pass}`, где `pass` — API-ключ UUID:
 
 ```bash
@@ -57,7 +55,7 @@ curl -sS -X POST http://localhost:3107/mock/time -H 'Content-Type: application/j
 # прежний Bearer теперь даёт 401 invalid_token — запросите новый getToken
 ```
 
-**Расхождение среза:** в PDF под заголовком «успешный ответ» `getToken` приведён
+**Расхождение в документации:** в PDF под заголовком «успешный ответ» `getToken` приведён
 объект `error` с кодом `0` и текстом «Неверный логин и пароль». Семантику `error`
 требуется согласовать с провайдером, поэтому дефолтный успех мока отдаёт только
 `{token}`, а сам пример воспроизводится отдельным сценарием
@@ -98,12 +96,12 @@ curl -sS -X POST http://localhost:3107/api/external/queue/v1/transaction/receipt
 | Поле | Правило мока |
 | --- | --- |
 | `document.operationType` | `INCOME`, `INCOME_RETURN`, `EXPENCE`, `EXPENCE_RETURN` — **написание как в схеме**: `EXPENCE` не «исправляется» автоматически, а вариант `EXPENSE` отклоняется (`invalid_operation_type`) |
-| `document.items` | **массив** элементов `Item` (OpenAPI); таблица manual трактует форму иначе — расхождение №2 среза `[VERIFY]` |
+| `document.items` | **массив** элементов `Item` (OpenAPI); таблица manual трактует форму иначе — расхождение №2 в документации `[VERIFY]` |
 | `Item` | обязательны `label`, `measurementUnit`, `price`, `quantity`, `vatCode`; `price` — **десятичные рубли** (`150.00`), не копейки |
-| `vatCode` | включает `VAT_22` и `VAT_22122`; полный enum среза не приведён — остальные коды помечены `[VERIFY]` |
-| `requestMetadata` | в срезе противоречие: manual называет объект необязательным, OpenAPI держит его в `required`. Мок следует строгой схеме OpenAPI `[VERIFY]` |
+| `vatCode` | включает `VAT_22` и `VAT_22122`; полный enum документации не приведён — остальные коды помечены `[VERIFY]` |
+| `requestMetadata` | в документации противоречие: manual называет объект необязательным, OpenAPI держит его в `required`. Мок следует строгой схеме OpenAPI `[VERIFY]` |
 | `requestMetadata.userGroup` | обязателен; синтетический каталог стенда — `MOCKGROUP`, `firstofd-mock` (или `*` без проверки) |
-| `document.totalSum` | правила сверки с позициями срез не описывает — вне области; при расхождении мок только предупреждает в логе `[FORK]` |
+| `document.totalSum` | правила сверки с позициями документация не описывает — вне области; при расхождении мок только предупреждает в логе `[FORK]` |
 
 Чек коррекции — отдельная схема и отдельный тип заявки
 (`receiptCorrection`): в документе обязателен `correctionCause`, receipt-схема
@@ -151,7 +149,7 @@ curl -sS -X POST http://localhost:3107/mock/time -H 'Content-Type: application/j
 **Два слоя ошибок.** Результат с ошибкой несёт `errorType`: `API` — ошибка слоя
 API очереди, `KKT` — ошибка кассы/фискального накопителя; `errorCode` и
 `details` описывают конкретную причину. Оба слоя сохраняются раздельно, как и
-требует срез. Таблица кодов публично не зафиксирована, поэтому значения
+требует документация. Таблица кодов публично не зафиксирована, поэтому значения
 каталогов — локальный `[FORK]` мока:
 
 ```json
@@ -160,7 +158,7 @@ API очереди, `KKT` — ошибка кассы/фискального н�
 
 Сценарий `kkt-error` даёт ошибку слоя ККТ, `api-error` — слоя API, а естественные
 правила стенда возвращают `SHIFT_ALREADY_OPEN`/`SHIFT_NOT_OPEN` при повторном
-открытии/закрытии смены (правила ККТ-слоя в срезе не описаны — помечены `[FORK]`).
+открытии/закрытии смены (правила ККТ-слоя в документации не описаны — помечены `[FORK]`).
 
 ## 5. Смены и отчёт: `StateCommandRequest`
 
@@ -199,7 +197,7 @@ curl -sS "http://localhost:3107/api/external/queue/v1/statuses?externalId=shop-o
 ## 7. Callback: JSON POST без подписи
 
 Если в `requestMetadata.callbackUrl` передан URL, после обработки заявки мок
-делает `POST` с JSON. **Публичный срез не закрепляет ни envelope, ни подпись, ни
+делает `POST` с JSON. **Публичная документация не закрепляет ни envelope, ни подпись, ни
 обязательный ACK, ни расписание повторов** — поэтому подписи нет вовсе, а тело
 уведомления совпадает с результатом заявки (плюс `externalId` и `userGroup`).
 Форма тела, условие ACK «любой 2xx» и график повторов — локальная
@@ -219,7 +217,7 @@ curl -sS "http://localhost:3107/api/external/queue/v1/statuses?externalId=shop-o
 
 Приёмник делайте **идемпотентным**, а результат подтверждайте методом статуса
 `GET /api/external/queue/v1/status/{requestId}` — уведомление лишь сигнал.
-Расхождение среза по схеме URL (`http://` в PDF против `https://` в примерах)
+Расхождение в документации по схеме URL (`http://` в PDF против `https://` в примерах)
 мок по умолчанию не выбирает: принимаются обе схемы, а строгий HTTPS включается
 `MOCK_FIRST_OFD_CALLBACK_HTTPS_ONLY=1` `[VERIFY]`.
 
@@ -234,7 +232,7 @@ curl -sS "http://localhost:3107/api/external/queue/v1/statuses?externalId=shop-o
 ## 8. Что мок проверяет за вас: негативы и DX
 
 Ошибки мока — provider-shaped: `{"error": {"code", "text", "layer"}}` плюс
-`field`, `hint` и `doc` со ссылкой на раздел среза `[FORK]`:
+`field`, `hint` и `doc` со ссылкой на раздел документации `[FORK]`:
 
 | Ситуация | Ответ |
 | --- | --- |
@@ -261,14 +259,14 @@ curl -sS "http://localhost:3107/api/external/queue/v1/statuses?externalId=shop-o
 - В `owned`-модели (`MOCK_HOSTED=1`) доступ к песочнице даёт owner-token
   (`X-Sandbox-Token`); общая для Bearer-адаптеров особенность стенда: совмещать
   его с `Authorization: Bearer <токен очереди>` в одном запросе нельзя — отказ
-  «знание ID не является доступом» (воспроизводится и на `vtb-mock`) `[VERIFY]`.
+  «знание ID не является доступом» `[VERIFY]`.
 - `/admin` — консоль: заявки, кассовые группы, callbacks, журнал; в hosted-режиме
   задайте управляющие токены (`MOCK_ADMIN_TOKEN`/`MOCK_OPERATOR_TOKEN`).
 - `npm run test:first-ofd` — end-to-end selftest без Docker.
 
 ## 10. Известная неопределённость
 
-Публичный срез фиксирует транспорт `getToken`, структуру заявки, поля результата
+Публичная документация фиксирует транспорт `getToken`, структуру заявки, поля результата
 (`requestId`, `transactionType`, `errorCode`, `errorType`, `details`, `payload`)
 и набор методов сверки, но **не** фиксирует: production base, тестовые креды,
 полный enum `vatCode`/`operationType`-справочников, состав
@@ -276,7 +274,7 @@ curl -sS "http://localhost:3107/api/external/queue/v1/statuses?externalId=shop-o
 таблицу `errorCode` результата, правила дедупликации `externalId` и сроки
 хранения. Все такие места помечены `[VERIFY]`, а локальные решения мока —
 `[FORK]`. Перед переносом в production сверяйте спецификацию подключённой
-кассы и согласуйте отличия с владельцем проекта.
+кассы.
 
 ## 11. Ссылки
 

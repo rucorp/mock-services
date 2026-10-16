@@ -20,7 +20,7 @@ SPDX-License-Identifier: Apache-2.0
   HTTP 400). Типы: открытие/закрытие смены, состояние расчётов, чек, чек коррекции,
   БСО, БСО коррекции. Write API не моделируется (известный маршрут с другим методом
   → `405`, неизвестный `/API/...` → `404`, обе с подсказкой); исходящих запросов нет
-  (в публичном срезе нет callback/webhook), поэтому очередь доставки ядра и
+  (в публичной документации нет callback/webhook), поэтому очередь доставки ядра и
   SSRF-политика к адаптеру не подключаются. Синтетические дефолты
   (`taxcommocktest`/`mockpass123`/`TAXCOMMOCKTEST`) печатаются в стартовом логе с
   пометкой «не реквизиты Такском», production-креды не публикуются. Новые env:
@@ -37,8 +37,8 @@ SPDX-License-Identifier: Apache-2.0
   форма `{login, password}` (неизвестные ключи → `400`), имена полей ответов,
   суммы в целых копейках, включённая нижняя граница окна и HTTP-статусы 3106/2203
   локальные; ставки НДС 22%/22-122 в агрегатах смены не моделируются. **[FORK]**:
-  повторный `Login` выдаёт новый marker, прежний живёт до своего TTL (срез
-  формулирует иначе) — решение владельца, зафиксировано в гайде и манифесте.
+  повторный `Login` выдаёт новый marker, прежний живёт до своего TTL (документация
+  формулирует иначе) — зафиксировано в гайде и манифесте.
 - **MS-04, #110: graceful shutdown всех девяти сервисов + контейнерный харденинг.**
   Ядро: `installGracefulShutdown({server, flush, log})` — по SIGTERM/SIGINT
   синхронно сбрасываются отложенные (debounced) записи (`sandboxRuntime.flush()`
@@ -146,14 +146,14 @@ SPDX-License-Identifier: Apache-2.0
 - **Сайт документации вынесен из репозитория на <https://axiiom.ru/mock-services/>**
   (репозиторий `rucorp/axiiom`, подпуть `/mock-services/`): удалена site-инфраструктура
   (`site-build/`, `_sidebar.md`, `.nojekyll`, Pages-workflow, `scripts/check-site.js`);
-  копии сохранены в приватном `mock-services-docs` и в истории git. Проверка шаблона
+  копии сохранены в истории git. Проверка шаблона
   гайдов и «README ↔ services/*» сохранена — новый `check:guides`.
 - **CI-гигиена:** полная матрица Node 20/22/24 + docker — только для PR с кодом и тегов;
   PR только с документацией — лёгкая job «Docs checks»; push в `main` — smoke на одном
   Node; `publish-ghcr` — только по тегам `v*`.
-- **Внутренняя ИС выведена в приватный репозиторий команды** (решение владельца, 2026-10-15):
+- **Внутренние документы выведены из репозитория** (2026-10-15):
   из репозитория удалены каталоги `docs/audit/`, `docs/briefs/`, `docs/canon/` (аудиты, брифы
-  агентов, внутренние спеки) — они перенесены в приватный дом ИС проекта. Публичная
+  агентов, внутренние спеки). Публичная
   документация продукта: `README`, `docs/integration/`, `docs/openapi/`, `docs/reference/`,
   док-сайт (`index.html`, `_sidebar.md`).
 
@@ -199,7 +199,7 @@ SPDX-License-Identifier: Apache-2.0
   `requestMetadata.callbackUrl`: envelope/подпись/ACK/расписание повторов публично
   не зафиксированы, поэтому мок не выдумывает подпись, считает доставкой любой 2xx
   [FORK], повторяет 3×60s и проходит SSRF-политику ядра (`ERR SSRF_BLOCKED`
-  терминален); сверка — через метод статуса. Расхождения среза
+  терминален); сверка — через метод статуса. Расхождения в документации
   (`requestMetadata` required vs optional, `items` массив vs объект, `http://` vs
   `https://` callback, квирк `getToken`, тег ATOL Online V5) помечены
   `[VERIFY]`/`[FORK]`, production base не подтверждён и не выводится из тестового.
@@ -207,7 +207,7 @@ SPDX-License-Identifier: Apache-2.0
   (TTL токена, задержка очереди, каталог `userGroup`, адрес и расписание callback,
   `TOKEN_SINGLE`, `CALLBACK_HTTPS_ONLY`); per-sandbox
   сценарии/часы/журнал, control-plane, хаос ядра.
-  Манифест `protocols/first-ofd-okassa.json` (5 расхождений среза), OpenAPI 3.1
+  Манифест `protocols/first-ofd-okassa.json` (5 расхождений в документации), OpenAPI 3.1
   `docs/openapi/first-ofd-mock.openapi.json` с mock-local каталогами ошибок,
   секция `check:drift` (644 инварианта), `test:first-ofd` в `npm test` и CI,
   compose/include + healthcheck :3107, Docker smoke, root/service README и гайд
@@ -224,7 +224,7 @@ SPDX-License-Identifier: Apache-2.0
   образа и читают потребители.
 - **CI: джоб `docker` переведён на self-hosted раннер (`vars.CI_RUNNER`, лейбл
   `rucorp-ci`) с порт-ремапом 3910–3917 (#103).** На разделяемом self-hosted хосте
-  (CHUWI) фиксированные порты 3100/3101 заняты dev-стендом lovii-core, из-за чего
+  фиксированные порты 3100/3101 были заняты другим стендом, из-за чего
   `docker`-джоб не мог там запускаться. Хост-порты разведены в свободный диапазон
   `3910–3917` (`MOCK_*_HOST_PORT` джоба), healthcheck и black-box `test:compose`
   (`MOCK_*_URL`) переведены на этот диапазон; `publish-ghcr` остаётся на
@@ -354,7 +354,7 @@ SPDX-License-Identifier: Apache-2.0
     (221 → **316** инвариантов: маршруты и методы `*.do`, статусы, операции
     callback, тестовые карты, коды ошибок и `actionCode`, инварианты «GET +
     HMAC-SHA256 uppercase», «ACK ровно 200», «асимметричный режим вне области»,
-    «синтетические креды», оговорки конспекта в гайде);
+    «синтетические креды», оговорки по документации в гайде);
   - `selftest.js` (**287** проверок) включён в `npm test` (`test:alfa`), CI-шаг
     и прогон внутри образа; compose: сервис `alfa-mock :3104` с healthcheck в
     обоих compose-файлах, black-box сценарий (секция 6) в
@@ -365,7 +365,7 @@ SPDX-License-Identifier: Apache-2.0
     описание — SHA-256, примеры Java/PHP — SHA-512; режим подтверждается банком,
     не домысливается), привязки карт (`bindingId`), моделирование `orderBundle`,
     `paymentOrder.do` и различия координат r-/i-логинов; таблицы `orderStatus` и
-    `errorCode` в альфа-конспекте не зафиксированы — взяты общие таблицы
+    `errorCode` в официальной документации не зафиксированы — взяты общие таблицы
     платформы RBS с явной пометкой в README («Границы и форки») и отчёте PR;
   - контракты `tbank-mock`, `kassa-mock`, `yookassa-mock` и `atol-mock` не
     менялись (selftest: 48 / 129 / 227 / 202).
@@ -412,7 +412,7 @@ SPDX-License-Identifier: Apache-2.0
     документация: `services/atol-mock/README.md`, гайд `docs/integration/atol.md`,
     обновлён корневой README;
   - **вне области #34**: v5/ФФД 1.2 и маркировка «Честный ЗНАК» (следующий шаг);
-    числовая таблица кодов v4 в конспекте не снята — взята общая таблица кодов
+    числовая таблица кодов v4 в документации не снята — взята общая таблица кодов
     платформы АТОЛ/Ferma с явной пометкой в README и отчёте PR;
   - контракты `tbank-mock`, `kassa-mock` и `yookassa-mock` не менялись
     (selftest: 48 / 129 / 227).
@@ -426,7 +426,7 @@ SPDX-License-Identifier: Apache-2.0
     decimal-строки сумм, только `RUB`;
   - ошибки в официальном формате ЮKassa `{type:"error", id, code, description, parameter}`
     + DX-слой мока `hint`/`doc` (официальные тексты для Idempotence-Key и 404 `payment_id`;
-    форк по решению координатора: `405`/`415` — пустое тело, как в response-handling);
+    зафиксированный форк: `405`/`415` — пустое тело, как в response-handling);
   - confirmation-страница `/payment/{id}` с тестовыми картами из `03-testing.md`
     (успех/3DS/11 отказов), честные `cancellation_details` по официальной таблице
     declined-payments (`merchant|yoo_money|payment_network`), минимизация PAN (F-10);
@@ -446,7 +446,7 @@ SPDX-License-Identifier: Apache-2.0
     обновлены корневой README, Dockerfile и старт-скрипты.
   - контракты `tbank-mock` и `kassa-mock` не менялись; `/mock/verify-merchant`
     для ЮKassa не реализован (вебхуки без подписи, ветка ядра не применима —
-    вопрос координатору вынесен в отчёт PR).
+    открытый вопрос вынесен в отчёт PR).
 - **Изоляция песочниц: request-local контекст и hosted tenancy за env-флагом (#8, RFC-001, A-21, F-11—F-15).**
   - ядро `createSandboxRuntime`: контекст песочницы разрешается на каждый запрос ровно один раз
     (`X-Mock-Sandbox` → `?sandbox=` → поддомен при `MOCK_SANDBOX_HOST_SUFFIX`) и резолвится
@@ -482,19 +482,19 @@ SPDX-License-Identifier: Apache-2.0
   - канонический каталог документации адаптера зафиксирован как
     `docs/reference/<provider>/` — с примером шаблона в CONTRIBUTING.md.
 - **Пакет подготовки к глубокому аудиту (#43, docs-only).**
-  - пакет подготовки к глубокому аудиту[^chg-audit-prep] — карта
+  - пакет подготовки к глубокому аудиту — карта
     покрытия всех top-level артефактов репо (с чем и на какой базе каждый проверялся),
     8 находок прогона с `файл:строка` (в т.ч. обход SSRF-гарда через нормализованный
     IPv4-mapped `[::ffff:7f00:1]` и 48-битная энтропия id песочницы) и **6 партий**
     глубокого аудита с рамками, вопросами, критериями приёмки и оценками;
-  - чек-лист аудит-партии[^chg-audit-party] —
+  - чек-лист аудит-партии —
     «как запускать аудит-партию»: область → критерии → формат находок →
     фиксация в реестр;
   - [`AGENTS.md`](AGENTS.md) — правила работы ИИ-агентов (zero-dependency, обязательные
     прогоны `npm test`/`check:drift`/`check:links`/`test:compose`, SPDX и стандартные
     шапки, правило «env в пяти местах», обязательный `Closes #N` в описании PR,
     запреты и специфичные для проекта ловушки);
-  - бриф доработок[^chg-brief] —
+  - рабочий бриф доработок —
     §0.1: статусы MS-01…MS-40 по фактическому коду, все `[VERIFY]` подтверждены или
     опровергнуты с `файл:строка`; исправлены устаревшие формулировки (MS-01, MS-08,
     MS-11, MS-13, MS-19, MS-20, MS-26, MS-29, MS-33, MS-34, MS-38), сводка рисков (§7)
@@ -646,9 +646,9 @@ SPDX-License-Identifier: Apache-2.0
 ## [0.4.0] — 2026-10-11
 
 ### Added
-- **Внешний мок-контур для платформ (`docker-compose.include.yml` + GHCR + `docs/integration/lovii.md`)**:
+- **Внешний мок-контур для платформ (`docker-compose.include.yml` + GHCR)**:
   - `docker-compose.include.yml` с профилем `mock`, фиксированными именами `tbank-mock`/`kassa-mock`, лимитами памяти (`128m`), healthcheck-ами и параметризуемыми Caddy-лейблами (`MOCK_TBANK_CADDY_DOMAIN`, `MOCK_KASSA_CADDY_DOMAIN`);
-  - пошаговая инструкция миграции `lovii-core` и полная матрица переменных окружения `dev / staging / prod` в `docs/integration/lovii.md`;
+  - пошаговая инструкция для внешнего потребителя и полная матрица переменных окружения `dev / staging / prod`;
   - публикация образа `ghcr.io/rucorp/mock-services` (теги `:0.4.0`, `:latest`, `:sha-*`) и прогон selftest-ов против собранного образа и compose-стенда в `.github/workflows/ci.yml` + `scripts/compose-selftest.js` (`npm run test:compose`).
 - **Полнота 54-ФЗ (этап 6, `kassa-mock`)**:
   - операции `buy`, `buy_refund`, `buy_correction` (наряду с `sell`, `sell_refund`, `sell_correction`) как для агентской, так и для неагентской схемы;
@@ -670,7 +670,7 @@ SPDX-License-Identifier: Apache-2.0
 ## [0.3.0] — 2026-10-08
 
 ### Added
-- `MOCK_PROFILE=plain|multisplit` (tbank): провайдеро-нейтральный дефолт — классический эквайринг без сделок; профиль Lovii (Мультирасчеты) включается явно.
+- `MOCK_PROFILE=plain|multisplit` (tbank): провайдеро-нейтральный дефолт — классический эквайринг без сделок; профиль мультирасчётов включается явно.
 - `X-Mock-Scenario: fail|hang` (kassa): универсальный драйвер негативов заголовком запроса — для CI и внешних интеграторов.
 - selftest: plain-флоу Init→pay→Confirm без SpAccumulationId (tbank №25); сценарии через заголовок (kassa 12b).
 
@@ -754,7 +754,7 @@ community-файлы.
 
 - CI (`.github/workflows/ci.yml`): Node 18/20/22 + сборка образа и smoke-тест compose. (A-23)
 - `Dockerfile`, `.dockerignore`, healthcheck и volume состояния в `docker-compose.yml`. (A-23)
-- `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`, аудит `docs/audit/AUDIT-2026-10-08.md`. (A-24)
+- `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md` и отчёт внутреннего аудита. (A-24)
 - README/интеграции обновлены под новое поведение; исправлены расхождения
   («13/13» → фактическое число, дефолт `MOCK_PROCESS_MS`). (A-24)
 
@@ -768,13 +768,8 @@ community-файлы.
 
 ## [0.1.0] — 2026-10-08
 
-- Стартовый пакет: спека `docs/canon/MOCK_SERVICES_SPEC.md`, карточки SZ-095/SZ-096, референсы провайдеров.
+- Стартовый пакет: внутренняя спецификация и референсы провайдеров.
 - Адаптеры `tbank-mock` (Init/Confirm/Cancel/GetState/CheckOrder, нотификации, платёжная форма, `/e2c`, `/av`) и `kassa-mock` (Ferma: getToken/sell/sell_refund/report/stats, callback с ретраями).
 - Ядро `packages/core`: состояние, очередь вебхуков, http-хелперы, каталог ошибок.
 - Selftest-ы, `docker-compose.yml`, инструкции интеграций.
 
-<!-- Внутренние документы (репозиторий команды mock-services-docs, не публикуются) -->
-
-[^chg-audit-prep]: `docs/audit/AUDIT-PREP-2026-10-12.md` — пакет подготовки к глубокому аудиту.
-[^chg-audit-party]: `docs/audit/CHECKLIST-audit-party.md` — регламент аудит-партии.
-[^chg-brief]: `docs/briefs/CLAUDE-2026-10-12-agent-brief.md` — бриф доработок, статусы MS-01…MS-40.

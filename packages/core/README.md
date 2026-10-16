@@ -17,10 +17,10 @@ Zero dependencies, Node >= 18. Self-test: `npm run test:core`.
   **сохраняет идентичность вложенных объектов**. Подсистемы захватывают ссылки
   на `state.notifications`/`state.callbacks` при старте; подмена объекта
   приводила к тому, что после рестарта очередь вебхуков смотрела в пустой объект
-  и молча теряла недоставленные уведомления (дефект A-2 аудита 2026-10-08).
+  и молча теряла недоставленные уведомления.
 
 - `installGracefulShutdown({server, flush, log, signals, timeoutMs, exit})` —
-  общий обработчик SIGTERM/SIGINT для адаптеров (MS-04): синхронный `flush()`
+  общий обработчик SIGTERM/SIGINT для адаптеров: синхронный `flush()`
   отложенных записей → `server.close()` → `closeAllConnections()` → `exit(0)`;
   страховочный таймер `timeoutMs` (по умолчанию 1 с, unref), повторный сигнал
   идемпотентен. Возвращает функцию `shutdown(signal)` с `dispose()` (снятие
@@ -35,7 +35,7 @@ Zero dependencies, Node >= 18. Self-test: `npm run test:core`.
   на HTML-страницах сервисов (чек покупателю, `/admin`).
 - `redactSecrets(value)` / `redactSecretsInText(text)` / `redactRawBody(raw)` /
   `summarizeBody(body, {maxKeys, maxValueLength})` — редакция секретов перед
-  журналированием и логированием (F-09): ключи-секреты (`Authorization`, `Cookie`,
+  журналированием и логированием: ключи-секреты (`Authorization`, `Cookie`,
   `token`, `pass`/`password`, `CVV`, `CardData`, `PAN`, `signature`) заменяются на
   `[REDACTED]`, PII (ИНН, телефон, e-mail, ФИО) маскируются частично, а любая
   строка дополнительно сканируется на PAN (`looksLikePan`/`maskPan`: 13–19 цифр,
@@ -45,62 +45,60 @@ Zero dependencies, Node >= 18. Self-test: `npm run test:core`.
 - `createJournal({size, baseUrl, maxEntryChars, sandboxScope})` →
   `{record, list, clear, clearFor, dropScope}` —
   журнал входящих запросов для `/admin/journal`: метод, путь, ключевые поля, код
-  ответа, длительность. Запись редактируется до сохранения (F-09): заголовки —
+  ответа, длительность. Запись редактируется до сохранения: заголовки —
   через allowlist (`Content-Type`, `Content-Length`, `User-Agent`, `X-Mock-*`),
   тело и сырой payload — через `redactSecrets`/`redactRawBody`, длина полей и всей
   записи ограничена. С `sandboxScope` (адаптеры передают
   `() => sandboxRuntime.current()`) записи живут в разделе записи текущей
-  песочницы (PB-13, #52); без него — прежний одиночный журнал.
+  песочницы; без него — прежний одиночный журнал.
 - `createScenarioRegistry({clock, size, maxRules, maxRuleBytes, sandboxScope})` —
   реестр сценариев `X-Mock-Scenario` и правил `POST /mock/scenarios` с историей
   срабатываний. С `sandboxScope` правила и история изолированы по записи
-  песочницы (PA-51/PG-04, #52); дефолтные лимиты — 200 правил на песочницу и
+  песочницы; дефолтные лимиты — 200 правил на песочницу и
   8 KiB на правило (UTF-8 байты сериализованного JSON), превышение бросает
   ошибку с `code` `rule_cap_exceeded`/`rule_too_large` до мутации. Повторная
   запись с тем же `id` — update на месте. `clearRulesFor`/`clearHistoryFor`/
   `dropScope` оперируют разделом конкретной записи песочницы.
 - `postJson(url, payload, timeoutMs, options)` — исходящий POST/GET (http/https по схеме;
   другие схемы отклоняются, редиректы не отслеживаются; для IPv6-литералов скобки
-  `[...]` нормализуются перед подключением и сохраняются в заголовке `Host` — PA-25).
+  `[...]` нормализуются перед подключением и сохраняются в заголовке `Host`).
 - `flagEnabled(value, fallback)` — разбор boolean-настроек из env: `1`/`true`/`yes`/`on`
-  против `0`/`false`/`no`/`off`, пустое значение — `fallback` (F-08: `=1` больше не «молчит»).
-- `defaultBlockPrivateHosts(env)` — дефолт SSRF-политики ядра, согласованный с адаптерами (PA-58):
+  против `0`/`false`/`no`/`off`, пустое значение — `fallback`.
+- `defaultBlockPrivateHosts(env)` — дефолт SSRF-политики ядра, согласованный с адаптерами:
   `flagEnabled(MOCK_BLOCK_PRIVATE_WEBHOOKS, flagEnabled(MOCK_HOSTED, false))`.
 - `isPrivateAddress(ip)` / `isPrivateHost(url)` — классификация IP-литералов и
   URL («приватный/служебный адрес», включая `ff00::/8`, TEST-NET-1/2/3,
-  `2001:db8::/32` и `64:ff9b:1::/48` — PA-26) для защиты вебхуков от SSRF.
+  `2001:db8::/32` и `64:ff9b:1::/48`) для защиты вебхуков от SSRF.
 - `resolvePublicHost(url, {lookup})` / `assertPublicHost(url, {lookup})` — async-проверка
   перед исходящим запросом: схема http/https, публичный IP, имя резолвится один
-  раз только в публичные адреса и пиннится к сокету (защита от DNS TOCTOU / rebinding —
-  §7.3, PG-11); бросает `Error` с `code === 'SSRF_BLOCKED'`.
+  раз только в публичные адреса и пиннится к сокету (защита от DNS TOCTOU / rebinding);
+  бросает `Error` с `code === 'SSRF_BLOCKED'`.
 - `checkControlAccess(req, {adminToken, operatorToken, surface, hosted})` —
-  единый access-control управляющей поверхности (F-07): роли `admin`/`operator`,
+  единый access-control управляющей поверхности: роли `admin`/`operator`,
   constant-time сравнение токена, fail-closed при `hosted` без секрета.
 - `createDeliveryQueue({...})` — очередь исходящих вебхуков с ретраями:
   запись живёт в состоянии сервиса (переживает рестарт), `retryMs`/`maxAttempts`
   настраиваются, критерий доставки — хук (`isOk`: у Т-Банка это 200 + тело «OK»,
   у Ferma — любой 2xx). Тик — раз в секунду; `awaitSequential` — доставлять
   по одной (Т-Банк) или пачкой (Ferma). Дефолт `blockPrivateHosts` —
-  `defaultBlockPrivateHosts()` (локально `false`, при `MOCK_HOSTED=1` — `true`, PA-58);
+  `defaultBlockPrivateHosts()` (локально `false`, при `MOCK_HOSTED=1` — `true`);
   то же правило действует в `verifyMerchantWebhook({...})`.
 
   Гарантии очереди (закреплены тестами):
 
   1. запись, находящаяся «в полёте», не отправляется повторно — ретраи идут
      строго по расписанию, даже если вебхук отвечает медленнее, чем тик
-     (дефект A-3: без защиты одна нотификация уходила параллельными POST-ами);
+     (без защиты одна нотификация уходила параллельными POST-ами);
   2. терминальный статус — флаг `entry.done` (а не `nextAttemptAt = Infinity`,
-     который сериализовался в `null` и после рестарта считался «пора слать снова»,
-     дефект A-4);
+     который сериализовался в `null` и после рестарта считался «пора слать снова»);
   3. `request(entry)`, бросивший исключение, не роняет тик — запись уходит в
      `onFailure` с текстом ошибки;
   4. при `blockPrivateHosts: true` (или по умолчанию в `MOCK_HOSTED=1`) отправка
      на приватные/служебные адреса и имена, которые в них резолвятся, блокируется
-     с привязкой проверенного IP к соединению против DNS TOCTOU (дефекты A-18/F-08,
-     #51 PF-01/PA-25/PA-26/PA-58/PG-11);
+     с привязкой проверенного IP к соединению против DNS TOCTOU;
   5. `awaitSequential: true` — записи уходят строго по одной и в порядке
      очереди: следующая запись не стартует, пока предыдущая не завершилась,
-     и новый тик не начинается поверх идущего (F-29: даже медленный приёмник
+     и новый тик не начинается поверх идущего (даже медленный приёмник
      не может получить статусы одного платежа не по порядку).
 - `createErrorCatalog({provider, docsBase, codes})` — каталог ошибок DX-слоя:
   `{код, объяснение, поле, подсказка, ссылка на официальный раздел доки}`.
@@ -111,17 +109,17 @@ Zero dependencies, Node >= 18. Self-test: `npm run test:core`.
 `ownerTokenOf`, `isOperatorToken`, `isOperatorRequest`, `recordAuthorized`,
 `recordByOwnerToken` и операции жизненного цикла песочниц. В `owned`-режиме
 (включается `MOCK_HOSTED=1` или явным `MOCK_TENANCY=owned`) доступ к песочнице
-даёт только её owner-token: **знание id доступа не даёт** (F-12).
+даёт только её owner-token: **знание id доступа не даёт**.
 
-`ownerTokenOf(req)` читает owner-token в строгом порядке (задача #98):
+`ownerTokenOf(req)` читает owner-token в строгом порядке:
 
 | # | Источник | Комментарий |
 |---|---|---|
 | 1 | `X-Sandbox-Token: <токен>` | явный заголовок владельца — самый приоритетный |
 | 2 | `X-Owner-Token: <токен>` | синоним; уступает `X-Sandbox-Token` |
-| 3 | cookie `mock_sandbox_token=<токен>` | сессионная cookie консоли; читается с декодированием (Ф-2, #121) |
+| 3 | cookie `mock_sandbox_token=<токен>` | сессионная cookie консоли; читается с декодированием |
 | 4 | `Authorization: Bearer <токен>` | fallback для клиентов, знающих только Bearer |
-| 5 | `?sandbox_token=<токен>` | только non-hosted `namespaces` (WARN об устаревании); в `owned` и в hosted отклоняется fail-closed (Ф-3, #121) |
+| 5 | `?sandbox_token=<токен>` | только non-hosted `namespaces` (WARN об устаревании); в `owned` и в hosted отклоняется fail-closed |
 
 Порядок важен: у адаптеров, чей бизнес-контракт сам ходит по
 `Authorization: Bearer <токен>` (first-ofd — токен очереди, vtb — OAuth
@@ -144,19 +142,19 @@ Zero dependencies, Node >= 18. Self-test: `npm run test:core`.
 - при `mode` `namespaces`/`off` (self-hosted) owner-token не требуется вовсе, и
   бизнес-заголовки адаптера не трактуются как owner-token.
 
-Опция `hosted` (`MOCK_HOSTED=1`, MS-12, #121): при пустом `defaultOwnerToken`
+Опция `hosted` (`MOCK_HOSTED=1`): при пустом `defaultOwnerToken`
 песочница `default` **не обслуживается** — бизнес- и form-маршруты без селектора
 получают `kind: 'not-found'` (адаптеры отдают 404 с точной причиной и хинтом),
 публичная инфраструктура (`/health`, `/openapi.json`, `/sandboxes`) отдаётся
 detached public record, именованные песочницы работают по owner-token.
-Управляющая поверхность (`policy: 'control'`) MS-12 не перекрывает: у неё свой
-fail-closed гейт MS-06. Без `MOCK_HOSTED` поведение `default` не меняется.
+Управляющая поверхность (`policy: 'control'`) этим правилом не перекрывается: у неё свой
+fail-closed гейт. Без `MOCK_HOSTED` поведение `default` не меняется.
 
 Диагностика `hosted`/self-hosted вынесена в `defaultSandboxStatus({ownerToken,
-hosted, tenancy})` → `default=owner-token | default=closed (MS-12: …) |
+hosted, tenancy})` → `default=owner-token | default=closed (…) |
 default=open` — этой строкой адаптеры печатают статус при старте.
 
-Сессионные cookie консоли (Ф-1, #121): `sessionCookieHeader(name, value)` (HttpOnly,
+Сессионные cookie консоли: `sessionCookieHeader(name, value)` (HttpOnly,
 `SameSite=Strict`, `Path=/`, `Max-Age`), `sessionCookiesFromQuery(req, {...})`
 (переносит принятые из query `admin_token`/`operator_token`/`sandbox_token` в
 cookie; в hosted возвращает пустой список) и
@@ -164,7 +162,7 @@ cookie; в hosted возвращает пустой список) и
 собственные cookie ответа). `readCookieValue(req, name)` — чтение cookie с
 декодированием (`%3D` → `=`, разделение по первому `=`).
 
-## Байтовые квоты песочниц (PD-02, #74)
+## Байтовые квоты песочниц
 
 `createSandboxRuntime` принимает два независимых лимита (целые байты UTF-8
 сериализованного JSON, не число документов):
@@ -211,7 +209,7 @@ JSON-состояния (~8 заполненных по 8 МиБ песочни�
 Для жёсткой защиты памяти сохраняйте контейнерный лимит и подбирайте бюджет
 по измеренному RSS конкретного адаптера; `0` годится только для доверенного стенда.
 
-## Как добавить нового провайдера (спека §2)
+## Как добавить нового провайдера
 
 1. Новый каталог в `services/<provider>-mock` с `server.js` на ядре.
 2. В адаптере — только декларация протокола: маршруты, схемы, коды ошибок,

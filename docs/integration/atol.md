@@ -11,13 +11,6 @@ SPDX-License-Identifier: Apache-2.0
 [PDF API v4, версия 5.15](https://atol.online/files/API_atol_online_v4.pdf),
 [тестовые реквизиты](https://atol.online/files/ffd/test_sreda.txt).
 
-> **Это не Ferma.** Маршрут `/possystem/v4/` (у Ferma `/possystem/v1/`), токен
-> в **заголовке** `Token:` (у Ferma `?token=`), токен живёт **24 часа** (у Ferma
-> 12), суммы — **decimal-рубли** (у Ferma целые копейки), расчётные ставки НДС
-> пишутся слитно — `vat120`, а не `vat20_120`, а повтор `external_id`
-> **возвращает прежний UUID**, а не ошибку. Мок ловит все эти переносы и
-> объясняет их в `hint`.
-
 **v5 (ФФД 1.2) и маркировка «Честный ЗНАК» в этот стенд не входят** — это
 следующий шаг.
 
@@ -129,9 +122,8 @@ curl -s -X POST "…/v4-online-atol-ru_4179/sell" -H "Token: $TOKEN" -d '{"exter
 #   + заголовок X-Mock-Replayed: 1
 ```
 
-Второй чек не создаётся, прежнее тело не перезаписывается. Это **главное
-отличие от Ferma**, где дубль — ошибка `code=12`. Область уникальности —
-группа: тот же `external_id` в другой группе — другой документ.
+Второй чек не создаётся, прежнее тело не перезаписывается. Область
+уникальности — группа: тот же `external_id` в другой группе — другой документ.
 
 ## 7. Что мок проверяет за вас
 
@@ -143,8 +135,8 @@ curl -s -X POST "…/v4-online-atol-ru_4179/sell" -H "Token: $TOKEN" -d '{"exter
 | `client` без `email` и `phone` | `error.code=4`, `field: receipt.client` |
 | битый `company.inn` / нет `payment_address` | `error.code=4`, `field: receipt.company.*` |
 | неизвестная ставка НДС | `error.code=4`, `field: receipt.items[i].vat` |
-| `vat20_120` (Ferma-синтаксис) | `error.code=4` + hint «в v4 это `vat120`» |
-| `payments[].type = 5` (Ferma) | `error.code=4` + hint про ФФД 1081 (`0` — наличные) |
+| ставка с подчёркиванием (`vat20_120`) | `error.code=4` + hint «в v4 это `vat120`» |
+| `payments[].type = 5` | `error.code=4` + hint про ФФД 1081 (`0` — наличные) |
 | `sum ≠ price × quantity`, `total ≠ Σ` | `error.code=4`, `field: receipt.items[i].sum` / `receipt.total` |
 | сумма с 3 знаками после запятой | `error.code=4` (decimal в v4 — до 2 знаков) |
 | нет `external_id` / длиннее 128 символов | `error.code=5` |

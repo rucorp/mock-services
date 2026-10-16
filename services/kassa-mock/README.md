@@ -1,10 +1,9 @@
 © 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0
 SPDX-License-Identifier: Apache-2.0
 
-# kassa-mock — мок облачной кассы OFD Ferma (T-038)
+# kassa-mock — мок облачной кассы OFD Ferma
 
-Пара к `tbank-mock`: вместе они образуют локальный мок-стенд «банк + касса»
-для тестирования платёжно-фискального контура по контракту Ferma. Стенд не
+Мок облачной кассы для тестирования фискального контура по контракту Ferma. Стенд не
 проксирует запросы в Ferma и не предназначен для боевых реквизитов; переключать
 интеграцию на production нужно отдельно, не только заменой URL.
 
@@ -32,7 +31,7 @@ Node.js >= 18; внешние npm-зависимости не нужны. Сер
 | `GET /admin/journal` | JSON-журнал последних API-запросов; креды `getToken` (`login`/`pass`), токены и реквизиты покупателя редактируются — `[REDACTED]`/маска, заголовки только из allowlist |
 | `GET /healthz` | ok/касса недоступна + `ofdMode` и `ofdQueueCount` |
 
-Правила, история срабатываний и журнал `/admin/journal` принадлежат текущей песочнице (#52): другие песочницы их не видят и не очищают, `POST /mock/reset` действует только на целевую песочницу. Лимиты: до 200 правил на песочницу и до 8 KiB на правило (превышение — HTTP 400 с `code` `rule_cap_exceeded`/`rule_too_large`).
+Правила, история срабатываний и журнал `/admin/journal` принадлежат текущей песочнице: другие песочницы их не видят и не очищают, `POST /mock/reset` действует только на целевую песочницу. Лимиты: до 200 правил на песочницу и до 8 KiB на правило (превышение — HTTP 400 с `code` `rule_cap_exceeded`/`rule_too_large`).
 
 ### Валидация чека (DX-слой)
 
@@ -55,7 +54,7 @@ Node.js >= 18; внешние npm-зависимости не нужны. Сер
 и **продолжение ретраев после рестарта** с `MOCK_STATE_FILE`). Чек покупателю
 «доставляется» страницей `GET /receipts/{uuid}` (это и есть `ofd_receipt_url`).
 
-## Негативные сценарии (драйвер Фазы 4)
+## Негативные сценарии
 
 - `external_id` с префиксом **`fail-`** → документ обрабатывается, статус
   `fail` + `error` → ядро получает callback с ошибкой, джоба ретраит;
@@ -127,10 +126,10 @@ FERMA_CALLBACK_URL=https://<ваш домен>/api/v1/fiscal/callback
 | `MOCK_ADMIN_TOKEN` | — | токен админки `/admin*`; query-токен и owner-token в `owned` tenancy сохраняются в action URL/redirect, POST дополнительно требует CSRF-токен и same-origin |
 | `MOCK_HOSTED` | `false` | hosted-режим: управляющая поверхность fail-closed без токена, SSRF-политика по умолчанию |
 | `MOCK_TENANCY` | `owned` при `MOCK_HOSTED=1`, иначе `namespaces` | `owned`/`namespaces`/`off`; legacy `1`/`on`/`true`/`yes` → `owned`, `0`/`false`/`no` → `off`; неизвестное непустое значение пишет WARN и безопасно возвращается к default |
-| `MOCK_SANDBOX_TOKEN` | — | owner-token default-песочницы. При `MOCK_HOSTED=1` без него `default` не обслуживается (MS-12: бизнес/form → 404, стартовый лог `default=closed`); в self-hosted `default` открыта с предупреждением при старте |
+| `MOCK_SANDBOX_TOKEN` | — | owner-token default-песочницы. При `MOCK_HOSTED=1` без него `default` не обслуживается (бизнес/form → 404, стартовый лог `default=closed`); в self-hosted `default` открыта с предупреждением при старте |
 | `MOCK_SANDBOX_TTL_MS` | 24 ч в hosted, иначе 0 (бессрочно) | TTL именованной песочницы; истёкшие удаляет sweep-воркер |
 | `MOCK_SANDBOX_MAX` | `100` в hosted, иначе `256` | максимум именованных песочниц |
-| `MOCK_SANDBOX_MAX_DOCUMENTS` | `5000` в hosted, иначе `0` (без лимита) | квота документов песочницы (F-15) |
+| `MOCK_SANDBOX_MAX_DOCUMENTS` | `5000` в hosted, иначе `0` (без лимита) | квота документов песочницы |
 | `MOCK_SANDBOX_HOST_SUFFIX` | — | суффикс поддоменов песочниц, напр. `mock-services.dev`: `<id>.mock-services.dev` |
 | `MOCK_SANDBOX_CREATE_LIMIT` | `20` в hosted, иначе `0` | лимит создания песочниц на IP в час |
 | `MOCK_SANDBOX_FILE` | `<MOCK_STATE_FILE>.sandboxes.json` | база реестра песочниц: поштучные файлы в каталоге `<база без .json>.records/` (owner-токены — только хэши); legacy-файл `<база>` переносится при старте и переименовывается в `.migrated` |
@@ -144,7 +143,7 @@ FERMA_CALLBACK_URL=https://<ваш домен>/api/v1/fiscal/callback
 | `MOCK_VIRTUAL_CLOCK` | — | ISO-старт виртуальных часов стенда (TTL токена 12 ч, смена ККТ 24 ч, ресурс ФН, ретраи callback) |
 | `MOCK_STATE_FILE` | — | файл персистентности; без него состояние в памяти |
 
-## Песочницы и hosted tenancy (RFC-001, A-21)
+## Песочницы и hosted tenancy (RFC-001)
 
 Каждый запрос разрешает свою песочницу **один раз** и дальше видит только её
 состояние, креды и персистентность: параллельные A/B-запросы не смешиваются
@@ -171,16 +170,17 @@ API (в `owned` — с owner-token; в `namespaces` те же маршруты �
 Owner-token принимается в `Authorization: Bearer`, `X-Sandbox-Token` или
 `?sandbox_token=`. Персистентность: реестр песочниц пишется атомарно и поштучно —
 по файлу `<MOCK_STATE_FILE>.sandboxes.records/<id>.json` на песочницу (хэши owner-токенов +
-снимки состояния; мутация переписывает только свою песочницу, PD-02), а
+снимки состояния; мутация переписывает только свою песочницу), а
 `default` всегда восстанавливается только из `MOCK_STATE_FILE` — состояние
-именованной песочницы не может быть выдано за `default` (F-14). Просроченные
-песочницы удаляет sweep-воркер; квота документов (`MOCK_SANDBOX_MAX_DOCUMENTS`,
-F-15) проверяется до фискализации и отвечает ошибкой 4 с подсказкой.
+именованной песочницы не может быть выдано за `default`. Просроченные
+песочницы удаляет sweep-воркер; квота документов (`MOCK_SANDBOX_MAX_DOCUMENTS`)
+проверяется до фискализации и отвечает ошибкой 4 с подсказкой.
 
-## staging
+## Стейджинг одной командой
 
-Сервис в `compose-core-staging-extras.yml` (профиль `mock`, порт 3101 на
-localhost). Админ-консоль: `curl http://localhost:3101/admin` с сервера.
+Сервис входит в `docker-compose.staging.yml` (tbank-mock + kassa-mock из
+опубликованного образа, порт 3101). Админ-консоль:
+`curl http://localhost:3101/admin`.
 
 ## Границы симуляции
 
@@ -193,7 +193,7 @@ localhost). Админ-консоль: `curl http://localhost:3101/admin` с с�
   сверяйте поведение с актуальной документацией Ferma перед изменением
   production-интеграции.
 
-## Байтовые квоты состояния (PD-02)
+## Байтовые квоты состояния
 
 | Env | Дефолт | Назначение |
 | --- | --- | --- |
@@ -206,4 +206,4 @@ localhost). Админ-консоль: `curl http://localhost:3101/admin` с с�
 импорте `/mock/state` → HTTP 400, `errorCode: 400`, `kind: 'bytes'`,
 `code: sandbox_state_budget_exceeded` / `sandbox_state_quota_exceeded`,
 с откатом отклонённого состояния. Правила/история/журнал остаются volatile.
-Подробности и границы — [документация ядра](../../packages/core/README.md#байтовые-квоты-песочниц-pd-02-74).
+Подробности и границы — [документация ядра](../../packages/core/README.md#байтовые-квоты-песочниц).

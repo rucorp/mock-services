@@ -3,7 +3,7 @@
   "info": {
     "title": "first-ofd-mock — облачная касса OKassa (Первый ОФД), мок-стенд",
     "version": "0.5.0",
-    "description": "Zero-dependency mock of the OKassa cloud cash-register API slice documented in документации Первого ОФД (OKassa) and 02-test-and-open-issues.md (срез 2026-10-11). Auth: POST /getToken (application/json; charset=utf-8, {login, pass}) → {token}; business calls use Authorization: Bearer <token> with a 24-hour TTL on the stand's virtual clock. Receipts are submitted to an ASYNCHRONOUS QUEUE: POST /api/external/queue/v1/transaction/{type} returns requestId, and the fiscal result is retrieved via GET transaction/{requestId} or GET status/{requestId} (IN_PROGRESS → COMPLETED | ERROR). Operations are INCOME / INCOME_RETURN / EXPENCE / EXPENCE_RETURN — the EXPENCE spelling is kept exactly as in the schema and is NOT auto-corrected. Per-type schemas are strict: ReceiptRequest, ReceiptCorrectionRequest and StateCommandRequest are not merged. Callback is an unsigned POST to requestMetadata.callbackUrl: envelope, signature, ACK code and retry schedule are NOT fixed by the public slice, so the mock invents no signature — its 2xx ACK rule and retry schedule are a mock-local [FORK]. externalId deduplication is not confirmed publicly ([VERIFY])."
+    "description": "Zero-dependency mock of the OKassa cloud cash-register API documented by Первый ОФД (as of 2026-10-11). Auth: POST /getToken (application/json; charset=utf-8, {login, pass}) → {token}; business calls use Authorization: Bearer <token> with a 24-hour TTL on the stand's virtual clock. Receipts are submitted to an ASYNCHRONOUS QUEUE: POST /api/external/queue/v1/transaction/{type} returns requestId, and the fiscal result is retrieved via GET transaction/{requestId} or GET status/{requestId} (IN_PROGRESS → COMPLETED | ERROR). Operations are INCOME / INCOME_RETURN / EXPENCE / EXPENCE_RETURN — the EXPENCE spelling is kept exactly as in the schema and is NOT auto-corrected. Per-type schemas are strict: ReceiptRequest, ReceiptCorrectionRequest and StateCommandRequest are not merged. Callback is an unsigned POST to requestMetadata.callbackUrl: envelope, signature, ACK code and retry schedule are NOT fixed by the public documentation, so the mock invents no signature — its 2xx ACK rule and retry schedule are a mock-local [FORK]. externalId deduplication is not confirmed publicly ([VERIFY])."
   },
   "servers": [
     {
@@ -49,7 +49,7 @@
         },
         "responses": {
           "2xx": {
-            "description": "Любой 2xx считается доставкой ([FORK]: ACK-код публичным срезом не зафиксирован)."
+            "description": "Любой 2xx считается доставкой ([FORK]: ACK-код публичной документацией не зафиксирован)."
           },
           "default": {
             "description": "Не-2xx: повтор по локальному графику мока; SSRF_BLOCKED — терминальный отказ без повторов."
@@ -375,7 +375,7 @@
           "OKassa queue"
         ],
         "summary": "Заявки по externalId и группе",
-        "description": "externalId и groupId обязательны; status — необязательный фильтр. Envelope списка публичным срезом не зафиксирован: мок отдаёт JSON-массив статусов ([VERIFY]) — сохраняйте выданный requestId.",
+        "description": "externalId и groupId обязательны; status — необязательный фильтр. Envelope списка публичной документацией не зафиксирован: мок отдаёт JSON-массив статусов ([VERIFY]) — сохраняйте выданный requestId.",
         "parameters": [
           {
             "name": "externalId",
@@ -459,7 +459,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Начало периода: unix-время или ISO 8601 ([VERIFY]: форма в срезе не зафиксирована)"
+            "description": "Начало периода: unix-время или ISO 8601 ([VERIFY]: форма в документации не зафиксировано)"
           },
           {
             "name": "to",
@@ -1517,7 +1517,7 @@
           "userInn"
         ],
         "additionalProperties": true,
-        "description": "Кассовые параметры. По срезу для ReceiptRequest обязателен userInn; имена тегов выбора кассовой группы публично не перечислены ([VERIFY]), поэтому дополнительные поля принимаются как есть.",
+        "description": "Кассовые параметры. По документации для ReceiptRequest обязателен userInn; имена тегов выбора кассовой группы публично не перечислены ([VERIFY]), поэтому дополнительные поля принимаются как есть.",
         "properties": {
           "userInn": {
             "type": "string",
@@ -1532,7 +1532,7 @@
           "userGroup"
         ],
         "additionalProperties": true,
-        "description": "Метаданные заявки. Обязательность расходится в срезе: manual называет объект необязательным, OpenAPI держит requestMetadata в required — мок следует строгой схеме OpenAPI ([VERIFY]).",
+        "description": "Метаданные заявки. Обязательность расходится в документации: manual называет объект необязательным, OpenAPI держит requestMetadata в required — мок следует строгой схеме OpenAPI ([VERIFY]).",
         "properties": {
           "userGroup": {
             "type": "string",
@@ -1567,7 +1567,7 @@
           "vatCode"
         ],
         "additionalProperties": true,
-        "description": "Позиция чека. Другие реквизиты ФФД (агент, маркировка и т. п.) срез описывает отдельными схемами — дополнительные поля принимаются как есть.",
+        "description": "Позиция чека. Другие реквизиты ФФД (агент, маркировка и т. п.) документация описывает отдельными схемами — дополнительные поля принимаются как есть.",
         "properties": {
           "label": {
             "type": "string",
@@ -1577,7 +1577,7 @@
           "measurementUnit": {
             "type": "string",
             "maxLength": 64,
-            "description": "Мера количества ([VERIFY]: полный справочник в срезе не приведён)"
+            "description": "Мера количества ([VERIFY]: полный справочник в документации не приведён)"
           },
           "price": {
             "type": "number",
@@ -1600,7 +1600,7 @@
           "totalSum"
         ],
         "additionalProperties": true,
-        "description": "Документ чека (Receipt). items — МАССИВ (OpenAPI); таблица manual трактует форму иначе — расхождение №2 среза, мок следует строгой OpenAPI-схеме [VERIFY].",
+        "description": "Документ чека (Receipt). items — МАССИВ (OpenAPI); таблица manual трактует форму иначе — расхождение №2 в документации, мок следует строгой OpenAPI-схеме [VERIFY].",
         "properties": {
           "operationType": {
             "$ref": "#/components/schemas/OperationType"
@@ -1615,11 +1615,11 @@
           },
           "totalSum": {
             "type": "number",
-            "description": "Итог чека в ДЕСЯТИЧНЫХ рублях. Правила сверки totalSum с позициями срез не описывает — вне области, мок их не требует ([FORK])"
+            "description": "Итог чека в ДЕСЯТИЧНЫХ рублях. Правила сверки totalSum с позициями документация не описывает — вне области, мок их не требует ([FORK])"
           },
           "taxationType": {
             "type": "string",
-            "description": "СНО ([VERIFY]: enum в публичном срезе не приведён — принимается непустая строка)"
+            "description": "СНО ([VERIFY]: enum в публичной документации не приведён — принимается непустая строка)"
           },
           "cashier": {
             "type": "string",
@@ -1660,7 +1660,7 @@
             "additionalProperties": {
               "type": "number"
             },
-            "description": "Безналичные суммы по типам оплаты ([VERIFY]: каталог ключей в срезе не приведён)"
+            "description": "Безналичные суммы по типам оплаты ([VERIFY]: каталог ключей в документации не приведён)"
           },
           "timeZone": {
             "type": "string",
@@ -1680,7 +1680,7 @@
             ],
             "properties": {
               "correctionCause": {
-                "description": "Основание коррекции ([VERIFY]: справочник значений в срезе не приведён — принимается непустая строка или число)"
+                "description": "Основание коррекции ([VERIFY]: справочник значений в документации не приведён — принимается непустая строка или число)"
               }
             }
           }
@@ -1766,7 +1766,7 @@
           "VAT_22",
           "VAT_22122"
         ],
-        "description": "Ставка НДС: VAT_22 — 22 % и VAT_22122 — 22/122 (расчётная) подтверждены срезом; VAT_NONE — без НДС, VAT_0 — 0 %, VAT_10 — 10 %, VAT_20 — 20 %, VAT_110 — 10/110, VAT_120 — 20/120 — [VERIFY]: полный enum vatCode в публичном срезе не приведён."
+        "description": "Ставка НДС: VAT_22 — 22 % и VAT_22122 — 22/122 (расчётная) подтверждены документацией; VAT_NONE — без НДС, VAT_0 — 0 %, VAT_10 — 10 %, VAT_20 — 20 %, VAT_110 — 10/110, VAT_120 — 20/120 — [VERIFY]: полный enum vatCode в публичной документации не приведён."
       },
       "QueueStatus": {
         "type": "string",
@@ -1783,7 +1783,7 @@
           "API",
           "KKT"
         ],
-        "description": "Слой ошибки результата: API — ошибка уровня API очереди; KKT — ошибка ККТ/фискального накопителя. Оба слоя сохраняются раздельно (срез)."
+        "description": "Слой ошибки результата: API — ошибка уровня API очереди; KKT — ошибка ККТ/фискального накопителя. Оба слоя сохраняются раздельно (документация)."
       },
       "CreateTransactionResponse": {
         "type": "object",
@@ -1794,7 +1794,7 @@
         "properties": {
           "requestId": {
             "type": "string",
-            "description": "Идентификатор заявки очереди (формат в срезе не зафиксирован: мок отдаёт UUID, [VERIFY])"
+            "description": "Идентификатор заявки очереди (формат в документации не зафиксировано: мок отдаёт UUID, [VERIFY])"
           }
         }
       },
@@ -1820,7 +1820,7 @@
           "payload"
         ],
         "additionalProperties": true,
-        "description": "Результат заявки: requestId, transactionType, errorCode, errorType, details, payload (срез). pending-поля равны null до завершения обработки; externalId/userGroup/createdAt/updatedAt добавлены моком для сверки ([FORK]).",
+        "description": "Результат заявки: requestId, transactionType, errorCode, errorType, details, payload (документация). pending-поля равны null до завершения обработки; externalId/userGroup/createdAt/updatedAt добавлены моком для сверки ([FORK]).",
         "properties": {
           "requestId": {
             "type": "string"
@@ -1900,7 +1900,7 @@
       },
       "FiscalDocument": {
         "type": "object",
-        "description": "Фискальный документ (payload успешной заявки). Состав реквизитов результаты среза не фиксирует: имена полей — локальная договорённость мока [FORK], значения синтетические.",
+        "description": "Фискальный документ (payload успешной заявки). Состав реквизитов документация не фиксирует: имена полей — локальная договорённость мока [FORK], значения синтетические.",
         "properties": {
           "fiscalDocumentNumber": {
             "type": "integer",
@@ -1969,7 +1969,7 @@
       },
       "StateReportPayload": {
         "type": "object",
-        "description": "Payload команд смены и отчёта о текущем состоянии ([FORK]: срез фиксирует только факт StateCommandRequest).",
+        "description": "Payload команд смены и отчёта о текущем состоянии ([FORK]: документация фиксирует только факт StateCommandRequest).",
         "properties": {
           "kkmRegId": {
             "type": "string"
@@ -2065,7 +2065,7 @@
           "pageSize"
         ],
         "additionalProperties": true,
-        "description": "Envelope списка документов не зафиксирован срезом: форма {items,total,page,pageSize} — локальная договорённость мока [FORK].",
+        "description": "Envelope списка документов не зафиксирован документацией: форма {items,total,page,pageSize} — локальная договорённость мока [FORK].",
         "properties": {
           "items": {
             "type": "array",
@@ -2141,7 +2141,7 @@
       "CallbackEnvelope": {
         "type": "object",
         "additionalProperties": true,
-        "description": "Оболочка callback не зафиксирована публичным срезом: мок отправляет результат заявки как есть (те же поля, что и status) плюс externalId и userGroup, БЕЗ подписи и без checksum ([FORK]).",
+        "description": "Оболочка callback не зафиксирована публичной документацией: мок отправляет результат заявки как есть (те же поля, что и status) плюс externalId и userGroup, БЕЗ подписи и без checksum ([FORK]).",
         "properties": {
           "requestId": {
             "type": "string"
@@ -2197,7 +2197,7 @@
           "error"
         ],
         "additionalProperties": true,
-        "description": "[FORK] Схема тела HTTP-ошибки публичным срезом не зафиксирована: envelope {error:{code,text,layer}} + DX {field,hint,doc} — локальная договорённость мока, не production-каталог Первого ОФД.",
+        "description": "[FORK] Схема тела HTTP-ошибки публичной документацией не зафиксирована: envelope {error:{code,text,layer}} + DX {field,hint,doc} — локальная договорённость мока, не production-каталог Первого ОФД.",
         "properties": {
           "error": {
             "type": "object",
@@ -2226,7 +2226,7 @@
                   "not_found",
                   "system_error"
                 ],
-                "description": "[FORK] Локальный каталог HTTP-ошибок мока: публичный срез envelope и таблицу кодов не фиксирует."
+                "description": "[FORK] Локальный каталог HTTP-ошибок мока: публичная документация envelope и таблицу кодов не фиксирует."
               },
               "text": {
                 "type": "string"
@@ -2242,7 +2242,7 @@
           },
           "hint": {
             "type": "string",
-            "description": "Что сделать и на что смотрит срез (DX мока)"
+            "description": "Что сделать и на что смотреть (DX мока)"
           },
           "doc": {
             "type": "string",

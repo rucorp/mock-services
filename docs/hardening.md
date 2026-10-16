@@ -1,7 +1,7 @@
 © 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0
 SPDX-License-Identifier: Apache-2.0
 
-# Контейнерный харденинг и graceful shutdown (MS-04)
+# Контейнерный харденинг и graceful shutdown
 
 Все три compose-файла задают одинаковый набор харденинг-флагов каждому сервису:
 
@@ -46,7 +46,7 @@ SPDX-License-Identifier: Apache-2.0
 - Для осознанного сетевого доступа задайте bind отдельно: `MOCK_TBANK_BIND_IP=0.0.0.0 docker compose up`
 - Не используйте `0.0.0.0` на публичном хосте без `MOCK_OPERATOR_TOKEN`/`MOCK_ADMIN_TOKEN`, firewall и TLS — см. [SECURITY](../SECURITY.md).
 
-## Лимиты состояния (PD-02)
+## Лимиты состояния
 
 Все 10 адаптеров и `docker-compose.include.yml` поддерживают:
 
@@ -57,4 +57,4 @@ SPDX-License-Identifier: Apache-2.0
 
 Превышение глобального бюджета на записи/импорте → HTTP 400 + `errorCode` + `sandbox_state_budget_exceeded`, `kind: 'bytes'`, без частичного применения.
 
-См. [байтовые квоты ядра](../packages/core/README.md#байтовые-квоты-песочниц-pd-02-74) и env-таблицы сервисов.
+См. [байтовые квоты ядра](../packages/core/README.md#байтовые-квоты-песочниц) и env-таблицы сервисов.

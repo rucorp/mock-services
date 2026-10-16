@@ -3,7 +3,7 @@
   "info": {
     "title": "vtb-mock — ВТБ SMB E-commerce API (мок-стенд)",
     "version": "0.5.0",
-    "description": "Zero-dependency mock adapter for the SMB E-commerce API slice documented in документации ВТБ SMB E-commerce and документации ВТБ SMB E-commerce This is NOT legacy RBS. Business methods are JSON REST at /openapi/smb/efcp/e-commerce/v1/; auth is OAuth 2.0 client_credentials (POST /passport/oauth2/token, form-urlencoded) plus Authorization: Bearer and X-IBM-Client-Id (client_id lowercase, no @ext.vtb.ru) on business calls. amount.value is decimal RUB (10.56), not kopecks. Order statuses CREATED/PAID/REFUNDED/PARTIALLY_REFUNDED/CANCELED and operation statuses NEW/CONFIRMED/RECONCILED each live in their own status.value. Callback is unsigned POST JSON {\"type\":\"PAYMENT|REFUND\",\"object\":{...}} — the payload key quirk (Status for card payments, status for refunds) is preserved as-is; ACK code and retry schedule are not documented publicly, mock-local 2xx/retry policy is a [FORK]."
+    "description": "Zero-dependency mock adapter for the SMB E-commerce API documented in документации ВТБ SMB E-commerce This is NOT legacy RBS. Business methods are JSON REST at /openapi/smb/efcp/e-commerce/v1/; auth is OAuth 2.0 client_credentials (POST /passport/oauth2/token, form-urlencoded) plus Authorization: Bearer and X-IBM-Client-Id (client_id lowercase, no @ext.vtb.ru) on business calls. amount.value is decimal RUB (10.56), not kopecks. Order statuses CREATED/PAID/REFUNDED/PARTIALLY_REFUNDED/CANCELED and operation statuses NEW/CONFIRMED/RECONCILED each live in their own status.value. Callback is unsigned POST JSON {\"type\":\"PAYMENT|REFUND\",\"object\":{...}} — the payload key quirk (Status for card payments, status for refunds) is preserved as-is; ACK code and retry schedule are not documented publicly, mock-local 2xx/retry policy is a [FORK]."
   },
   "servers": [
     {
@@ -14,7 +14,7 @@
   "tags": [
     {
       "name": "SMB E-commerce",
-      "description": "JSON REST API среза SMB E-commerce интернет-эквайринга ВТБ (не legacy RBS)"
+      "description": "JSON REST API SMB E-commerce интернет-эквайринга ВТБ (не legacy RBS)"
     },
     {
       "name": "OAuth2",
@@ -49,7 +49,7 @@
         },
         "responses": {
           "2xx": {
-            "description": "Любой 2xx считается доставкой ([FORK]: ACK-код публичным SMB-срезом не зафиксирован)."
+            "description": "Любой 2xx считается доставкой ([FORK]: ACK-код публичной SMB-документацией не зафиксирован)."
           },
           "default": {
             "description": "Не-2xx: повтор по локальному графику мока; SSRF_BLOCKED — терминальный отказ."
@@ -65,7 +65,7 @@
           "OAuth2"
         ],
         "summary": "Выдать access_token (client_credentials)",
-        "description": "Form-urlencoded grant_type=client_credentials&client_id=...&client_secret=.... Ответ {access_token, token_type: Bearer, expires_in} (≈170 с по срезу); клиент планирует обновление по expires_in. Заголовки X-IBM-Client-Id и Merchant-Authorization сюда не отправляются.",
+        "description": "Form-urlencoded grant_type=client_credentials&client_id=...&client_secret=.... Ответ {access_token, token_type: Bearer, expires_in} (≈170 с по документации); клиент планирует обновление по expires_in. Заголовки X-IBM-Client-Id и Merchant-Authorization сюда не отправляются.",
         "requestBody": {
           "required": true,
           "content": {
@@ -158,7 +158,7 @@
           "SMB E-commerce"
         ],
         "summary": "Создать ордер с предавторизацией (twoStageParams)",
-        "description": "Доступность — отдельное разрешение банка; на стенде управляется MOCK_VTB_PREAUTH. twoStageParams обязателен (форма объекта в публичном срезе не зафиксирована — [VERIFY]).",
+        "description": "Доступность — отдельное разрешение банка; на стенде управляется MOCK_VTB_PREAUTH. twoStageParams обязателен (форма объекта в публичной документации не зафиксирована — [VERIFY]).",
         "parameters": [
           {
             "$ref": "#/components/parameters/XMockSandbox"
@@ -799,7 +799,7 @@
             ]
           }
         },
-        "description": "Сумма в десятичных рублях (amountUnits среза: value, не минимальные единицы)."
+        "description": "Сумма в десятичных рублях (amountUnits: value, не минимальные единицы)."
       },
       "TokenResponse": {
         "type": "object",
@@ -820,7 +820,7 @@
           },
           "expires_in": {
             "type": "integer",
-            "description": "≈170 с по срезу; клиент планирует обновление по этому значению."
+            "description": "≈170 с по документации; клиент планирует обновление по этому значению."
           }
         }
       },
@@ -857,7 +857,7 @@
           },
           "paymentCode": {
             "type": "string",
-            "description": "[VERIFY]: смысл paymentCode в публичном срезе не зафиксирован; мок генерирует короткий код."
+            "description": "[VERIFY]: смысл paymentCode в публичной документации не зафиксирован; мок генерирует короткий код."
           },
           "amount": {
             "$ref": "#/components/schemas/Amount"
@@ -981,7 +981,7 @@
           },
           "returnUrl": {
             "type": "string",
-            "description": "[FORK]: mock-расширение; в SMB-срезе поля returnUrl нет."
+            "description": "[FORK]: mock-расширение; в SMB-документации поля returnUrl нет."
           },
           "cancelReason": {
             "type": "string"
@@ -1083,11 +1083,11 @@
                 "$ref": "#/components/schemas/OperationStatusValue"
               }
             },
-            "description": "Карточный пример среза пишет Status (заглавная). Нормализация регистра ключа запрещена; СБП-пример (out of scope) использует status."
+            "description": "Карточный пример документации пишет Status (заглавная). Нормализация регистра ключа запрещена; СБП-пример (out of scope) использует status."
           }
         },
         "additionalProperties": true,
-        "description": "object PAYMENT-callback: поля карточного примера среза (paymentId, paymentCode, orderId, orderCode, createdAt, description, amount, paymentData, Status)."
+        "description": "object PAYMENT-callback: поля карточного примера документации (paymentId, paymentCode, orderId, orderCode, createdAt, description, amount, paymentData, Status)."
       },
       "RefundCallbackObject": {
         "type": "object",
@@ -1131,7 +1131,7 @@
                 "$ref": "#/components/schemas/OperationStatusValue"
               }
             },
-            "description": "Пример возврата в срезе использует status (строчные) — сохраняется как есть."
+            "description": "Пример возврата в документации использует status (строчные) — сохраняется как есть."
           }
         },
         "additionalProperties": true,
@@ -1155,7 +1155,7 @@
             "description": "PAYMENT — PaymentCallbackObject (Status); REFUND — RefundCallbackObject (status)."
           }
         },
-        "description": "SMB callback envelope: POST JSON без подписи/ACK-кода в публичном срезе."
+        "description": "SMB callback envelope: POST JSON без подписи/ACK-кода в публичной документации."
       },
       "ProviderError": {
         "type": "object",
@@ -1198,7 +1198,7 @@
             "type": "string"
           }
         },
-        "description": "[FORK] mock envelope: публичный SMB-срез фиксирует HTTP-статусы, но не полную схему тела бизнес-ошибок; OAuth-ошибки token endpoint следуют RFC 6749 §5.2. field/hint/doc — DX-расширение мока."
+        "description": "[FORK] mock envelope: публичная SMB-документация фиксирует HTTP-статусы, но не полную схему тела бизнес-ошибок; OAuth-ошибки token endpoint следуют RFC 6749 §5.2. field/hint/doc — DX-расширение мока."
       },
       "HealthResponse": {
         "type": "object",
@@ -1367,7 +1367,7 @@
                 "twoStageParams": {
                   "type": "object",
                   "additionalProperties": true,
-                  "description": "[VERIFY]: форма объекта в публичном срезе не зафиксирована."
+                  "description": "[VERIFY]: форма объекта в публичной документации не зафиксирована."
                 },
                 "expire": {
                   "type": "string",
