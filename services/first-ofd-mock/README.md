@@ -3,18 +3,16 @@ SPDX-License-Identifier: Apache-2.0
 
 # first-ofd-mock — облачная касса OKassa (Первый ОФД)
 
-Третий внешний касса-адаптер Stage 2 (issue #92, «добор kassa/OFD»), восьмой
-сервис стенда. Реализован по официальной документации OKassa API
-и тестового стенда Первого ОФД (срез 2026-10-11): тестовый контур `external-api-farm.1-ofd-test.ru`,
+Реализован по официальной документации OKassa API
+и тестового стенда Первого ОФД (по состоянию на 2026-10-11): тестовый контур `external-api-farm.1-ofd-test.ru`,
 `getToken` → `Authorization: Bearer`, **асинхронная очередь заявок на чек**
 `POST /api/external/queue/v1/transaction/{type}` → `requestId`, статусы
 `IN_PROGRESS`/`COMPLETED`/`ERROR`.
 
-Это **не Ferma (`kassa-mock`) и не АТОЛ**: другой транспорт, другая модель
-(очередь заявок, а не синхронный вызов), операции записаны как `INCOME`,
-`INCOME_RETURN`, `EXPENCE`, `EXPENCE_RETURN`. Тег ATOL Online V5 из тестового
-swagger Первого ОФД (`/api/external/possystem/v5/…`) — отдельный API и вне
-области адаптера.
+Модель — асинхронная очередь заявок, а не синхронный вызов; операции записаны
+как `INCOME`, `INCOME_RETURN`, `EXPENCE`, `EXPENCE_RETURN`. Тег ATOL Online V5
+из тестового swagger Первого ОФД (`/api/external/possystem/v5/…`) — отдельный
+API и вне области адаптера.
 
 ## Быстрый старт
 
@@ -66,12 +64,12 @@ fixtures или общий compose-файл.
 Токен живёт **86400** секунд (24 часа) на **виртуальных часах**:
 `POST /mock/time {"advance":"+25h"}` делает прежний токен невалидным, новый
 `getToken` — снова рабочим. Повторная выдача по умолчанию не аннулирует прежний
-токен (срез об этом молчит — `[VERIFY]`); режим `MOCK_FIRST_OFD_TOKEN_SINGLE=1`
+токен (документация об этом молчит — `[VERIFY]`); режим `MOCK_FIRST_OFD_TOKEN_SINGLE=1`
 включает аннулирование, чтобы проверить и такое поведение.
 
 **Квирк примера PDF.** Под заголовком успешного ответа `getToken` в PDF приведён
 объект `error` с кодом `0` и текстом «Неверный логин и пароль» (расхождение №4
-среза): по HTTP 200 нельзя однозначно судить об успехе. Мок не угадывает
+документации): по HTTP 200 нельзя однозначно судить об успехе. Мок не угадывает
 семантику — дефолтный успех отдаёт только `{token}`, а документированный квирк
 воспроизводится сценарием `getToken-error-quirk`.
 
@@ -93,7 +91,7 @@ fixtures или общий compose-файл.
 `INCOME`/`INCOME_RETURN`/`EXPENCE`/`EXPENCE_RETURN` и ставки НДС включая
 `VAT_22`/`VAT_22122` — как в схеме; написание `EXPENCE` мок не «исправляет», а
 вариант `EXPENSE` отклоняет с подсказкой. Правила сверки `totalSum` с позициями
-срез не описывает — это вне области, мок лишь предупреждает в логе.
+документация не описывает — это вне области, мок лишь предупреждает в логе.
 
 ## Callback
 
@@ -101,7 +99,7 @@ fixtures или общий compose-файл.
 `MOCK_FIRST_OFD_CALLBACK_URL` — fallback мока `[FORK]`), после обработки заявки
 уходит `POST` с JSON-телом результата плюс `externalId`/`userGroup`.
 
-**Публичный срез не закрепляет ни envelope, ни подпись, ни обязательный ACK, ни
+**Публичная документация не закрепляет ни envelope, ни подпись, ни обязательный ACK, ни
 расписание повторов** — мок не выдумывает HMAC/RSA: подписи нет вовсе. Тело
 уведомления, условие «любой 2xx = доставлено» и график повторов
 `MOCK_FIRST_OFD_CALLBACK_RETRY_MS` × `MOCK_FIRST_OFD_CALLBACK_MAX_ATTEMPTS`
@@ -129,7 +127,7 @@ fixtures или общий compose-файл.
 заявки ошибкой слоя ККТ/API), `getToken-error-quirk`, `webhook-drop`/
 `no-callback`, `webhook-duplicate`/`callback-duplicate`. Естественные правила
 стенда возвращают `SHIFT_ALREADY_OPEN`/`SHIFT_NOT_OPEN` при повторном
-открытии/закрытии смены (правила ККТ-слоя срезом не описаны — `[FORK]`).
+открытии/закрытии смены (правила ККТ-слоя документацией не описаны — `[FORK]`).
 `POST /mock/time` принимает `{"advance":"+5s"}` (обработка очереди),
 `{"advance":"+25h"}` (истечение токена) и `{"advance":"+60s"}` (retry callback).
 Сценарии, история, токены, журнал и состояние изолируются по `X-Mock-Sandbox`.
@@ -140,8 +138,7 @@ callback включена по умолчанию.
 (`X-Sandbox-Token`). Наблюдаемое ограничение стенда `[VERIFY]`: если в одном
 запросе есть и `Authorization: Bearer <токен очереди>`, и `X-Sandbox-Token`, ядро
 (RFC-001) читает owner-token из `Authorization` и отвечает 401 «знание ID не
-является доступом» — поведение общее для Bearer-адаптеров, воспроизводится и на
-`vtb-mock`. Для локальных сценариев внутри одной песочницы используйте
+является доступом». Для локальных сценариев внутри одной песочницы используйте
 `namespaces` (self-hosted дефолт) или `MOCK_TENANCY=off`.
 
 ## Переменные окружения
@@ -152,13 +149,13 @@ callback включена по умолчанию.
 | `MOCK_FIRST_OFD_LOGIN` | `firstofdmocktest` | синтетический `login` организации |
 | `MOCK_FIRST_OFD_PASS` | `11111111-2222-4333-8444-555555555555` | синтетический API-ключ UUID (`pass`) |
 | `MOCK_FIRST_OFD_TOKEN_TTL_SECS` | `86400` | срок токена в секундах (24 ч); поддерживает длительность (`24h`); TTL живёт на виртуальных часах |
-| `MOCK_FIRST_OFD_TOKEN_SINGLE` | `false` | `true` — повторный `getToken` аннулирует прежние токены (`[VERIFY]`-режим среза) |
+| `MOCK_FIRST_OFD_TOKEN_SINGLE` | `false` | `true` — повторный `getToken` аннулирует прежние токены (`[VERIFY]`-режим документации) |
 | `MOCK_FIRST_OFD_PROCESS_MS` | `2000` | задержка обработки заявки в очереди на виртуальных часах; поддерживает длительность (`1h`), `0` разрешён |
 | `MOCK_FIRST_OFD_PUBLIC_BASE_URL` | `http://localhost:${MOCK_FIRST_OFD_HOST_PORT:-3107}` | внешний base URL стенда (журнал, sandbox URL) |
 | `MOCK_FIRST_OFD_CALLBACK_URL` | пусто | fallback callback URL, когда заявка не передала `requestMetadata.callbackUrl` (`[FORK]` мока) |
 | `MOCK_FIRST_OFD_CALLBACK_RETRY_MS` | `60000` (`60s`) | интервал retry; число в миллисекундах либо длительность (`60s`, `1m`) |
 | `MOCK_FIRST_OFD_CALLBACK_MAX_ATTEMPTS` | `3` | максимум доставок; значение меньше 1 нормализуется в 1 |
-| `MOCK_FIRST_OFD_CALLBACK_HTTPS_ONLY` | `false` | `true` — отклонять `http://` в `callbackUrl` (строгое чтение PDF; расхождение №3 среза) |
+| `MOCK_FIRST_OFD_CALLBACK_HTTPS_ONLY` | `false` | `true` — отклонять `http://` в `callbackUrl` (строгое чтение PDF; расхождение №3 в документации) |
 | `MOCK_FIRST_OFD_USER_GROUPS` | `MOCKGROUP,firstofd-mock` | синтетический каталог `requestMetadata.userGroup`; `*` отключает проверку группы |
 | `MOCK_STATE_FILE` | пусто | сохранение доменного состояния/очереди между рестартами |
 | `MOCK_SANDBOX_FILE` | `<MOCK_STATE_FILE>.sandboxes.json` | база RFC-001 реестра песочниц |
@@ -168,7 +165,7 @@ callback включена по умолчанию.
 | `MOCK_ADMIN_TOKEN` / `MOCK_OPERATOR_TOKEN` | пусто | защита управляющих `/admin*` и `/mock/*` |
 | `MOCK_HOSTED` | `false` | `true` включает hosted fail-closed для управляющих поверхностей и default SSRF-защиту |
 | `MOCK_TENANCY` | авто | sandbox-модель RFC-001 (`off`, `namespaces`, `owned`) |
-| `MOCK_SANDBOX_TOKEN` | пусто | owner-token default sandbox в `owned`-модели; при `MOCK_HOSTED=1` без него `default` не обслуживается (MS-12) |
+| `MOCK_SANDBOX_TOKEN` | пусто | owner-token default sandbox в `owned`-модели; при `MOCK_HOSTED=1` без него `default` не обслуживается |
 | `MOCK_SANDBOX_TTL_MS` / `MOCK_SANDBOX_MAX` | `owned: 24h` / `owned: 100` | аренда и число песочниц |
 | `MOCK_SANDBOX_MAX_DOCUMENTS` | `owned: 5000` | квота заявок + документов + callback-записей на sandbox |
 | `MOCK_SANDBOX_RETENTION_MS` | `0` | retention терминальных callback-записей; заявки и документы не удаляются |
@@ -183,7 +180,7 @@ callback включена по умолчанию.
 - Гайд «за 10 минут»: [`docs/integration/first-ofd.md`](../../docs/integration/first-ofd.md).
 - Ограничения безопасности общие с проектом: [`SECURITY.md`](../../SECURITY.md).
 
-## Байтовые квоты состояния (PD-02)
+## Байтовые квоты состояния
 
 | Env | Дефолт | Назначение |
 | --- | --- | --- |
@@ -196,4 +193,4 @@ callback включена по умолчанию.
 импорте `/mock/state` → HTTP 400, `errorCode: 400`, `kind: 'bytes'`,
 `code: sandbox_state_budget_exceeded` / `sandbox_state_quota_exceeded`,
 с откатом отклонённого состояния. Правила/история/журнал остаются volatile.
-Подробности и границы — [документация ядра](../../packages/core/README.md#байтовые-квоты-песочниц-pd-02-74).
+Подробности и границы — [документация ядра](../../packages/core/README.md#байтовые-квоты-песочниц).

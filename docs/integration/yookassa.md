@@ -133,7 +133,7 @@ curl -s -X POST http://localhost:3102/v3/refunds \
 ## 7. Ссылки
 
 - Контракт сервиса, env и `/mock/*`: [`services/yookassa-mock/README.md`](../../services/yookassa-mock/README.md)
-- OpenAPI 3.1: спеки у ЮKassa **нет намеренно** — публичный контракт `/v3` воспроизведён по официальной
+- OpenAPI 3.1: отдельной спецификации у сервиса нет — публичный контракт `/v3` воспроизведён по официальной
   документации, см. раздел «OpenAPI» в [`services/yookassa-mock/README.md`](../../services/yookassa-mock/README.md)
-- Манифеста `protocols/*.json` у сервиса тоже нет: `npm run check:drift` его не проверяет (см. `AGENTS.md` §3)
+- Манифеста `protocols/*.json` у сервиса нет
 - Общая инфраструктура адаптеров (часы, песочницы, вебхуки, SSRF): [`packages/core/README.md`](../../packages/core/README.md)

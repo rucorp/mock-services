@@ -3,8 +3,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # sber-mock — Сбербанк Ecom REST v1.1.11.1
 
-Третий внешний банк-адаптер Stage 2 (issue #81). Реализован по официальной
-документации Сбербанк Ecom REST и callback/тестового контура.
+Реализован по официальной документации Сбербанк Ecom REST.
 Это новый Ecom JSON API, не legacy Secure Payments: `POST
 /ecomm/gw/partner/api/v1/*.do`, `userName`/`password` в теле каждого вызова,
 регистрация → `formUrl` → hosted-форма/ACS → серверная сверка
@@ -42,7 +41,7 @@ Node ≥ 18, zero npm dependencies. Синтетические дефолты �
 | `/mock/time`, `/mock/scenarios`, `/mock/state`, `/mock/reset` | виртуальные часы, хаос/сценарии и состояние песочницы |
 | `/sandboxes*`, `/mock/sandboxes` | RFC-001 sandbox/control-plane API |
 
-`paymentOrder.do` не реализован: это прямой карточный server-to-server флоу, доступность которого требует merchant-разрешения; выносить его за scope без владельца нельзя. SberPay/SBP Sandbox, СБП и `orderBundle` также не входят в адаптер.
+`paymentOrder.do` не реализован: это прямой карточный server-to-server флоу, доступность которого требует merchant-разрешения. SberPay/SBP Sandbox, СБП и `orderBundle` также не входят в адаптер.
 
 REST-тело — JSON UTF-8 (`Content-Type: application/json`), валюта только RUB
 `643`, суммы — целые копейки. Merchant `orderNumber` уникален в рамках
@@ -79,14 +78,14 @@ REST-тело — JSON UTF-8 (`Content-Type: application/json`), валюта т
 415/500 применяется к транспортным/инфраструктурным ошибкам. Числа 1…6 и
 частные соответствия (дубликат, авторизация, неизвестный заказ, неверное
 состояние, сумма/валидация, системная ошибка) — **[VERIFY]/[FORK]**: локальный
-срез Ecom фиксирует envelope и отдельные описанные ошибки, но не полный
+документация Ecom фиксирует envelope и отдельные описанные ошибки, но не полный
 merchant-каталог `errorCode`. Не используйте эти маппинги как обещание
 production-шлюза; перед точным контрактным тестом их нужно сверить с
-подключённым Ecom merchant и владельцем проекта.
+подключённым Ecom merchant.
 
 `orderStatus` 0…6 документирован в reference для общего семейства Ecom/RBS.
 Повторяемые test-card action codes 101 и 116 — сценарии официальных тестовых
-карт. Всё прочее, где публичный Ecom-срез неполон, остаётся явным мок-форком,
+карт. Всё прочее, где публичная Ecom-документация неполна, остаётся явным мок-форком,
 а не добавляется под видом подтверждённого протокола.
 
 ## Сценарии, часы и диагностика
@@ -126,7 +125,7 @@ hosted-режиме SSRF-проверка исходящих callback включ
 | `MOCK_ADMIN_TOKEN` / `MOCK_OPERATOR_TOKEN` | пусто | защита управляющих `/admin*` и `/mock/*` |
 | `MOCK_HOSTED` | `false` | `true` включает hosted fail-closed для управляющих поверхностей и default SSRF-защиту |
 | `MOCK_TENANCY` | авто | sandbox-модель RFC-001 (`off`, `namespaces`, `owned`) |
-| `MOCK_SANDBOX_TOKEN` | пусто | owner-token default sandbox в `owned`-модели; при `MOCK_HOSTED=1` без него `default` не обслуживается (MS-12) |
+| `MOCK_SANDBOX_TOKEN` | пусто | owner-token default sandbox в `owned`-модели; при `MOCK_HOSTED=1` без него `default` не обслуживается |
 | `MOCK_SANDBOX_TTL_MS` / `MOCK_SANDBOX_MAX` | `owned: 24h` / `owned: 100` | аренда и число песочниц; shared sandbox-настройки ядра |
 | `MOCK_SANDBOX_MAX_DOCUMENTS` | `owned: 5000` | квота заказов + callback-документов на sandbox |
 | `MOCK_SANDBOX_RETENTION_MS` | `0` | retention терминальных callback-записей; заказы не удаляются |
@@ -140,7 +139,7 @@ hosted-режиме SSRF-проверка исходящих callback включ
 - Selftest (callback/retry/SSRF, RFC-001 и доменные ветки): `npm run test:sber`.
 - Ограничения безопасности общие с проектом: [`SECURITY.md`](../../SECURITY.md).
 
-## Байтовые квоты состояния (PD-02)
+## Байтовые квоты состояния
 
 | Env | Дефолт | Назначение |
 | --- | --- | --- |
@@ -153,4 +152,4 @@ hosted-режиме SSRF-проверка исходящих callback включ
 импорте `/mock/state` → HTTP 400, `errorCode: 400`, `kind: 'bytes'`,
 `code: sandbox_state_budget_exceeded` / `sandbox_state_quota_exceeded`,
 с откатом отклонённого состояния. Правила/история/журнал остаются volatile.
-Подробности и границы — [документация ядра](../../packages/core/README.md#байтовые-квоты-песочниц-pd-02-74).
+Подробности и границы — [документация ядра](../../packages/core/README.md#байтовые-квоты-песочниц).

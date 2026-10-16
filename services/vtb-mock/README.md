@@ -3,8 +3,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # vtb-mock — ВТБ SMB E-commerce API
 
-Четвёртый внешний банк-адаптер Stage 2 (issue #87). Реализован по официальной
-документации SMB E-commerce API и callback/тестирования ВТБ.
+Реализован по официальной документации SMB E-commerce API ВТБ.
 Это SMB API интернет-эквайринга, **не legacy RBS** (`vtb.rbsuat.com`, `*.do`):
 JSON REST base `/openapi/smb/efcp/e-commerce/v1/`, OAuth 2.0
 `client_credentials` (POST `/passport/oauth2/token`) → `Authorization: Bearer` +
@@ -69,7 +68,7 @@ Legacy RBS (`vtb.rbsuat.com`, `/payment/rest/`, `register.do`/`paymentorder.do`,
 `NEW/CONFIRMED/RECONCILED` — не смешивать. Ордер по умолчанию живёт 20 минут
 (`expire` возвращается с timezone и миллисекундами; своё — при создании);
 по истечении незакрытый ордер переходит в `CANCELED` ([VERIFY]: явного статуса
-истечения в срезе нет). Повтор `orderId` в `POST /orders` идемпотентен и
+истечения в документации нет). Повтор `orderId` в `POST /orders` идемпотентен и
 возвращает существующий ордер; повторный `refundId` — provider-shaped ошибка
 `duplicate_refund_id` (409) с DX-подсказкой.
 
@@ -97,7 +96,7 @@ Legacy RBS (`vtb.rbsuat.com`, `/payment/rest/`, `register.do`/`paymentorder.do`,
 `invalid_token`, `invalid_client`, `invalid_amount`, `order_not_found`,
 `payment_not_found`, `refund_not_found`, `duplicate_refund_id`,
 `amount_exceeds_limit`, `invalid_order_state`, `preauth_disabled` и др.
-Публичный SMB-срез фиксирует HTTP-статусы и примеры, но **не полную схему тела
+Публичная SMB-документация фиксирует HTTP-статусы и примеры, но **не полную схему тела
 бизнес-ошибок** — envelope и словарь кодов это явный **[FORK]** мока (по образцу
 errorCode-форка Сбера), а не production-каталог ВТБ. Точно так же [FORK]/[VERIFY]
 являются: синтетические карты взамен истёкшей официальной (`4111 1111 1111 1111`,
@@ -140,7 +139,7 @@ SSRF-проверка исходящих callback включена по умол
 | `MOCK_ADMIN_TOKEN` / `MOCK_OPERATOR_TOKEN` | пусто | защита управляющих `/admin*` и `/mock/*` |
 | `MOCK_HOSTED` | `false` | `true` включает hosted fail-closed для управляющих поверхностей и default SSRF-защиту |
 | `MOCK_TENANCY` | авто | sandbox-модель RFC-001 (`off`, `namespaces`, `owned`) |
-| `MOCK_SANDBOX_TOKEN` | пусто | owner-token default sandbox в `owned`-модели; при `MOCK_HOSTED=1` без него `default` не обслуживается (MS-12) |
+| `MOCK_SANDBOX_TOKEN` | пусто | owner-token default sandbox в `owned`-модели; при `MOCK_HOSTED=1` без него `default` не обслуживается |
 | `MOCK_SANDBOX_TTL_MS` / `MOCK_SANDBOX_MAX` | `owned: 24h` / `owned: 100` | аренда и число песочниц |
 | `MOCK_SANDBOX_MAX_DOCUMENTS` | `owned: 5000` | квота ордеров + возвратов + callback-документов на sandbox |
 | `MOCK_SANDBOX_RETENTION_MS` | `0` | retention терминальных callback-записей; ордеры не удаляются |
@@ -154,7 +153,7 @@ SSRF-проверка исходящих callback включена по умол
 - Selftest (OAuth/TTL, orders/refunds/preauth, Status-status callback, SSRF, RFC-001): `npm run test:vtb`.
 - Ограничения безопасности общие с проектом: [`SECURITY.md`](../../SECURITY.md).
 
-## Байтовые квоты состояния (PD-02)
+## Байтовые квоты состояния
 
 | Env | Дефолт | Назначение |
 | --- | --- | --- |
@@ -167,4 +166,4 @@ SSRF-проверка исходящих callback включена по умол
 импорте `/mock/state` → HTTP 400, `errorCode: 400`, `kind: 'bytes'`,
 `code: sandbox_state_budget_exceeded` / `sandbox_state_quota_exceeded`,
 с откатом отклонённого состояния. Правила/история/журнал остаются volatile.
-Подробности и границы — [документация ядра](../../packages/core/README.md#байтовые-квоты-песочниц-pd-02-74).
+Подробности и границы — [документация ядра](../../packages/core/README.md#байтовые-квоты-песочниц).

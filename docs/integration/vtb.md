@@ -10,10 +10,7 @@ SPDX-License-Identifier: Apache-2.0
 `vtb.rbsuat.com` (`/payment/rest/`, `register.do`, `userName/password`) —
 другая система и не является альтернативной базой для этого API.
 
-> **Не drop-in для Т-Банка, Сбера или Альфы.** У ВТБ свой OAuth token endpoint,
-> заголовок `X-IBM-Client-Id`, рублёвый объект суммы `{value, code}` и отдельные
-> сущности order/payment/refund со своими уровнями `status.value`. СБП-QR стенды
-> (`qr-efcp.bankingapi.ru`) в эту ветку не входят.
+СБП-QR (`qr-efcp.bankingapi.ru`) в область этого адаптера не входит.
 
 ## 1. Запустить
 
@@ -111,11 +108,11 @@ curl -sS -X POST http://localhost:3106/openapi/smb/efcp/e-commerce/v1/orders \
 Перенаправьте браузер на `payUrl`. Ордер живёт **1200** секунд (20 минут) —
 поле `expire` возвращается с timezone и миллисекундами; своё значение можно
 задать при создании (ISO 8601 с timezone). Поле `returnUrl` — mock-расширение
-[FORK]: в публичном SMB-срезе его нет, после оплаты мок возвращает браузер
+[FORK]: в публичной SMB-документации его нет, после оплаты мок возвращает браузер
 именно туда.
 
 **Официальная тестовая карта ВТБ (`4111 1111 1111 1111`, `12/24`) истекла** до
-даты среза и непригодна для проверки; legacy-карта `4000 0011 1111 1118`
+даты документации и непригодна для проверки; legacy-карта `4000 0011 1111 1118`
 относится только к старой REST-песочнице `vtb.rbsuat.com`. На форме мока —
 синтетические [FORK]-карты (успех `4242…0002`-подобные пресеты, отказ,
 недостаточно средств, просроченная карта); PAN не сохраняется — только маска.
@@ -137,7 +134,7 @@ curl -sS http://localhost:3106/openapi/smb/efcp/e-commerce/v1/orders/shop-order-
 | ордер | `CANCELED` | `cancel` или истечение 20-минутного TTL |
 | операция (платёж/возврат) | `NEW` | платёж создан; для preauth — сумма удержана |
 | операция | `CONFIRMED` | операция подтверждена (оплата/complete/возврат) |
-| операция | `RECONCILED` | операция сверена (в карточном срезе — через сценарий `reconciled`) |
+| операция | `RECONCILED` | операция сверена (в карточном примере документации — через сценарий `reconciled`) |
 
 Статусы ордера и операции **не смешиваются**: у платежа в блоке `payments` и
 возврата в `refunds` — свой `status.value`. Источник истины — серверный
@@ -147,7 +144,7 @@ redirect браузера и не уведомление.
 ## 6. Preauth, complete и cancel
 
 `POST /orders/preauth` создаёт ордер с предавторизацией: обязателен объект
-`twoStageParams` (его форма в публичном срезе не зафиксирована — [VERIFY];
+`twoStageParams` (его форма в публичной документации не зафиксирована — [VERIFY];
 мок сохраняет объект как есть). Доступность — «отдельное разрешение банка»:
 на стенде её даёт `MOCK_VTB_PREAUTH=true`, без флага — `preauth_disabled`.
 После оплаты такого ордера `payment.status.value=NEW` (холд), ордер остаётся
@@ -164,7 +161,7 @@ curl -sS -X POST http://localhost:3106/openapi/smb/efcp/e-commerce/v1/orders/com
 допустимо, остаток холда снимается); превышение — `amount_exceeds_limit` (409).
 `POST /orders/{orderId}/cancel` с опциональным `cancelReason` отменяет
 неоплаченный ордер или preauth до `complete`; отмена холда помечает платёж
-`voided` — статуса reversal в словаре операций среза нет [VERIFY]. После оплаты
+`voided` — статуса reversal в словаре операций документации нет [VERIFY]. После оплаты
 отмена недоступна — используйте `/refunds`.
 
 ## 7. Возвраты
@@ -181,7 +178,7 @@ replay** — в отличие от `orderId` в `POST /orders`. Статус в
 Callback URL — один на ресурс: мерчант сообщает его представителю банка; в моке
 это `MOCK_VTB_CALLBACK_URL`. Шлюз отправляет `POST` с JSON-оболочкой
 `{"type":"PAYMENT|REFUND","object":{...}}`. Тело платежа — поля карточного
-примера среза (`paymentId`, `paymentCode`, `orderId`, `orderCode`, `createdAt`,
+примера документации (`paymentId`, `paymentCode`, `orderId`, `orderCode`, `createdAt`,
 `description`, `amount`, `paymentData`), тело возврата — `refundId`, `paymentId`,
 `paymentCode`, `orderId`, `orderCode`, `createdAt`, `amount`.
 
@@ -256,14 +253,13 @@ Callback URL — один на ресурс: мерчант сообщает е�
 
 ## 11. Известная неопределённость
 
-Публичный SMB-срез фиксирует HTTP-транспорт и примеры, но не полную схему тел
+Публичная SMB-документация фиксирует HTTP-транспорт и примеры, но не полную схему тел
 бизнес-ошибок, форму `twoStageParams`/`paymentData`/`paymentCode` и точный
 формат статуса внутри callback (`{"value": …}` против строки). Envelope ошибок
 `{error, error_description, field, hint, doc}`, `[FORK]`-карты, `returnUrl`,
 `voided`-холд и переход TTL → `CANCELED` — явно помечённая реализация мока
 (по образцу errorCode-форка Сбера), а не заявление о production-контракте ВТБ.
-Перед переносом в production сверяйте спецификацию подключённого merchant и
-согласуйте отличия с владельцем проекта.
+Перед переносом в production сверяйте спецификацию подключённого merchant.
 
 ## 12. Ссылки
 

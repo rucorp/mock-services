@@ -6,13 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 Мок воспроизводит шлюз **Сбербанк Ecom REST v1.1.11.1** по официальной документации REST API, callbacks и тестовых карт.
 Это не legacy Secure Payments API: transport — JSON `POST
 /ecomm/gw/partner/api/v1/*.do`, callback — JSON `POST` без checksum или иной
-подписи. Ветка намеренно не включает `paymentOrder.do` (нужно разрешение
-merchant), SberPay/SBP Sandbox, `orderBundle` и новый банк.
-
-> **Не drop-in для Альфы, Т-Банка или Secure Payments.** У Сбера Ecom свой
-> путь API, JSON-тела, `userName`/`password`, числовой `orderStatus` и
-> unsigned JSON callback. Старый Secure Payments callback с контрольной
-> суммой сюда не переносится.
+подписи. В область адаптера не входят `paymentOrder.do` (нужно разрешение
+merchant), SberPay/SBP Sandbox и `orderBundle`.
 
 ## 1. Запустить
 
@@ -102,7 +97,7 @@ curl -sS -X POST http://localhost:3105/ecomm/gw/partner/api/v1/getOrderStatusExt
   }'
 ```
 
-| `orderStatus` | Состояние в документированном срезе | Сценарий стенда |
+| `orderStatus` | Состояние в документации | Сценарий стенда |
 | ---: | --- | --- |
 | `0` | заказ зарегистрирован, не оплачен | до оплаты; повторяемые ошибки до исчерпания попыток |
 | `1` | сумма захолдирована | успешная оплата `registerPreAuth.do` |
@@ -157,11 +152,10 @@ curl -sS -X POST http://localhost:3105/ecomm/gw/partner/api/v1/deposit.do \
 время: `POST /mock/time` с `{"advance":"+60s"}` запускает ожидаемый retry без
 минутной задержки.
 
-Ecom callback из reference **не содержит подписи или checksum**. Не переносите
-сюда HMAC/проверку старого Secure Payments или подпись Т-Банка. Любой callback
-может быть подделан: используйте событие как сигнал и сверьте заказ REST-методом.
-Поведение доставки соответствует локальному Ecom-конспекту; опциональные
-режимы дублирования и drop существуют только как сценарии мока.
+Ecom callback **не содержит подписи или checksum** (legacy Secure Payments
+checksum сюда не применяется). Любой callback может быть подделан: используйте
+событие как сигнал и сверьте заказ REST-методом. Режимы дублирования и drop
+уведомлений существуют только как сценарии мока.
 
 ## 7. Песочницы, сценарии и OpenAPI
 
@@ -196,12 +190,12 @@ Ecom callback из reference **не содержит подписи или check
 
 ## 9. Известная неопределённость
 
-Локальные reference-срезы не фиксируют полный merchant-specific каталог
+Локальная документация не фиксируют полный merchant-specific каталог
 `errorCode` и полную схему всех ответных полей `getOrderStatusExtended.do`.
 Коды ошибок 1…6, отдельные mock diagnostic fields и агрегированные суммы —
 явно помеченная [VERIFY]/[FORK] реализация мока, а не заявление о точной
 таблице production Сбербанка. Перед переносом в production сверяйте исходную спецификацию
-подключённого merchant и согласуйте отличия с владельцем проекта.
+подключённого merchant.
 
 ## 10. Ссылки
 

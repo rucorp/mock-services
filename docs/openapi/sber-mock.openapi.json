@@ -3,13 +3,13 @@
   "info": {
     "title": "sber-mock — Сбербанк Ecom REST v1.1.11.1 (мок-стенд)",
     "version": "0.5.0",
-    "description": "Zero-dependency mock adapter for the Ecom JSON REST slice documented in документации Сбербанк Ecom and документации Сбербанк Ecom This is not legacy Secure Payments. Business methods are POST JSON at /ecomm/gw/partner/api/v1/*.do. errorCode=0 means the REST call was processed, not that payment succeeded; reconcile the numeric orderStatus with getOrderStatusExtended.do. Ecom callback is unsigned JSON POST and accepts exactly HTTP 200 as ACK."
+    "description": "Zero-dependency mock adapter for the Ecom JSON REST API documented in документации Сбербанк Ecom This is not legacy Secure Payments. Business methods are POST JSON at /ecomm/gw/partner/api/v1/*.do. errorCode=0 means the REST call was processed, not that payment succeeded; reconcile the numeric orderStatus with getOrderStatusExtended.do. Ecom callback is unsigned JSON POST and accepts exactly HTTP 200 as ACK."
   },
   "servers": [
     { "url": "http://localhost:3105", "description": "Локальный Sber Ecom mock" }
   ],
   "tags": [
-    { "name": "Ecom REST", "description": "JSON REST API совместимого среза Сбербанк Ecom" },
+    { "name": "Ecom REST", "description": "JSON REST API Сбербанк Ecom" },
     { "name": "Hosted form", "description": "Тестовая форма оплаты и эмуляция ACS" },
     { "name": "Mock control", "description": "Часы, сценарии, sandbox и административная поверхность мока" }
   ],
@@ -61,7 +61,7 @@
             "properties": {
               "orderNumber": { "type": "string", "minLength": 1, "maxLength": 128, "description": "Уникальный номер заказа в пределах песочницы; 128 — локальный mock safety cap, не утверждение о лимите банка." },
               "amount": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "string", "pattern": "^[0-9]+$" }], "description": "Целая положительная сумма в копейках." },
-              "currency": { "oneOf": [{ "const": 643 }, { "const": "643" }], "default": 643, "description": "В этом срезе поддерживается RUB (643)." },
+              "currency": { "oneOf": [{ "const": 643 }, { "const": "643" }], "default": 643, "description": "Поддерживается RUB (643)." },
               "returnUrl": { "type": "string", "format": "uri", "description": "Абсолютный URL возврата покупателя." },
               "failUrl": { "type": "string", "format": "uri", "description": "Необязательный абсолютный URL для отказного результата." },
               "description": { "type": "string", "maxLength": 512 },

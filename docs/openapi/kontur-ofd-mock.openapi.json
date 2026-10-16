@@ -4,7 +4,7 @@
   "info": {
     "title": "kontur-ofd-mock — Контур.ОФД read/reconciliation",
     "version": "0.6.0",
-    "description": "Public slice 2026-10-11. Read-only fiscal data; no receipt writing or callbacks. [FORK] offset canonical; provider test schema unavailable. Credentials env-only or generated owned sandbox. Synthetic fixtures, UTC inclusive periods and error messages are mock-local. Amounts: integer kopeks. Sid TTL default 2592000 seconds on virtual clock. No Cookie auth support."
+    "description": "Public documentation as of 2026-10-11. Read-only fiscal data; no receipt writing or callbacks. [FORK] offset canonical; provider test schema unavailable. Credentials env-only or generated owned sandbox. Synthetic fixtures, UTC inclusive periods and error messages are mock-local. Amounts: integer kopeks. Sid TTL default 2592000 seconds on virtual clock. No Cookie auth support."
   },
   "servers": [
     {

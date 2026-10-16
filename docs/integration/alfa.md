@@ -12,15 +12,6 @@ callback-уведомления **HTTP GET** с симметричным checksu
 Источники: официальные разделы — [REST-интерфейс](https://alfabank.ru/sme/payservice/internet-acquiring/docs/connection-options/api/rest/),
 [тестовые карты](https://alfabank.ru/sme/payservice/internet-acquiring/docs/connection-options/api/test-cards/).
 
-> **Это не Т-Банк и не drop-in.** Маршруты — `POST /payment/rest/*.do` с
-> `application/x-www-form-urlencoded` (у Т-Банка JSON `POST /v2/*`), креды —
-> `userName`/`password` в каждом запросе (у Т-Банка `TerminalKey` + подпись
-> `Token`), ответ регистрации — `{orderId, formUrl}` с `errorCode`/`errorMessage`
-> (у Т-Банка `{Success, Status, PaymentId}`), callback — **GET с query**
-> (у Т-Банка подписанный POST), статусы — числовые `orderStatus 0…6`
-> (у Т-Банка строковые `NEW/AUTHORIZED/…`). Перенос кода между банками
-> неизбежен; мок подсказывает расхождения в `hint`.
-
 **Вне области стенда:** асимметричный режим checksum (официальный PDF
 противоречив: описание говорит SHA-256, примеры `SHA512withRSA` /
 `OPENSSL_ALGO_SHA512` — **SHA-512**; режим подтверждается банком, поэтому не

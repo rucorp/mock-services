@@ -59,7 +59,7 @@ SPDX-License-Identifier: Apache-2.0
 ```bash
 # 1. Все 10 сервисов целиком
 docker compose up            # :3100 tbank, :3101 kassa, :3102 yookassa, :3103 atol, :3104 alfa, :3105 sber, :3106 vtb, :3107 first-ofd, :3108 kontur-ofd, :3109 taxcom
-# Харденинг (MS-04): read-only rootfs, tmpfs /tmp, cap_drop ALL, no-new-privileges, pids_limit 256, init
+# Харденинг: read-only rootfs, tmpfs /tmp, cap_drop ALL, no-new-privileges, pids_limit 256, init
 
 # Порты по умолчанию слушают 127.0.0.1. Для сети:
 MOCK_TBANK_BIND_IP=0.0.0.0 docker compose up
@@ -214,14 +214,13 @@ Issues и PR приветствуются: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Ограничения и лимиты
 
-Общий бюджет состояния песочниц (PD-02): `MOCK_SANDBOX_MAX_STATE_BYTES` (per-sandbox,
+Общий бюджет состояния песочниц: `MOCK_SANDBOX_MAX_STATE_BYTES` (per-sandbox,
 дефолт 8 МиБ при квоте документов) и `MOCK_SANDBOX_GLOBAL_MAX_STATE_BYTES` (все песочницы,
 дефолт 64 МиБ). `0` выключает лимит. Превышение → 400 + `sandbox_state_budget_exceeded`.
-См. [ядро](packages/core/README.md#байтовые-квоты-песочниц-pd-02-74) и env-таблицы сервисов.
+См. [ядро](packages/core/README.md#байтовые-квоты-песочниц) и env-таблицы сервисов.
 
 ## Лицензия
 
 Apache-2.0 (см. `LICENSE`, `NOTICE`). Протоколы провайдеров воспроизводятся по их
 публичной документации; товарные знаки принадлежат их владельцам.
 
-<!-- Внутренние документы: закрытый репозиторий команды `mock-services-docs` — см. docs/overview.md -->
