@@ -1,7 +1,7 @@
 {
   "$comment": "© 2026 ООО «Аксиома» ИНН:7842223709 · mock-services · Apache-2.0; SPDX-License-Identifier: Apache-2.0",
   "name": "mock-services",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "description": "Mock bank & fiscal (OFD) services for testing payment integrations against official provider protocols",
   "scripts": {
@@ -23,6 +23,7 @@
     "test:first-ofd": "node services/first-ofd-mock/selftest.js",
     "test:compose": "node scripts/compose-selftest.js",
     "check:drift": "node scripts/check-protocol-drift.js",
+    "release:check": "node scripts/release-check.js",
     "start:tbank": "node services/tbank-mock/server.js",
     "start:kassa": "node services/kassa-mock/server.js",
     "start:yookassa": "node services/yookassa-mock/server.js",
