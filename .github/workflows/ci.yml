@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 name: CI
 
-# Джобы `test` и `docker` выбирают раннер переменной репозитория `CI_RUNNER`
-# (self-hosted раннер организации, лейбл задаёт владелец переменной) с fallback
-# на закреплённый `ubuntu-24.04` (страховка от авто-миграции `ubuntu-latest` →
-# Ubuntu 26.04; апгрейд — отдельным PR, MS-40). Джоб `docker` публикует хостовые
+# Джобы `test` и `docker` для pull request и push в `main` берут раннер из
+# переменной репозитория `CI_RUNNER` (self-hosted раннер организации, лейбл
+# задаёт владелец переменной) с fallback на закреплённый `ubuntu-24.04`
+# (страховка от авто-миграции `ubuntu-latest` → Ubuntu 26.04; апгрейд —
+# отдельным PR, MS-40). Для тегов `v*` раннер форсируется на `ubuntu-24.04`
+# (GitHub-hosted) — независимый пруф валидности релиза. Джоб `docker` публикует хостовые
 # порты, ремапнутые в свободный диапазон 3910–3917 (см. env джоба): на
 # разделяемом self-hosted хосте порты 3100–3101 могут быть заняты, а публичный
 # URL следует за host-портом (MS-22).
@@ -24,7 +26,9 @@ on:
 
 jobs:
   test:
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+    # Релизный гейт (тег v*) — на GitHub-hosted: независимый от self-hosted прогон
+    # как пруф валидности релиза. PR и push в main — на CI_RUNNER (self-hosted).
+    runs-on: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) && 'ubuntu-24.04' || vars.CI_RUNNER || 'ubuntu-24.04' }}
     strategy:
       fail-fast: false
       matrix:
@@ -75,7 +79,7 @@ jobs:
 
   docker:
     if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) && 'ubuntu-24.04' || vars.CI_RUNNER || 'ubuntu-24.04' }}
     env:
       # Порт-ремап в свободный диапазон: на разделяемом self-hosted хосте
       # порты 3100–3107 могут быть заняты. Публичные URL следуют за
