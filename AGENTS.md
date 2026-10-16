@@ -63,7 +63,7 @@ CI ([`.github/workflows/ci.yml:69-184`](.github/workflows/ci.yml)); локаль
 | OpenAPI 3.1 | `docs/openapi/*.openapi.json` | спецификации сервисов |
 | Проверки | `scripts/*.js` | `check-protocol-drift.js`, `check-docs-links.js`, `check-guides.js`, `check-tables.js`, `check-env-parity.js`, `check-copyright.js`, `compose-selftest.js`, `docker-smoke.js` |
 | Контейнеры | `Dockerfile`, `docker-compose.yml`, `docker-compose.include.yml` | include — artifact потребителей, менять осторожно |
-| Документация продукта | `README.md`, `SECURITY.md`, `CHANGELOG.md`, `docs/{overview.md,capabilities.md,hardening.md,roadmap.md,integration,rfc,openapi}` | публичная документация самодостаточна и не ссылается на документы вне репозитория |
+| Документация продукта | `README.md`, `SECURITY.md`, `CHANGELOG.md`, `docs/{overview.md,capabilities.md,hardening.md,integration,openapi}` | публичная документация самодостаточна и не ссылается на документы вне репозитория |
 | Сайт документации | вне репозитория: <https://axiiom.ru/mock-services/> | в этом репозитории site-инфраструктуры нет; правки документации не требуют действий с сайтом |
 
 ## 4. Формальные требования к файлам
@@ -149,11 +149,11 @@ README сервиса, тремя compose-файлами и `SECURITY.md`, а т
 | Задача | Читать |
 |---|---|
 | любая правка кода | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
-| безопасность/hosted | [`SECURITY.md`](SECURITY.md), [`docs/rfc/RFC-001-multi-tenant-sandboxes.md`](docs/rfc/RFC-001-multi-tenant-sandboxes.md) |
+| безопасность/hosted | [`SECURITY.md`](SECURITY.md) (модель угроз, §«Изоляция песочниц»), [`packages/core/README.md`](packages/core/README.md) |
 | протокол провайдера | официальная документация провайдера (URL + дата сверки), `protocols/<provider>.json`, `docs/integration/<provider>.md`, README сервиса |
 | очередь доработок | GitHub Issues этого репозитория |
 
 Публичная часть репозитория самодостаточна: для работы достаточно README,
-гайдов «за 10 минут», README сервисов, RFC-001 и SECURITY. Документы вне
+гайдов «за 10 минут», README сервисов и SECURITY. Документы вне
 этого репозитория для вклада не требуются и в публичной документации не
 упоминаются.

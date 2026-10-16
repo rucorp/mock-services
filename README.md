@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 платёжную и фискальную интеграцию **до договора с провайдером** — с честными
 схемами, кодами ошибок, сценариями отказов и подсказками «что не так в запросе».
 
-> Статус: **alpha (0.8.0)**. См. [дорожную карту](docs/roadmap.md).
+> Статус: **alpha (0.8.0)**.
 > Каждый адаптер следует клиентскому контракту провайдера, но одной смены URL
 > для перехода в production недостаточно — проверьте конфигурацию и безопасность.
 
@@ -36,11 +36,9 @@ SPDX-License-Identifier: Apache-2.0
 | Карта документов и быстрый старт | [`docs/overview.md`](docs/overview.md) |
 | Интеграция «за 10 минут» | [`docs/integration/`](docs/integration/) |
 | Что уже умеет мок (матрица) | [`docs/capabilities.md`](docs/capabilities.md) |
-| Дорожная карта | [`docs/roadmap.md`](docs/roadmap.md) |
 | Контейнерный харденинг | [`docs/hardening.md`](docs/hardening.md) |
 | Контракт сервиса и env | [`services/<service>/README.md`](services/) |
 | OpenAPI 3.1 | [`docs/openapi/`](docs/openapi/) |
-| Проектные решения | [`docs/rfc/`](docs/rfc/) |
 | Контрибуция, безопасность, агенты | [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`SECURITY.md`](SECURITY.md) · [`AGENTS.md`](AGENTS.md) |
 | История изменений | [`CHANGELOG.md`](CHANGELOG.md) |
 
@@ -139,8 +137,6 @@ docs/
   overview.md            — карта документации и легенда VERIFY/FORK
   capabilities.md        — матрица возможностей по всем адаптерам
   hardening.md           — контейнерный харденинг и graceful shutdown
-  roadmap.md             — дорожная карта
-  rfc/                   — проектные решения (RFC-001 песочницы)
   integration/           — гайды «за 10 минут»
   openapi/               — OpenAPI 3.1 спецификации
 .github/workflows/ci.yml — CI: тесты Node 20/22/24 + docker (полный гейт — код и теги);
@@ -165,7 +161,7 @@ docker-compose.staging.yml — стенд одной командой (tbank + k
 Этапы 0–17: от ядра и DX до 10 внешних адаптеров (ЮKassa, АТОЛ, Альфа, Сбер, ВТБ,
 Первый ОФД, Контур.ОФД, Такском) + мульти-песочницы, часы, OpenAPI, drift-детектор.
 
-Подробно — в [docs/roadmap.md](docs/roadmap.md) и [CHANGELOG.md](CHANGELOG.md).
+История по версиям — в [CHANGELOG.md](CHANGELOG.md).
 
 ## Контейнерный харденинг
 
@@ -190,7 +186,7 @@ npm run test:first-ofd # Первый ОФД: getToken 24ч, очередь IN_P
 npm run test:kontur-ofd # Контур.ОФД: Sid/API key, документы, пагинация, песочницы
 npm run test:taxcom    # Такском: Login/Integrator-ID, Session-Token 300s, AccountList/NewDocuments
 npm run check:links   # относительные ссылки markdown
-npm run check:drift   # 828 инвариантов protocols ↔ server.js ↔ OpenAPI
+npm run check:drift   # 827 инвариантов protocols ↔ server.js ↔ OpenAPI
 npm run test:docker   # image smoke (нужен docker): healthchecks, persist/restore при read-only rootfs
 npm run test:compose  # black-box selftest против compose (:3100–:3109)
 ```
@@ -204,7 +200,7 @@ CI гоняет то же на Node 20/22/24.
 Для публичного размещения: `MOCK_HOSTED=1`, `MOCK_OPERATOR_TOKEN`, `MOCK_ADMIN_TOKEN`,
 `MOCK_SANDBOX_TOKEN` (без него `default`-песочница отвечает 404), TLS и egress-фильтр.
 Токены не возвращаются в URL/HTML — после `POST /admin/login` HttpOnly-cookie.
-Песочницы изолированы по [RFC-001](docs/rfc/RFC-001-multi-tenant-sandboxes.md).
+Песочницы изолированы — см. [SECURITY.md](SECURITY.md), раздел «Изоляция песочниц».
 
 ## Участие
 
