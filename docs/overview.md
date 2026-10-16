@@ -74,7 +74,7 @@
 | **Манифесты протоколов** | `protocols/<provider>.json` | Декларация операций для детектора дрейфа (`npm run check:drift`) |
 | **Сервисы** | [`services/<provider>-mock/`](../services/tbank-mock/README.md) | Env-переменные, эндпоинты управления (`/mock/*`), сценарии, журнал |
 | **Ядро** | [`packages/core/`](../packages/core/README.md) | Общая инфраструктура адаптеров: ошибки, часы, песочницы, вебхуки |
-| **Проект** | [CONTRIBUTING](../CONTRIBUTING.md) · [SECURITY](../SECURITY.md) · [RFC-001](rfc/RFC-001-multi-tenant-sandboxes.md) | Правила вклада, модель угроз и требования к развёртыванию |
+| **Проект** | [CONTRIBUTING](../CONTRIBUTING.md) · [SECURITY](../SECURITY.md) | Правила вклада, модель угроз и требования к развёртыванию |
 
 Публичная документация самодостаточна: детали протоколов приведены со ссылками
 на официальную документацию провайдеров в гайдах и README сервисов.

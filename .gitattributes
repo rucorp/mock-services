@@ -1,0 +1,12 @@
+# Правила сборки релизного архива (`git archive`).
+#
+# Релизный артефакт = полный слепок репозитория МИНУС служебные файлы разработки:
+#   * scripts/* — CI/док-скрипты; в рантайм-образ идёт ровно один
+#     `scripts/docker-healthcheck.js` (его и оставляем в архиве);
+#   * docs/tables.md — служебный реестр таблиц (строит `check:tables`).
+# Правило введено решением владельца по составу продукта v2 (issue #141).
+# Порядок важен: позднее совпадение перекрывает раннее.
+
+scripts/* export-ignore
+scripts/docker-healthcheck.js -export-ignore
+docs/tables.md export-ignore
