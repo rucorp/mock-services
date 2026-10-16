@@ -2582,7 +2582,7 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
         : `Доступ к управляющему маршруту ${p} ограничен: требуется ${envName}`;
       return sendJson(res, err(13, message, `${surface}: ${access.reason}`, {
         field: surface === 'admin' ? 'Authorization' : 'X-Operator-Token',
-        hint: access.hint || `Передайте токен в заголовке Authorization: Bearer <${envName}> или X-Operator-Token/X-Admin-Token. Подробности — docs/rfc/RFC-001-multi-tenant-sandboxes.md.`,
+        hint: access.hint || `Передайте токен в заголовке Authorization: Bearer <${envName}> или X-Operator-Token/X-Admin-Token. Подробности — SECURITY.md, раздел «Изоляция песочниц».`,
       }), 401);
     }
   }
