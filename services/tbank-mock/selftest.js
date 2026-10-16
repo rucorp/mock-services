@@ -1277,6 +1277,10 @@ process.env.MOCK_RETRY_MS = '1000';
 
       const badToken = await request(childPort, 'GET', '/mock/state', undefined, { Authorization: 'Bearer nope' });
       assert.strictEqual(badToken.statusCode, 401, 'неверный токен -> 401');
+      // #147: подсказка 401 не должна ссылаться на удалённый docs/rfc/RFC-001-…,
+      // а вести на актуальный SECURITY.md §«Изоляция песочниц».
+      assert.ok(!String(badToken.body).includes('docs/rfc'), '401-подсказка не ссылается на удалённый RFC-документ');
+      assert.ok(String(badToken.body).includes('SECURITY.md'), '401-подсказка указывает на SECURITY.md (изоляция песочниц)');
 
       const opState = await request(childPort, 'GET', '/mock/state', undefined, { Authorization: 'Bearer op-secret' });
       assert.strictEqual(opState.statusCode, 200, 'operator-токен должен открывать /mock/state');
