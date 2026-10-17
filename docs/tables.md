@@ -43,8 +43,8 @@
 | 3 | [`AGENTS.md`](/AGENTS.md) | 149 | 9. Что читать перед работой | 2 | 4 | ✅ |
 | 4 | [`CONTRIBUTING.md`](/CONTRIBUTING.md) | 13 | Чем можно помочь | 2 | 5 | ✅ |
 | 5 | [`CONTRIBUTING.md`](/CONTRIBUTING.md) | 74 | Гайды интеграции: шаблон | 3 | 9 | ✅ |
-| 6 | [`README.md`](/README.md) | 34 | Документация | 2 | 8 | ✅ |
-| 7 | [`README.md`](/README.md) | 97 | Рецепты «за 10 минут» | 5 | 10 | ✅ |
+| 6 | [`README.md`](/README.md) | 36 | Документация | 2 | 8 | ✅ |
+| 7 | [`README.md`](/README.md) | 99 | Рецепты «за 10 минут» | 5 | 10 | ✅ |
 | 8 | [`SECURITY.md`](/SECURITY.md) | 20 | Что делать, если вы разворачиваете стенд | 2 | 4 | ✅ |
 | 9 | [`docs/hardening.md`](/docs/hardening.md) | 14 | Флаги | 3 | 6 | ✅ |
 | 10 | [`docs/integration/atol.md`](/docs/integration/atol.md) | 130 | 7. Что мок проверяет за вас | 2 | 13 | ✅ |
