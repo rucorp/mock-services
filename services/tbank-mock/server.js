@@ -2000,7 +2000,7 @@ function formPage(payment, errorMsg) {
       <label>Номер карты</label><input type="text" id="pan" name="pan" value="2201382000000013" required>
       <label>Срок (MMYY)</label><input type="text" id="exp" name="exp" value="1227" required>
       <label>CVV</label><input type="password" id="cvv" name="cvv" value="123" required>
-      <button type="submit">Оплатить ${(payment.amount / 100).toFixed(0)} ₽</button>
+      <button type="submit">Оплатить</button>
     </form>
     <form method="POST" action="/payment/${payment.paymentId}/reject${sfx}"><button type="submit" class="gray">Отклонить покупателем</button></form>`);
 }
