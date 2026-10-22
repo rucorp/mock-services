@@ -1310,7 +1310,7 @@ function formPage(order, errorMsg) {
       <label>Номер карты</label><input type="text" id="pan" name="pan" value="4111111111111111" required>
       <label>Срок (MMYY)</label><input type="text" id="exp" name="exp" value="1234" required>
       <label>CVV</label><input type="password" id="cvv" name="cvv" value="123" required>
-      <button type="submit">Оплатить ${esc(rub(order.amountK))}</button>
+      <button type="submit">Оплатить</button>
     </form>
     <div class="muted">Платежи проводятся только по тестовым картам из списка (документации Альфа-Банк). ACS-пароль <b>12345678</b>. Форма — мок: данные карт не покидают стенд и не хранятся (только маска first6**last4).</div>`);
 }

@@ -1232,7 +1232,7 @@ function formPage(payment, errorMsg) {
       <label>Номер карты</label><input type="text" id="pan" name="pan" value="5555555555554444" required>
       <label>Срок (MMYY)</label><input type="text" id="exp" name="exp" value="1229" required>
       <label>CVC/CVV</label><input type="password" id="cvv" name="cvv" value="123" required>
-      <button type="submit">Оплатить ${esc(payment.amount.value)} ₽</button>
+      <button type="submit">Оплатить</button>
     </form>
     <div class="muted">Платежи проводятся только по тестовым картам из списка. Форма — мок: данные карт не покидают стенд.</div>`);
 }
