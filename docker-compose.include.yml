@@ -20,7 +20,7 @@
 #   3. Никакие домены потребителя не зашиты: Caddy-лейблы и публичные URL задаются
 #      переменными окружения (по умолчанию пустые / localhost).
 #   4. Релиз закреплён дайджестом (F-37): `MOCK_IMAGE_DIGEST` по умолчанию —
-#      проверенный дайджест образа `ghcr.io/rucorp/mock-services:0.7.0`
+#      проверенный дайджест образа `ghcr.io/rucorp/mock-services:0.9.1`
 #      (reproducible deployment). Обновление — только контролируемым bump
 #      (см. «Обновление базового образа» в CONTRIBUTING.md); пустое значение
 #      `MOCK_IMAGE_DIGEST=` снимает pin (например, для своего образа/тега).
@@ -41,7 +41,7 @@
 
 services:
   tbank-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.7.0}${MOCK_IMAGE_DIGEST-@sha256:f877d3d9ebae35e36cda98573046aca5f85c0103b737856b94a04b5e45ab2484}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.9.1}${MOCK_IMAGE_DIGEST-@sha256:ba53312d8679a874197193ae4869129e2e72dfaba98e43d00298fa2a1b6c3a68}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/tbank-mock/server.js"]
@@ -104,7 +104,7 @@ services:
     restart: unless-stopped
 
   kassa-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.7.0}${MOCK_IMAGE_DIGEST-@sha256:f877d3d9ebae35e36cda98573046aca5f85c0103b737856b94a04b5e45ab2484}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.9.1}${MOCK_IMAGE_DIGEST-@sha256:ba53312d8679a874197193ae4869129e2e72dfaba98e43d00298fa2a1b6c3a68}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/kassa-mock/server.js"]
@@ -164,7 +164,7 @@ services:
     restart: unless-stopped
 
   yookassa-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.7.0}${MOCK_IMAGE_DIGEST-@sha256:f877d3d9ebae35e36cda98573046aca5f85c0103b737856b94a04b5e45ab2484}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.9.1}${MOCK_IMAGE_DIGEST-@sha256:ba53312d8679a874197193ae4869129e2e72dfaba98e43d00298fa2a1b6c3a68}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/yookassa-mock/server.js"]
@@ -222,7 +222,7 @@ services:
     restart: unless-stopped
 
   atol-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.7.0}${MOCK_IMAGE_DIGEST-@sha256:f877d3d9ebae35e36cda98573046aca5f85c0103b737856b94a04b5e45ab2484}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.9.1}${MOCK_IMAGE_DIGEST-@sha256:ba53312d8679a874197193ae4869129e2e72dfaba98e43d00298fa2a1b6c3a68}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/atol-mock/server.js"]
@@ -283,7 +283,7 @@ services:
     restart: unless-stopped
 
   alfa-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.7.0}${MOCK_IMAGE_DIGEST-@sha256:f877d3d9ebae35e36cda98573046aca5f85c0103b737856b94a04b5e45ab2484}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.9.1}${MOCK_IMAGE_DIGEST-@sha256:ba53312d8679a874197193ae4869129e2e72dfaba98e43d00298fa2a1b6c3a68}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/alfa-mock/server.js"]
@@ -351,7 +351,7 @@ services:
     restart: unless-stopped
 
   sber-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.7.0}${MOCK_IMAGE_DIGEST-@sha256:f877d3d9ebae35e36cda98573046aca5f85c0103b737856b94a04b5e45ab2484}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.9.1}${MOCK_IMAGE_DIGEST-@sha256:ba53312d8679a874197193ae4869129e2e72dfaba98e43d00298fa2a1b6c3a68}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/sber-mock/server.js"]
@@ -412,7 +412,7 @@ services:
     restart: unless-stopped
 
   vtb-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.7.0}${MOCK_IMAGE_DIGEST-@sha256:f877d3d9ebae35e36cda98573046aca5f85c0103b737856b94a04b5e45ab2484}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.9.1}${MOCK_IMAGE_DIGEST-@sha256:ba53312d8679a874197193ae4869129e2e72dfaba98e43d00298fa2a1b6c3a68}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/vtb-mock/server.js"]
@@ -474,7 +474,7 @@ services:
     restart: unless-stopped
 
   first-ofd-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.7.0}${MOCK_IMAGE_DIGEST-@sha256:f877d3d9ebae35e36cda98573046aca5f85c0103b737856b94a04b5e45ab2484}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.9.1}${MOCK_IMAGE_DIGEST-@sha256:ba53312d8679a874197193ae4869129e2e72dfaba98e43d00298fa2a1b6c3a68}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/first-ofd-mock/server.js"]
@@ -538,7 +538,7 @@ services:
     restart: unless-stopped
 
   kontur-ofd-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.7.0}${MOCK_IMAGE_DIGEST-@sha256:f877d3d9ebae35e36cda98573046aca5f85c0103b737856b94a04b5e45ab2484}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.9.1}${MOCK_IMAGE_DIGEST-@sha256:ba53312d8679a874197193ae4869129e2e72dfaba98e43d00298fa2a1b6c3a68}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/kontur-ofd-mock/server.js"]
@@ -594,7 +594,7 @@ services:
     restart: unless-stopped
 
   taxcom-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.7.0}${MOCK_IMAGE_DIGEST-@sha256:f877d3d9ebae35e36cda98573046aca5f85c0103b737856b94a04b5e45ab2484}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.9.1}${MOCK_IMAGE_DIGEST-@sha256:ba53312d8679a874197193ae4869129e2e72dfaba98e43d00298fa2a1b6c3a68}
     profiles: ["mock"]
     working_dir: /app
     command: ["node", "services/taxcom-mock/server.js"]

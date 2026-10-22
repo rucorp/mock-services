@@ -29,7 +29,7 @@
 
 services:
   tbank-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.7.0}${MOCK_STAGING_IMAGE_DIGEST-@sha256:f877d3d9ebae35e36cda98573046aca5f85c0103b737856b94a04b5e45ab2484}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.9.1}${MOCK_STAGING_IMAGE_DIGEST-@sha256:ba53312d8679a874197193ae4869129e2e72dfaba98e43d00298fa2a1b6c3a68}
     working_dir: /app
     command: ["node", "services/tbank-mock/server.js"]
     ports:
@@ -81,7 +81,7 @@ services:
     restart: unless-stopped
 
   kassa-mock:
-    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.7.0}${MOCK_STAGING_IMAGE_DIGEST-@sha256:f877d3d9ebae35e36cda98573046aca5f85c0103b737856b94a04b5e45ab2484}
+    image: ${MOCK_IMAGE:-ghcr.io/rucorp/mock-services}:${MOCK_IMAGE_TAG:-0.9.1}${MOCK_STAGING_IMAGE_DIGEST-@sha256:ba53312d8679a874197193ae4869129e2e72dfaba98e43d00298fa2a1b6c3a68}
     working_dir: /app
     command: ["node", "services/kassa-mock/server.js"]
     ports:
