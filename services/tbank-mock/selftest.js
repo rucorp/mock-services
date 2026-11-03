@@ -1697,8 +1697,13 @@ process.env.MOCK_RETRY_MS = '1000';
     await expectRejected('СБП меньше 10 ₽', { Amount: '500', OrderId: 'f17-sbp-tiny', DealId: dealId, Phone: '+79211234567', SbpMemberId: '100000000004' });
     await expectRejected('партнёр не зарегистрирован', { Amount: '1000', OrderId: 'f17-nopartner', DealId: dealId, PartnerId: 'NO-SUCH-SHOP' }, '8');
     await expectRejected('TerminalKey чужой', { Amount: '1000', OrderId: 'f17-term', DealId: dealId, CardId: 'c-1', TerminalKey: 'OTHER-TERMINAL' });
+    // Минимум суммы выплаты 100 коп. (протокол, таблица 2.3.1; код 251 -> провайдер-shaped 7)
+    await expectRejected('карта меньше 100 коп.', { Amount: '99', OrderId: 'f17-tiny', DealId: dealId, CardId: 'c-1' });
 
     // Позитивные по каждому реализованному каналу
+    const cardMin = JSON.parse((await e2c(mockPort, 'Init', { Amount: '100', OrderId: 'f17-min100', DealId: dealId, CardId: 'card-f17-min' })).body);
+    assert.strictEqual(cardMin.Success, true, `граница минимума 100 коп. принимается (${cardMin.ErrorCode}: ${cardMin.Message})`);
+
     const card = JSON.parse((await e2c(mockPort, 'Init', { Amount: '1000', OrderId: 'f17-card', DealId: dealId, CardId: 'card-f17' })).body);
     assert.strictEqual(card.Success, true, 'канал «привязанная карта» проходит');
     assert.strictEqual(state.payouts[card.PaymentId].recipientType, 'card');
