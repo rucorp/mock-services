@@ -981,6 +981,51 @@ process.env.MOCK_RETRY_MS = '1000';
     assert.strictEqual(closedCancel.Success, false);
     assert.strictEqual(closedCancel.ErrorCode, '32');
 
+    // B-1 (#162): success-path прямого closeSpDeal — сделка с остатком закрывается,
+    // остаток уходит в возмещение площадки (multisplit §8)
+    const directDeal = await fundedDeal(mockPort, 50000, 'order-direct-close');
+    const directInit = JSON.parse((await e2c(mockPort, 'Init', {
+      Amount: '20000', OrderId: 'payout-direct-close', DealId: directDeal, CardId: 'card-direct-close-1',
+    })).body);
+    const directPay = JSON.parse((await e2c(mockPort, 'Payment', { PaymentId: directInit.PaymentId })).body);
+    assert.strictEqual(directPay.Status, 'CONFIRMED');
+    const directClose = JSON.parse((await api(mockPort, 'closeSpDeal', { SpAccumulationId: directDeal })).body);
+    assert.strictEqual(directClose.Success, true, JSON.stringify(directClose));
+    assert.strictEqual(directClose.ErrorCode, '0');
+    assert.strictEqual(directClose.SpAccumulationId, directDeal);
+    assert.strictEqual(directClose.Status, 'CLOSED');
+    assert.strictEqual(directClose.PlatformReward, 30000, 'остаток сделки после выплат уходит в возмещение площадки');
+    assert.strictEqual(state.deals[directDeal].status, 'closed');
+
+    // B-2 (#162): повторный closeSpDeal — err 32, точный текст фиксируется ассертом:
+    // core распознаёт «уже закрыта» подстрокой Message
+    const reclose = JSON.parse((await api(mockPort, 'closeSpDeal', { SpAccumulationId: directDeal })).body);
+    assert.strictEqual(reclose.Success, false, 'повторный closeSpDeal отказывает');
+    assert.strictEqual(reclose.ErrorCode, '32');
+    assert.strictEqual(reclose.Message, `Сделка «${directDeal}» уже закрыта (повторное закрытие запрещено банком)`, 'точный текст повтора closeSpDeal (#162)');
+
+    // B-3 (#162): e2c Init выплаты по закрытой сделке — err 32
+    const closedPayoutInit = JSON.parse((await e2c(mockPort, 'Init', {
+      Amount: '10000', OrderId: 'payout-closed-deal', DealId: directDeal, CardId: 'card-closed-deal-1',
+    })).body);
+    assert.strictEqual(closedPayoutInit.Success, false);
+    assert.strictEqual(closedPayoutInit.ErrorCode, '32');
+    assert.ok(String(closedPayoutInit.Message).includes('закрыта'), `Init по закрытой сделке: ${closedPayoutInit.Message}`);
+
+    // B-4 (#162): сделка закрылась между Init и Payment — Payment отказывает без side effect
+    const raceDeal = await fundedDeal(mockPort, 40000, 'order-race-close');
+    const raceInit = JSON.parse((await e2c(mockPort, 'Init', {
+      Amount: '10000', OrderId: 'payout-race-close', DealId: raceDeal, CardId: 'card-race-close-1',
+    })).body);
+    assert.strictEqual(raceInit.Success, true);
+    const raceClose = JSON.parse((await api(mockPort, 'closeSpDeal', { SpAccumulationId: raceDeal })).body);
+    assert.strictEqual(raceClose.Success, true);
+    const racePay = JSON.parse((await e2c(mockPort, 'Payment', { PaymentId: raceInit.PaymentId })).body);
+    assert.strictEqual(racePay.Success, false);
+    assert.strictEqual(racePay.ErrorCode, '32');
+    assert.ok(String(racePay.Message).includes('закрыта'), `Payment по закрытой сделке: ${racePay.Message}`);
+    assert.strictEqual(state.payouts[raceInit.PaymentId].status, 'NEW', 'отказ Payment не меняет статус выплаты');
+
     // Список банков СБП
     const sbpMembers = JSON.parse((await e2c(mockPort, 'GetSbpMembers', {})).body);
     assert.strictEqual(sbpMembers.Success, true);
