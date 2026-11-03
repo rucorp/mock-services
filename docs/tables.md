@@ -92,11 +92,11 @@
 | 52 | [`services/taxcom-mock/README.md`](/services/taxcom-mock/README.md) | 83 | Env | 2 | 23 | ✅ |
 | 53 | [`services/taxcom-mock/README.md`](/services/taxcom-mock/README.md) | 136 | Байтовые квоты состояния | 3 | 2 | ✅ |
 | 54 | [`services/tbank-mock/README.md`](/services/tbank-mock/README.md) | 55 | API мока | 2 | 14 | ✅ |
-| 55 | [`services/tbank-mock/README.md`](/services/tbank-mock/README.md) | 139 | Песочницы и hosted tenancy (RFC-001) | 3 | 3 | ✅ |
-| 56 | [`services/tbank-mock/README.md`](/services/tbank-mock/README.md) | 148 | Песочницы и hosted tenancy (RFC-001) | 2 | 4 | ✅ |
-| 57 | [`services/tbank-mock/README.md`](/services/tbank-mock/README.md) | 166 | Тестовые карты (как у банка, oplata_multisplit.pdf §7) | 2 | 6 | ✅ |
-| 58 | [`services/tbank-mock/README.md`](/services/tbank-mock/README.md) | 177 | Конфиг (env) | 3 | 27 | ✅ |
-| 59 | [`services/tbank-mock/README.md`](/services/tbank-mock/README.md) | 223 | Байтовые квоты состояния | 3 | 2 | ✅ |
+| 55 | [`services/tbank-mock/README.md`](/services/tbank-mock/README.md) | 143 | Песочницы и hosted tenancy (RFC-001) | 3 | 3 | ✅ |
+| 56 | [`services/tbank-mock/README.md`](/services/tbank-mock/README.md) | 152 | Песочницы и hosted tenancy (RFC-001) | 2 | 4 | ✅ |
+| 57 | [`services/tbank-mock/README.md`](/services/tbank-mock/README.md) | 170 | Тестовые карты (как у банка, oplata_multisplit.pdf §7) | 2 | 6 | ✅ |
+| 58 | [`services/tbank-mock/README.md`](/services/tbank-mock/README.md) | 181 | Конфиг (env) | 3 | 27 | ✅ |
+| 59 | [`services/tbank-mock/README.md`](/services/tbank-mock/README.md) | 227 | Байтовые квоты состояния | 3 | 2 | ✅ |
 | 60 | [`services/vtb-mock/README.md`](/services/vtb-mock/README.md) | 29 | Поддерживаемый SMB-поток | 2 | 13 | ✅ |
 | 61 | [`services/vtb-mock/README.md`](/services/vtb-mock/README.md) | 122 | Переменные окружения | 3 | 24 | ✅ |
 | 62 | [`services/vtb-mock/README.md`](/services/vtb-mock/README.md) | 158 | Байтовые квоты состояния | 3 | 2 | ✅ |

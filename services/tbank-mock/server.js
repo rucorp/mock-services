@@ -399,6 +399,16 @@ function validatePayoutInitFields(body) {
     };
   }
   const amount = money.value;
+  // Минимум суммы выплаты — 100 коп. (протокол, таблица 2.3.1 параметров Init;
+  // код 251 «Неверная сумма…», мок отвечает провайдер-shaped 7 — см. [FORK] в README)
+  if (amount < 100) {
+    return {
+      error: err(7, `Неверная сумма. Сумма выплаты должна быть больше или равна 100 копеек (передано ${amount} коп.)`, null, {
+        field: 'Amount',
+        doc: PAYOUT_REF_DOC,
+      }),
+    };
+  }
   const orderId = textOrNull(body.OrderId);
   const dealId = textOrNull(body.DealId);
   const recipientId = textOrNull(body.PaymentRecipientId);
