@@ -400,11 +400,12 @@ function validatePayoutInitFields(body) {
   }
   const amount = money.value;
   // Минимум суммы выплаты — 100 коп. (протокол, таблица 2.3.1 параметров Init;
-  // код 251 «Неверная сумма…», мок отвечает провайдер-shaped 7 — см. [FORK] в README)
+  // код 251 «Неверная сумма…», таблица 6.1 — выровнен по протоколу, #164)
   if (amount < 100) {
     return {
-      error: err(7, `Неверная сумма. Сумма выплаты должна быть больше или равна 100 копеек (передано ${amount} коп.)`, null, {
+      error: err(251, null, `Amount=${amount}`, {
         field: 'Amount',
+        hint: `Минимум суммы выплаты — 100 копеек, канало-независимо (передано ${amount} коп.).`,
         doc: PAYOUT_REF_DOC,
       }),
     };
@@ -412,23 +413,39 @@ function validatePayoutInitFields(body) {
   const orderId = textOrNull(body.OrderId);
   const dealId = textOrNull(body.DealId);
   const recipientId = textOrNull(body.PaymentRecipientId);
-  const missing = [];
-  if (!orderId) missing.push('OrderId');
-  if (!dealId) missing.push('DealId');
-  if (!recipientId) missing.push('PaymentRecipientId');
-  if (missing.length) {
+  // Один ErrorCode за ответ; при пропуске нескольких полей приоритет — порядок
+  // обязательных полей табл. 2.3.1 протокола (OrderId → PaymentRecipientId → DealId).
+  // 935/936 — таблица 6.1 протокола; для OrderId кода в протоколе нет — provider-shaped 7.
+  if (!orderId) {
     return {
-      error: err(7, `Обязательные параметры не заполнены: ${missing.join(', ')}`, null, {
-        field: missing.join(', '),
+      error: err(7, 'Обязательные параметры не заполнены: OrderId', null, {
+        field: 'OrderId',
         doc: PAYOUT_REF_DOC,
         hint: 'Init выплаты требует TerminalKey, OrderId, Amount, DealId, PaymentRecipientId, подпись и ровно один канал выплаты (CardId/CardData, Phone+SbpMemberId или PartnerId).',
       }),
     };
   }
+  if (!recipientId) {
+    return {
+      error: err(935, null, null, {
+        field: 'PaymentRecipientId',
+        doc: PAYOUT_REF_DOC,
+      }),
+    };
+  }
+  if (!dealId) {
+    return {
+      error: err(936, null, null, {
+        field: 'DealId',
+        doc: PAYOUT_REF_DOC,
+      }),
+    };
+  }
   if (recipientId.length > 16) {
     return {
-      error: err(7, `PaymentRecipientId «${recipientId}» длиннее 16 символов`, null, {
+      error: err(938, null, `Length=${recipientId.length}, Max=16`, {
         field: 'PaymentRecipientId',
+        hint: `PaymentRecipientId «${recipientId}» длиннее 16 символов`,
         doc: PAYOUT_REF_DOC,
       }),
     };
@@ -508,8 +525,9 @@ function resolvePayoutChannel(body, amount) {
     }
     if (amount < 1000) {
       return {
-        error: err(7, `Минимальная сумма выплаты по СБП — 10 ₽ (1000 коп.), передано ${amount} коп.`, null, {
+        error: err(9151, null, `Amount=${amount}`, {
           field: 'Amount',
+          hint: `Минимальная сумма выплаты по СБП — 10 ₽ (1000 коп.), передано ${amount} коп.`,
           doc: PAYOUT_REF_DOC,
         }),
       };
@@ -629,6 +647,16 @@ const derr = core.createErrorCatalog({
     8: { message: 'Объект не найден', field: 'PaymentId | OrderId | DisputeId', hint: 'Платёж или спор не найден ни по PaymentId, ни по OrderId, ни по DisputeId. Платёжные сессии живут в состоянии стенда; после рестарта с пустым MOCK_STATE_FILE старые id недоступны.', doc: '/api/getstate' },
     13: { message: 'Неверный Token (подпись) запроса', field: 'Token', hint: 'Подпись = sha256(значения всех top-level скаляров кроме Token/null/\'\' + Password, отсортированные по ключу, в нижнем регистре для boolean). Сверьте с conspectus документации Т-Банка', doc: '/intro/to-api' },
     32: { message: 'Операция недоступна в текущем статусе', field: 'PaymentId | DisputeId', hint: 'Переход запрещён машиной состояний: Confirm — только из AUTHORIZED; Cancel — из NEW (CANCELED), AUTHORIZED (REVERSED/PARTIAL_REVERSED), CONFIRMED (REFUNDED/PARTIAL_REFUNDED); Chargeback — только из CONFIRMED/PARTIAL_REFUNDED по цепочке DISPUTED -> REPRESENTMENT -> ARBITRATION -> WON|LOST.', doc: '/api/confirm' },
+    // Выплаты: коды таблиц 6.1/6.2 протокола Мультирасчётов (vyplaty-multisplit.txt,
+    // выравнивание — #164). Message — дословно по протоколу, динамика — в Details/Hint.
+    '-921': { message: 'Невозможно осуществить выплату. Сумма выплаты превышает баланс сделки', field: 'Amount', hint: 'Баланс сделки = сумма подтверждённых приходов минус возвраты, чарджбэки и ранее проведённые выплаты. Для стадии Payment мок повторяет проверку — документированное расширение (#164).', doc: '/e2c' },
+    251: { message: 'Неверная сумма. Сумма должна быть больше или равна 100 копеек.', field: 'Amount', hint: 'Минимум суммы выплаты — 100 копеек, канало-независимо (таблица 2.3.1 параметров Init).', doc: '/e2c' },
+    926: { message: 'Сделка уже закрыта', field: 'DealId', hint: 'Выплаты и операции по закрытой сделке невозможны. Повторное закрытие closeSpDeal — банк-идемпотентность: потребители распознают его подстрокой «закрыт» в Message.', doc: '/e2c' },
+    927: { message: 'Сделка не найдена', field: 'DealId', hint: 'Проверьте DealId: сделка создаётся POST /v2/createSpDeal на этом стенде.', doc: '/e2c' },
+    935: { message: 'Идентификатор получателя должен быть передан в параметре PaymentRecipientId для сделки NN', field: 'PaymentRecipientId', doc: '/e2c' },
+    936: { message: 'Идентификатор сделки должен быть передан в параметре DealId для сделки NN', field: 'DealId', doc: '/e2c' },
+    938: { message: 'Превышен размер параметра PaymentRecipientId', field: 'PaymentRecipientId', hint: 'Максимум — 16 символов (таблица 2.3.1 протокола).', doc: '/e2c' },
+    9151: { message: 'Минимальная сумма 10 рублей', field: 'Amount', hint: 'Минимальная сумма выплаты по СБП — 10 ₽ (1000 коп., таблица 6.2 протокола).', doc: '/e2c' },
     501: { message: 'Метод не поддерживается мок-стендом', hint: 'Стенд реализует Init/Confirm/Cancel/GetState/CheckOrder/Chargeback/Dispute + e2c/AV.', doc: '' },
     500: { message: 'Сбой шлюза (сценарий мока)', field: 'X-Mock-Scenario', hint: 'Сценарий X-Mock-Scenario: http-500 имитирует 500 шлюза до банка: запрос не выполнен, побочных эффектов нет. Уберите сценарий и повторите.', doc: '' },
     504: { message: 'Таймаут шлюза (сценарий мока)', field: 'X-Mock-Scenario', hint: 'Сценарий X-Mock-Scenario: http-504 имитирует таймаут шлюза: запрос не выполнен, побочных эффектов нет. Для честной задержки используйте latency:<время>.', doc: '' },
@@ -1732,7 +1760,11 @@ function handleCloseSpDeal(body) {
   const deal = findDeal(dealId);
   if (!deal) return err(8, `Сделка «${dealId}» не найдена`, null, { field: 'SpAccumulationId' });
   if (deal.status === 'closed') {
-    return err(32, `Сделка «${dealId}» уже закрыта (повторное закрытие запрещено банком)`, null, { field: 'SpAccumulationId' });
+    // Повторное закрытие: §8 протокола кодов не задаёт — берём 926 «Сделка уже
+    // закрыта» из таблицы 6.1 выплат как документированное расширение (#164).
+    // Подстрока «закрыт» в Message — контракт потребителя (lovii-core deals:close
+    // распознаёт идемпотентность по Message).
+    return err(926, null, `SpAccumulationId=${dealId}`, { field: 'SpAccumulationId' });
   }
   const reward = dealBalance(deal);
   deal.status = 'closed';
@@ -3009,20 +3041,22 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
 
     const deal = findDeal(dealId);
     if (!deal) {
-      return sendJson(res, err(8, `Сделка DealId=«${dealId}» не найдена`, null, { field: 'DealId', doc: PAYOUT_REF_DOC }));
+      return sendJson(res, err(927, null, `DealId=${dealId}`, { field: 'DealId', doc: PAYOUT_REF_DOC }));
     }
     if (deal.status !== 'open') {
-      return sendJson(res, err(32, `Выплата по сделке «${dealId}» невозможна: сделка закрыта (status=${deal.status})`, null, { field: 'DealId', doc: PAYOUT_REF_DOC }));
+      // 926 «Сделка уже закрыта» (таблица 6.1, Init; Payment); подстрока «закрыт»
+      // в Message — контракт потребителя (lovii-core deals:close).
+      return sendJson(res, err(926, null, `DealId=${dealId}, Status=${deal.status}`, { field: 'DealId', doc: PAYOUT_REF_DOC }));
     }
     const available = dealBalance(deal);
     if (amount > available) {
       return sendJson(
         res,
         err(
-          32,
-          `Сумма выплаты ${amount} коп. превышает доступный остаток по сделке ${dealId} (${available} коп.)`,
+          '-921',
+          null,
           `Amount=${amount}, DealBalance=${available}`,
-          { field: 'Amount', hint: 'Баланс сделки = сумма подтверждённых приходов минус возвраты, чарджбэки и ранее проведённые выплаты.' },
+          { field: 'Amount', hint: `Сумма выплаты ${amount} коп. превышает доступный остаток по сделке ${dealId} (${available} коп.): баланс = подтверждённые приходы минус возвраты, чарджбэки и ранее проведённые выплаты.` },
         ),
       );
     }
@@ -3102,12 +3136,17 @@ async function routeRequest(req, res, url, p, raw, body, admission) {
     // Повторная проверка баланса сделки перед проведением выплаты
     if (payout.dealId) {
       const deal = findDeal(payout.dealId);
-      if (!deal || deal.status !== 'open') {
-        return sendJson(res, err(32, `Сделка ${payout.dealId} уже закрыта или не существует`));
+      if (!deal) {
+        return sendJson(res, err(927, null, `DealId=${payout.dealId}`, { field: 'DealId', doc: PAYOUT_REF_DOC }));
+      }
+      if (deal.status !== 'open') {
+        // 926 «Сделка уже закрыта» (Init; Payment) — подстрока «закрыт» сохранена (core-стык).
+        return sendJson(res, err(926, null, `DealId=${payout.dealId}, Status=${deal.status}`, { field: 'DealId', doc: PAYOUT_REF_DOC }));
       }
       const available = dealBalance(deal);
       if (payout.amount > available) {
-        return sendJson(res, err(32, `Недостаточно средств в сделке ${payout.dealId}: доступно ${available} коп., запрошено ${payout.amount} коп.`));
+        // Протокол задаёт -921 только для Init — на Payment это документированное расширение (#164).
+        return sendJson(res, err('-921', null, `Amount=${payout.amount}, DealBalance=${available}`, { field: 'Amount', hint: `Недостаточно средств в сделке ${payout.dealId}: доступно ${available} коп., запрошено ${payout.amount} коп.` }));
       }
     }
     pushPayoutStatus(payout, 'CONFIRMED');
