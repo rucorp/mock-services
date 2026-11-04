@@ -929,12 +929,13 @@ process.env.MOCK_RETRY_MS = '1000';
     await request(mockPort, 'POST', `/payment/${dealPayInit.PaymentId}/pay`, 'pan=2201382000000013&exp=1227&cvv=123', { 'Content-Type': 'application/x-www-form-urlencoded' });
     assert.strictEqual(state.payments[dealPayInit.PaymentId].status, 'CONFIRMED');
 
-    // Попытка выплаты больше баланса сделки (150000 > 100000) -> ErrorCode 32
+    // Попытка выплаты больше баланса сделки (150000 > 100000) -> ErrorCode -921 (таблица 6.1 протокола)
     const overPayout = JSON.parse((await e2c(mockPort, 'Init', {
       Amount: '150000', OrderId: 'payout-over', DealId: spDealId, CardId: 'card-over-1',
     })).body);
     assert.strictEqual(overPayout.Success, false);
-    assert.strictEqual(overPayout.ErrorCode, '32');
+    assert.strictEqual(overPayout.ErrorCode, '-921');
+    assert.ok(String(overPayout.Message).includes('превышает баланс сделки'), `Init сверх баланса: ${overPayout.Message}`);
 
     // Тестовая карта ошибки выплаты 5000000000000553 -> ErrorCode 1057 (канал «карта по данным»)
     const badCardInit = JSON.parse((await e2c(mockPort, 'Init', {
@@ -997,19 +998,21 @@ process.env.MOCK_RETRY_MS = '1000';
     assert.strictEqual(directClose.PlatformReward, 30000, 'остаток сделки после выплат уходит в возмещение площадки');
     assert.strictEqual(state.deals[directDeal].status, 'closed');
 
-    // B-2 (#162): повторный closeSpDeal — err 32, точный текст фиксируется ассертом:
-    // core распознаёт «уже закрыта» подстрокой Message
+    // B-2 (#162/#164): повторный closeSpDeal — err 926 «Сделка уже закрыта»
+    // (§8 протокола кодов не задаёт — документированное расширение #164);
+    // core распознаёт идемпотентность подстрокой «закрыт» в Message
     const reclose = JSON.parse((await api(mockPort, 'closeSpDeal', { SpAccumulationId: directDeal })).body);
     assert.strictEqual(reclose.Success, false, 'повторный closeSpDeal отказывает');
-    assert.strictEqual(reclose.ErrorCode, '32');
-    assert.strictEqual(reclose.Message, `Сделка «${directDeal}» уже закрыта (повторное закрытие запрещено банком)`, 'точный текст повтора closeSpDeal (#162)');
+    assert.strictEqual(reclose.ErrorCode, '926');
+    assert.strictEqual(reclose.Message, 'Сделка уже закрыта', 'точный текст повтора closeSpDeal (#164, дословно таблица 6.1)');
+    assert.strictEqual(reclose.Details.Details, `SpAccumulationId=${directDeal}`, 'id сделки уходит в Details (#164)');
 
-    // B-3 (#162): e2c Init выплаты по закрытой сделке — err 32
+    // B-3 (#162/#164): e2c Init выплаты по закрытой сделке — err 926
     const closedPayoutInit = JSON.parse((await e2c(mockPort, 'Init', {
       Amount: '10000', OrderId: 'payout-closed-deal', DealId: directDeal, CardId: 'card-closed-deal-1',
     })).body);
     assert.strictEqual(closedPayoutInit.Success, false);
-    assert.strictEqual(closedPayoutInit.ErrorCode, '32');
+    assert.strictEqual(closedPayoutInit.ErrorCode, '926');
     assert.ok(String(closedPayoutInit.Message).includes('закрыта'), `Init по закрытой сделке: ${closedPayoutInit.Message}`);
 
     // B-4 (#162): сделка закрылась между Init и Payment — Payment отказывает без side effect
@@ -1022,7 +1025,7 @@ process.env.MOCK_RETRY_MS = '1000';
     assert.strictEqual(raceClose.Success, true);
     const racePay = JSON.parse((await e2c(mockPort, 'Payment', { PaymentId: raceInit.PaymentId })).body);
     assert.strictEqual(racePay.Success, false);
-    assert.strictEqual(racePay.ErrorCode, '32');
+    assert.strictEqual(racePay.ErrorCode, '926');
     assert.ok(String(racePay.Message).includes('закрыта'), `Payment по закрытой сделке: ${racePay.Message}`);
     assert.strictEqual(state.payouts[raceInit.PaymentId].status, 'NEW', 'отказ Payment не меняет статус выплаты');
 
@@ -1675,30 +1678,37 @@ process.env.MOCK_RETRY_MS = '1000';
   {
     const dealId = await fundedDeal(mockPort, 300000, 'order-f17-fund');
     const payoutCount = () => Object.keys(state.payouts).length;
-    const expectRejected = async (label, body, code = '7') => {
+    const expectRejected = async (label, body, code = '7', messageSub = null) => {
       const before = payoutCount();
       const r = JSON.parse((await e2c(mockPort, 'Init', body)).body);
       assert.strictEqual(r.Success, false, `${label}: должен отклоняться`);
       assert.strictEqual(r.ErrorCode, code, `${label}: код ${code} (получено ${r.ErrorCode}: ${r.Message})`);
       assert.ok(r.Details && r.Details.Field, `${label}: provider-shaped ошибка с полем`);
+      if (messageSub !== null) {
+        assert.ok(String(r.Message).includes(messageSub), `${label}: Message содержит «${messageSub}» (получено: ${r.Message})`);
+      }
       assert.strictEqual(payoutCount(), before, `${label}: неполная выплата не сохраняется`);
       return r;
     };
-    await expectRejected('без DealId', { Amount: '1000', OrderId: 'f17-nodeal', CardId: 'c-1', DealId: undefined });
-    await expectRejected('без OrderId', { Amount: '1000', DealId: dealId, CardId: 'c-1', OrderId: undefined });
-    await expectRejected('без PaymentRecipientId', { Amount: '1000', OrderId: 'f17-norec', DealId: dealId, CardId: 'c-1', PaymentRecipientId: undefined });
-    await expectRejected('пустой PaymentRecipientId', { Amount: '1000', OrderId: 'f17-emptyrec', DealId: dealId, CardId: 'c-1', PaymentRecipientId: '' });
+    // Коды 935/936/938/927 — таблица 6.1 протокола выплат (выравнивание #164)
+    await expectRejected('без DealId', { Amount: '1000', OrderId: 'f17-nodeal', CardId: 'c-1', DealId: undefined }, '936', 'DealId');
+    await expectRejected('без OrderId', { Amount: '1000', DealId: dealId, CardId: 'c-1', OrderId: undefined }, '7', 'OrderId');
+    await expectRejected('без PaymentRecipientId', { Amount: '1000', OrderId: 'f17-norec', DealId: dealId, CardId: 'c-1', PaymentRecipientId: undefined }, '935', 'PaymentRecipientId');
+    await expectRejected('пустой PaymentRecipientId', { Amount: '1000', OrderId: 'f17-emptyrec', DealId: dealId, CardId: 'c-1', PaymentRecipientId: '' }, '935', 'PaymentRecipientId');
+    await expectRejected('PaymentRecipientId длиннее 16 символов', { Amount: '1000', OrderId: 'f17-longrec', DealId: dealId, CardId: 'c-1', PaymentRecipientId: 'r'.repeat(17) }, '938', 'PaymentRecipientId');
+    await expectRejected('сделка не существует', { Amount: '1000', OrderId: 'f17-nodeal2', DealId: 'NO-SUCH-DEAL', PaymentRecipientId: 'rec-f17', CardId: 'c-1' }, '927', 'не найдена');
     await expectRejected('без Amount', { OrderId: 'f17-noamount', DealId: dealId, CardId: 'c-1', Amount: undefined });
     await expectRejected('без канала выплаты', { Amount: '1000', OrderId: 'f17-nochannel', DealId: dealId });
     await expectRejected('два канала (CardId + PartnerId)', { Amount: '1000', OrderId: 'f17-two', DealId: dealId, CardId: 'c-1', PartnerId: '700001' });
     await expectRejected('СБП без SbpMemberId', { Amount: '1000', OrderId: 'f17-sbp-nomem', DealId: dealId, Phone: '+79211234567' });
     await expectRejected('СБП без Phone', { Amount: '1000', OrderId: 'f17-sbp-nophone', DealId: dealId, SbpMemberId: '100000000004' });
     await expectRejected('СБП некорректный Phone', { Amount: '1000', OrderId: 'f17-sbp-badphone', DealId: dealId, Phone: '+7921', SbpMemberId: '100000000004' });
-    await expectRejected('СБП меньше 10 ₽', { Amount: '500', OrderId: 'f17-sbp-tiny', DealId: dealId, Phone: '+79211234567', SbpMemberId: '100000000004' });
+    // 9151 — минимальная сумма выплаты по СБП (таблица 6.2 протокола)
+    await expectRejected('СБП меньше 10 ₽', { Amount: '500', OrderId: 'f17-sbp-tiny', DealId: dealId, Phone: '+79211234567', SbpMemberId: '100000000004' }, '9151', 'Минимальная сумма');
     await expectRejected('партнёр не зарегистрирован', { Amount: '1000', OrderId: 'f17-nopartner', DealId: dealId, PartnerId: 'NO-SUCH-SHOP' }, '8');
     await expectRejected('TerminalKey чужой', { Amount: '1000', OrderId: 'f17-term', DealId: dealId, CardId: 'c-1', TerminalKey: 'OTHER-TERMINAL' });
-    // Минимум суммы выплаты 100 коп. (протокол, таблица 2.3.1; код 251 -> провайдер-shaped 7)
-    await expectRejected('карта меньше 100 коп.', { Amount: '99', OrderId: 'f17-tiny', DealId: dealId, CardId: 'c-1' });
+    // 251 — минимум суммы выплаты 100 коп. (протокол, таблицы 2.3.1 и 6.1)
+    await expectRejected('карта меньше 100 коп.', { Amount: '99', OrderId: 'f17-tiny', DealId: dealId, CardId: 'c-1' }, '251', 'Неверная сумма');
 
     // Позитивные по каждому реализованному каналу
     const cardMin = JSON.parse((await e2c(mockPort, 'Init', { Amount: '100', OrderId: 'f17-min100', DealId: dealId, CardId: 'card-f17-min' })).body);
