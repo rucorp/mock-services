@@ -152,6 +152,7 @@ README сервиса, тремя compose-файлами и `SECURITY.md`, а т
 | безопасность/hosted | [`SECURITY.md`](SECURITY.md) (модель угроз, §«Изоляция песочниц»), [`packages/core/README.md`](packages/core/README.md) |
 | протокол провайдера | официальная документация провайдера (URL + дата сверки), `protocols/<provider>.json`, `docs/integration/<provider>.md`, README сервиса |
 | очередь доработок | GitHub Issues этого репозитория |
+| процесс агентов (задача, поставка, ревью, гейты) | [`docs/AGENT_RULES.md`](docs/AGENT_RULES.md) (исполнитель), [`docs/COORDINATOR_RULES.md`](docs/COORDINATOR_RULES.md) (координатор), [`docs/decisions/2026-11-06-ADR-0001-canon-adoption.md`](docs/decisions/2026-11-06-ADR-0001-canon-adoption.md) |
 
 Публичная часть репозитория самодостаточна: для работы достаточно README,
 гайдов «за 10 минут», README сервисов и SECURITY. Документы вне
